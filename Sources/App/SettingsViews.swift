@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
   @EnvironmentObject private var settings: AppSettings
   @ObservedObject private var account = TwitchAccount.shared
+  @ObservedObject private var notifier = LiveNotifier.shared
   @State private var imageCacheCleared = false
   @State private var showLogin = false
   @State private var confirmSignOut = false
@@ -50,6 +51,21 @@ struct SettingsView: View {
         Text("Streams always start at the highest quality. Quality and video stats are in the player's gear menu.")
       }
 
+      Section {
+        Toggle("Go-live alerts", isOn: Binding(get: { notifier.enabled }, set: { on in Task { await notifier.setEnabled(on) } }))
+        if notifier.permission == .denied {
+          Button("Allow notifications in iOS Settings") {
+            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+          }
+        }
+      } header: {
+        Text("Notifications")
+      } footer: {
+        Text(
+          "A notification when a channel you follow goes live (your Twitch follows and the channels you heart); tap it to watch. Kestrel checks every minute while it's open or playing. Once it's closed, iOS decides when it may check (often every 15–30 minutes, less if you rarely open Kestrel), so alerts can come later. Keep Background App Refresh on for Kestrel."
+        )
+      }
+
       Section("Chat") {
         Stepper(value: $settings.chatFontSize, in: 12...22, step: 1) {
           LabeledContent("Text size", value: "\(Int(settings.chatFontSize)) pt")
@@ -66,7 +82,9 @@ struct SettingsView: View {
       } footer: {
         Text("Kestrel \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
       }
+      Section { MiniPlayerSpacer() }
     }
+    .environment(\.defaultMinListRowHeight, 1)
     .navigationTitle("Settings")
     .sheet(isPresented: $showLogin) { TwitchLoginView() }
     .confirmationDialog("Sign out of Twitch?", isPresented: $confirmSignOut, titleVisibility: .visible) {

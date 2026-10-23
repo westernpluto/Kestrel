@@ -76,6 +76,7 @@ struct FeedList<Content: View>: View {
   var body: some View {
     List {
       content()
+      MiniPlayerSpacer()
     }
     .listStyle(.plain)
     .environment(\.defaultMinListRowHeight, 1)
@@ -107,17 +108,18 @@ struct LiveBadge: View {
 }
 
 /// A live stream as a compact row, like Twitch's lists: the picture on the left, who and what on
-/// the right, with the stream's tags.
+/// the right, with the stream's tags. The whole row is one tile that opens the stream (hold it for
+/// the channel or category).
 struct StreamRow: View {
   let stream: LiveStream
   var showCategory = true
   @EnvironmentObject private var app: AppModel
 
   var body: some View {
-    HStack(alignment: .top, spacing: 12) {
-      Button {
-        app.playing = .live(stream.channel)
-      } label: {
+    Button {
+      app.playing = .live(stream.channel)
+    } label: {
+      HStack(alignment: .top, spacing: 12) {
         RemoteImage(url: TwitchAPI.image(stream.previewImageURL, width: 440, height: 248))
           .aspectRatio(16 / 9, contentMode: .fit)
           .frame(width: 156)
@@ -138,52 +140,35 @@ struct StreamRow: View {
             .padding(5)
           }
           .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-      }
-      .buttonStyle(PressableStyle(scale: 0.97))
 
-      VStack(alignment: .leading, spacing: 3) {
-        Button {
-          app.push(stream.channel)
-        } label: {
+        VStack(alignment: .leading, spacing: 3) {
           HStack(spacing: 6) {
             Avatar(url: stream.channel.profileImageURL, size: 20)
-            Text(stream.channel.name).font(.subheadline.weight(.semibold)).lineLimit(1)
+            Text(stream.channel.name).font(.subheadline.weight(.semibold)).foregroundColor(.primary).lineLimit(1)
           }
-          .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        Button {
-          app.playing = .live(stream.channel)
-        } label: {
           Text(stream.title.isEmpty ? stream.channel.name : stream.title)
             .font(.footnote).foregroundColor(.secondary).lineLimit(2)
             .multilineTextAlignment(.leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        if showCategory, let category = stream.category {
-          Button {
-            app.push(category)
-          } label: {
+          if showCategory, let category = stream.category {
             Text(category.name).font(.footnote).foregroundColor(.accentTeal).lineLimit(1)
           }
-          .buttonStyle(.plain)
-        }
-        if !stream.tags.isEmpty {
-          ChipRow(spacing: 4) {
-            ForEach(stream.tags, id: \.self) { TagChip(text: $0) }
+          if !stream.tags.isEmpty {
+            ChipRow(spacing: 4) {
+              ForEach(stream.tags, id: \.self) { TagChip(text: $0) }
+            }
+            .padding(.top, 2)
           }
-          .padding(.top, 2)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
       }
-      .frame(maxWidth: .infinity, alignment: .leading)
+      .contentShape(Rectangle())
     }
+    .buttonStyle(PressableStyle(scale: 0.98))
     .contextMenu {
       Button { app.playing = .live(stream.channel) } label: { Label("Watch", systemImage: "play.fill") }
-      Button { app.push(stream.channel) } label: { Label("Open channel", systemImage: "person.crop.circle") }
+      Button { app.push(.channel(stream.channel)) } label: { Label("Open channel", systemImage: "person.crop.circle") }
       if let category = stream.category {
-        Button { app.push(category) } label: { Label(category.name, systemImage: "square.grid.2x2") }
+        Button { app.push(.category(category)) } label: { Label(category.name, systemImage: "square.grid.2x2") }
       }
     }
   }
@@ -230,16 +215,16 @@ struct ChipRow: Layout {
   }
 }
 
+/// The channel page's "Live now": one tile (picture and text) that opens the stream.
 struct StreamCard: View {
   let stream: LiveStream
-  var showCategory = true
   @EnvironmentObject private var app: AppModel
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      Button {
-        app.playing = .live(stream.channel)
-      } label: {
+    Button {
+      app.playing = .live(stream.channel)
+    } label: {
+      VStack(alignment: .leading, spacing: 8) {
         RemoteImage(url: TwitchAPI.image(stream.previewImageURL, width: 640, height: 360))
           .aspectRatio(16 / 9, contentMode: .fit)
           .overlay(alignment: .topLeading) { LiveBadge(viewers: stream.viewers).padding(8) }
@@ -249,28 +234,28 @@ struct StreamCard: View {
                 .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 4)).foregroundColor(.white).padding(8)
             }
           }
+          .overlay {
+            Image(systemName: "play.fill").font(.system(size: 30, weight: .bold)).foregroundColor(.white)
+              .shadow(color: .black.opacity(0.6), radius: 6)
+          }
           .clipShape(RoundedRectangle(cornerRadius: 10))
-      }
-      .buttonStyle(.plain)
-
-      VStack(alignment: .leading, spacing: 4) {
-        Text(stream.title.isEmpty ? stream.channel.name : stream.title)
-          .font(.subheadline.weight(.semibold)).lineLimit(2)
-        if showCategory, let category = stream.category {
-          Button {
-            app.push(category)
-          } label: {
+        VStack(alignment: .leading, spacing: 4) {
+          Text(stream.title.isEmpty ? stream.channel.name : stream.title)
+            .font(.subheadline.weight(.semibold)).foregroundColor(.primary).lineLimit(2)
+            .multilineTextAlignment(.leading)
+          if let category = stream.category {
             Text(category.name).font(.footnote).foregroundColor(.accentTeal)
           }
-          .buttonStyle(.plain)
-        }
-        if !stream.tags.isEmpty {
-          ChipRow(spacing: 4) {
-            ForEach(stream.tags, id: \.self) { TagChip(text: $0) }
+          if !stream.tags.isEmpty {
+            ChipRow(spacing: 4) {
+              ForEach(stream.tags, id: \.self) { TagChip(text: $0) }
+            }
           }
         }
       }
+      .contentShape(Rectangle())
     }
+    .buttonStyle(PressableStyle(scale: 0.98))
   }
 }
 
@@ -347,8 +332,12 @@ struct EmptyState: View {
 struct AppDestinations: ViewModifier {
   func body(content: Content) -> some View {
     content
-      .navigationDestination(for: Channel.self) { ChannelView(channel: $0).miniPlayerRoom() }
-      .navigationDestination(for: Category.self) { CategoryView(category: $0).miniPlayerRoom() }
+      .navigationDestination(for: Route.self) { route in
+        switch route {
+        case .channel(let channel): ChannelView(channel: channel).miniPlayerRoom()
+        case .category(let category): CategoryView(category: category).miniPlayerRoom()
+        }
+      }
   }
 }
 

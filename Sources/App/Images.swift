@@ -168,8 +168,22 @@ final class ImagePipeline: @unchecked Sendable {
   }
 }
 
-/// UIImageView-backed image for SwiftUI (so animated images play).
-struct CachedImage: UIViewRepresentable {
+/// UIImageView-backed image for SwiftUI (so animated images play). It never takes touches: a
+/// picture inside a button used to swallow the tap, so only the badges on it opened anything.
+struct CachedImage: View {
+  let url: URL?
+  var maxPixels: CGFloat? = nil
+  var fallback: URL? = nil
+  var contentMode: UIView.ContentMode = .scaleAspectFill
+  var placeholder: UIColor? = UIColor(white: 0.14, alpha: 1)
+
+  var body: some View {
+    CachedImageView(url: url, maxPixels: maxPixels, fallback: fallback, contentMode: contentMode, placeholder: placeholder)
+      .allowsHitTesting(false)
+  }
+}
+
+struct CachedImageView: UIViewRepresentable {
   let url: URL?
   var maxPixels: CGFloat? = nil
   var fallback: URL? = nil
@@ -178,6 +192,7 @@ struct CachedImage: UIViewRepresentable {
 
   func makeUIView(context: Context) -> LoadingImageView {
     let view = LoadingImageView()
+    view.isUserInteractionEnabled = false
     view.contentMode = contentMode
     view.clipsToBounds = true
     view.backgroundColor = placeholder

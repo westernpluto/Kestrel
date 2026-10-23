@@ -7,6 +7,7 @@ struct KestrelApp: App {
   @StateObject private var app = AppModel.shared
   @StateObject private var favorites = FavoritesStore.shared
   @StateObject private var settings = AppSettings.shared
+  @Environment(\.scenePhase) private var scenePhase
 
   init() {
     signal(SIGPIPE, SIG_IGN)
@@ -22,6 +23,13 @@ struct KestrelApp: App {
         .environmentObject(settings)
         .preferredColorScheme(.dark)
         .tint(.accentTeal)
+    }
+    .onChange(of: scenePhase) { phase in
+      switch phase {
+      case .active: LiveNotifier.shared.appBecameActive()
+      case .background: LiveNotifier.shared.appEnteredBackground()
+      default: break
+      }
     }
   }
 }
@@ -71,19 +79,31 @@ struct RootView: View {
   }
 }
 
-/// Leaves room under scrolling content for the mini player (and measures the tab bar, so the
-/// mini player sits just above it).
+/// Measures the tab bar, so the mini player sits just above it. (Room for the mini player under
+/// lists is a spacer row at their end: shrinking the screen's safe area for it left a black
+/// block above the tab bar, and flickered as the player shrank.)
 struct MiniPlayerRoom: ViewModifier {
   @EnvironmentObject private var app: AppModel
 
   func body(content: Content) -> some View {
     content
-      .safeAreaInset(edge: .bottom, spacing: 0) {
-        Color.clear.frame(height: app.playing != nil && app.playerMinimized ? PlayerLayout.miniInset : 0)
-      }
       .background(TabBarProbe { height in
         if abs(app.tabBarHeight - height) > 0.5 { app.tabBarHeight = height }
       })
+  }
+}
+
+/// The last row of a list: room to scroll its end out from under the mini player.
+struct MiniPlayerSpacer: View {
+  @EnvironmentObject private var app: AppModel
+
+  var body: some View {
+    Color.clear
+      .frame(height: app.playing != nil && app.playerMinimized ? PlayerLayout.miniInset : 1)
+      .listRowInsets(EdgeInsets())
+      .listRowSeparator(.hidden)
+      .listRowBackground(Color.clear)
+      .accessibilityHidden(true)
   }
 }
 
@@ -148,6 +168,12 @@ extension View {
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
+  func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+    // Go-live alerts: background checks and taps on the notifications.
+    LiveNotifier.register()
+    return true
+  }
+
   func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
     OrientationLock.mask
   }

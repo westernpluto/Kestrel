@@ -395,7 +395,10 @@ struct PlayerControls: View {
           model.refreshStoryboardIfStale()
           model.prepareRewind()
         },
-        onScrub: { _ in interacted(4) },
+        onScrub: { time in
+          interacted(4)
+          model.scrubRewind(to: time)
+        },
         onCommit: {
           scrubbing = false
           model.seekBroadcast(to: $0)

@@ -212,6 +212,20 @@ enum AppTab: Hashable {
   case following, browse, search, settings
 }
 
+/// A page in a section's navigation stack.
+enum Route: Hashable {
+  case channel(Channel)
+  case category(Category)
+
+  /// Same page, even if the channel's details changed since.
+  var key: String {
+    switch self {
+    case .channel(let channel): return "channel-" + channel.id
+    case .category(let category): return "category-" + category.id
+    }
+  }
+}
+
 final class AppModel: ObservableObject {
   static let shared = AppModel()
   /// What's playing. Setting it (even to what's already in the mini player) opens the player.
@@ -222,9 +236,9 @@ final class AppModel: ObservableObject {
   @Published var playerMinimized = false
   @Published var tab: AppTab = .following
   // Each section's pages (so the player can open a channel page in the one you're in).
-  @Published var followingPath = NavigationPath()
-  @Published var browsePath = NavigationPath()
-  @Published var searchPath = NavigationPath()
+  @Published var followingPath: [Route] = []
+  @Published var browsePath: [Route] = []
+  @Published var searchPath: [Route] = []
   /// Height the tab bar takes up from the bottom of the screen (measured: it differs between
   /// iOS versions; the floating glass bar of iOS 26 is taller).
   @Published var tabBarHeight: CGFloat = 49
@@ -233,15 +247,23 @@ final class AppModel: ObservableObject {
   func openChannel(_ channel: Channel) {
     playerMinimized = true
     if tab == .settings { tab = .following }
-    push(channel)
+    push(.channel(channel))
   }
 
-  /// Opens a page (a channel, a category) in the current section.
-  func push<Value: Hashable>(_ value: Value) {
+  /// Opens a page in the current section. A page that's already open there is gone back to,
+  /// never stacked a second time.
+  func push(_ route: Route) {
+    func apply(_ path: inout [Route]) {
+      if let index = path.firstIndex(where: { $0.key == route.key }) {
+        if index + 1 < path.count { path.removeSubrange((index + 1)...) }
+      } else {
+        path.append(route)
+      }
+    }
     switch tab {
-    case .following: followingPath.append(value)
-    case .browse: browsePath.append(value)
-    case .search, .settings: searchPath.append(value)
+    case .following: apply(&followingPath)
+    case .browse: apply(&browsePath)
+    case .search, .settings: apply(&searchPath)
     }
   }
 }

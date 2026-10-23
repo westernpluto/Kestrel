@@ -53,6 +53,7 @@
     private var renderedFPS: Double?
     /// Paused while the viewer rewinds through the VOD.
     private var suspended = false
+    private var suspendedAt: Date?
 
     /// Quality-menu IDs at or above this pick a rendition for the Apple player.
     static let applePlayerQualityBase = 1000
@@ -412,16 +413,25 @@
     /// The viewer is watching the VOD (rewinding): stop the live stream for now.
     func suspend() {
       suspended = true
+      suspendedAt = Date()
       loadTask?.cancel()
       player.pause()
       model?.coveringAd = false
     }
 
-    /// Back from rewinding: live again at the live edge.
+    /// Back from rewinding: live again at the live edge. After a short rewind it reloads the
+    /// same playlists (no new token or ad-free server round trip), which is much quicker.
     func resumeLive() {
       suspended = false
       isPaused = false
-      load()
+      if let localURL, let since = suspendedAt, Date().timeIntervalSince(since) < 300 {
+        lastReload = Date()
+        bufferingSince = nil
+        player.load(localURL)
+      } else {
+        load()
+      }
+      suspendedAt = nil
     }
 
     /// Twitch's low-latency mode on or off (takes a quick reload).

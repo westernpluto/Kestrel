@@ -64,6 +64,11 @@ final class PlayerModel: ObservableObject {
   @Published private(set) var rewindLinger = false
   private var lingerSince: Date?
   private var rewindSeeking = false
+  /// The VOD stays loaded (paused, out of sight) for a while after going back to live, and is
+  /// loaded as soon as the seek bar is touched, so going back in time only has to seek.
+  private var rewindIdleSince: Date?
+  private var scrubTarget: Double?
+  private var scrubSeeking = false
   /// A seek in a VOD is under way (playback state isn't read from the player meanwhile).
   private var seeking = false
   weak var rewindPictureInPicture: AVPictureInPictureController? {
@@ -126,6 +131,11 @@ final class PlayerModel: ObservableObject {
   /// Playing straight from Twitch for one of those, for this stream only (ads possible).
   private(set) var forceDirect = false
   private var checkedDirect = false
+  /// What the ad-free server's copy goes up to (its best rendition's height), and the renditions
+  /// only Twitch itself had: to offer the way back.
+  private var adFreeBestHeight = 0
+  private var directOffer: [HLSVariant] = []
+  private var engineBeforeDirect: PlayerEngine?
   static let directQualityBase = 2000
   /// False once the user picked a player by hand: don't switch players behind their back.
   private(set) var mayAutoSwitchPlayer = true
@@ -357,7 +367,7 @@ final class PlayerModel: ObservableObject {
       return
     }
     seeking = true
-    player.seek(to: CMTime(seconds: start, preferredTimescale: 600), toleranceBefore: Self.seekTolerance, toleranceAfter: Self.seekTolerance) {
+    player.seek(to: CMTime(seconds: start, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: Self.seekTolerance) {
       [weak self] _ in
       Task { @MainActor in
         guard let model = self else { return }
@@ -368,8 +378,9 @@ final class PlayerModel: ObservableObject {
     }
   }
 
-  /// Landing on the nearest keyframe is quicker than an exact frame and nobody can tell.
-  static let seekTolerance = CMTime(seconds: 1, preferredTimescale: 600)
+  /// Seeks land on the first keyframe at or after the target (Twitch puts one every 2 s): quicker
+  /// than an exact frame, and never before the target, so the seek bar doesn't jump back.
+  static let seekTolerance = CMTime(seconds: 2, preferredTimescale: 600)
 
   /// The rendition the Apple player is on (nil = Auto).
   private var currentVariant: HLSVariant? {
@@ -411,6 +422,14 @@ final class PlayerModel: ObservableObject {
   /// The quality menu: the live stream's, or the VOD's while rewinding.
   var menuQualities: [Quality] {
     if isRewinding { return rewindVariants.enumerated().map { Quality(id: $0.offset, label: $0.element.label) } }
+    if forceDirect {
+      // Playing straight from Twitch for a better quality: the ones the ad-free server also has
+      // say so, and picking one goes back to it.
+      return qualities.map { quality in
+        guard quality.id == nil || adFreeHas(quality.label) else { return quality }
+        return Quality(id: quality.id, label: "\(quality.label) · ad-free")
+      }
+    }
     guard !directOnly.isEmpty else { return qualities }
     var list = qualities
     let extra = directOnly.enumerated().map {
@@ -445,6 +464,8 @@ final class PlayerModel: ObservableObject {
       let best = served.filter { !$0.isAudioOnly }.map(\.height).max() ?? 0
       let better = HLSMaster.parse(text, base: response.url ?? url).videoVariants.filter { $0.height > best }
       guard let model = self, !model.stopped, !better.isEmpty else { return }
+      model.adFreeBestHeight = best
+      model.directOffer = better
       model.directOnly = better
       ActivityLog.shared.add(
         "Twitch itself offers \(better.map(\.label).joined(separator: ", ")), which the ad-free server's copy doesn't: it's in the quality menu (plays without the ad-free server)")
@@ -458,6 +479,29 @@ final class PlayerModel: ObservableObject {
     forceDirect = true
     directOnly = []
     preferredQualityLabel = variant.label
+    engineBeforeDirect = engine
+    teardownPlayback()
+    phase = .loading
+    Task { await start() }
+  }
+
+  /// Whether the ad-free server's copy has this quality ("1080p60", "Audio only").
+  private func adFreeHas(_ label: String) -> Bool {
+    let digits = label.prefix { $0.isNumber }
+    guard let height = Int(digits) else { return true }
+    return height <= adFreeBestHeight
+  }
+
+  /// Back from playing straight from Twitch to the ad-free server (no ads), at `label`.
+  private func returnToAdFree(label: String?) {
+    guard case .live = target, !stopped else { return }
+    ActivityLog.shared.add("Back to the ad-free server" + (label.map { " at \($0)" } ?? ""))
+    forceDirect = false
+    directOnly = directOffer
+    preferredQualityLabel = label
+    // The Apple player may have taken over for the better quality: back to the usual player.
+    if let previous = engineBeforeDirect { engine = previous }
+    engineBeforeDirect = nil
     teardownPlayback()
     phase = .loading
     Task { await start() }
@@ -476,6 +520,13 @@ final class PlayerModel: ObservableObject {
       let offset = id - Self.directQualityBase
       if offset < directOnly.count { playDirect(directOnly[offset]) }
       return
+    }
+    if forceDirect, quality.id != selectedQuality {
+      let label = qualities.first { $0.id == quality.id }?.label
+      if quality.id == nil || label.map(adFreeHas) == true {
+        returnToAdFree(label: quality.id == nil ? nil : label)
+        return
+      }
     }
     guard quality.id != selectedQuality else { return }
     #if canImport(AmazonIVSPlayer)
@@ -628,7 +679,7 @@ final class PlayerModel: ObservableObject {
     position = seconds
     resumedAt = nil
     seeking = true
-    player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: Self.seekTolerance, toleranceAfter: Self.seekTolerance) {
+    player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: Self.seekTolerance) {
       [weak self] _ in
       Task { @MainActor in
         guard let model = self else { return }
@@ -689,6 +740,7 @@ final class PlayerModel: ObservableObject {
   }
 
   func stop() {
+    guard !stopped else { return }
     if case .video(let video) = target, position > 0, phase == .playing {
       WatchHistory.shared.save(videoID: video.id, position: position, length: duration, syncToTwitch: true)
     }
@@ -755,9 +807,16 @@ final class PlayerModel: ObservableObject {
     }
     if rewindLinger, let since = lingerSince {
       // Live is playing again (or it's taking too long): let the VOD's picture go.
-      if (!isBuffering && phase == .playing && now.timeIntervalSince(since) > 0.4) || now.timeIntervalSince(since) > 5 {
-        withAnimation(.easeInOut(duration: 0.25)) { endRewindLinger() }
+      if (!isBuffering && phase == .playing && now.timeIntervalSince(since) > 0.3) || now.timeIntervalSince(since) > 5 {
+        withAnimation(.easeInOut(duration: 0.2)) { endRewindLinger() }
       }
+    } else if rewindPlayer.currentItem != nil, !scrubSeeking, scrubTarget == nil, let idle = rewindIdleSince,
+      now.timeIntervalSince(idle) > 180
+    {
+      // Not gone back in time for a while: let the VOD go.
+      rewindIdleSince = nil
+      rewindItemObservation = nil
+      rewindPlayer.replaceCurrentItem(with: nil)
     }
     let wantsStats = AppSettings.shared.showVideoStats
     if !wantsStats, !stats.isEmpty { stats = [] }
@@ -781,7 +840,8 @@ final class PlayerModel: ObservableObject {
       let seconds = item.duration.seconds
       if seconds.isFinite, seconds > 0, abs(seconds - duration) > 0.5 { duration = seconds }
       let current = player.currentTime().seconds
-      if current.isFinite, pendingStart == nil { position = current }
+      // Held at the target while a seek is under way (the player still reports the old spot).
+      if current.isFinite, pendingStart == nil, !seeking { position = current }
       // Still recording: it was loaded as what's been recorded so far; near the end, load it
       // again to get what's been recorded since.
       if vodIsRecording, duration > 0, position > duration - 30, pendingStart == nil,
@@ -791,7 +851,7 @@ final class PlayerModel: ObservableObject {
         ActivityLog.shared.add("The VOD is still recording: loading what's been recorded since")
         play(StreamProxy.shared.mediaURL(for: vodSource, index: selectedQuality ?? 0), startAt: position)
       }
-      watchForStall(player, position: position, pending: pendingStart != nil)
+      watchForStall(player, position: position, pending: pendingStart != nil || seeking)
       if case .video(let video) = target, player.timeControlStatus == .playing, position > 0 {
         if now.timeIntervalSince(lastSavedPosition) > 15 {
           lastSavedPosition = now
@@ -892,6 +952,7 @@ final class PlayerModel: ObservableObject {
   /// Seeks within the broadcast: the VOD while behind, the live stream at the end.
   func seekBroadcast(to seconds: Double) {
     guard rewind != nil else { return }
+    scrubTarget = nil
     if seconds >= broadcastElapsed - 20 {
       returnToLive()
       return
@@ -899,11 +960,13 @@ final class PlayerModel: ObservableObject {
     let target = max(0, seconds)
     rewindPosition = target
     stall = nil
-    if isRewinding, let item = rewindPlayer.currentItem, item.status == .readyToPlay,
+    // The VOD is already loaded (rewinding, or loaded while the bar was held): just seek in it.
+    if let item = rewindPlayer.currentItem, item.status == .readyToPlay,
       item.duration.seconds.isFinite, target < item.duration.seconds - 10
     {
+      if !isRewinding { enterRewind() }
       rewindSeeking = true
-      rewindPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: Self.seekTolerance, toleranceAfter: Self.seekTolerance) {
+      rewindPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: Self.seekTolerance) {
         [weak self] _ in
         Task { @MainActor in
           guard let model = self, model.isRewinding else { return }
@@ -913,15 +976,69 @@ final class PlayerModel: ObservableObject {
       }
       return
     }
-    if !isRewinding {
-      if rewindLinger { endRewindLinger(release: false) }
-      isRewinding = true
-      isPaused = false
-      rewindShowing = false
-      suspendLive()
-      ActivityLog.shared.add("Rewinding: playing this broadcast's VOD")
+    // Still loading (the bar was only just touched): start it there once it's ready.
+    if !isRewinding, let item = rewindPlayer.currentItem, item.status == .unknown {
+      enterRewind()
+      rewindPendingSeek = target
+      isBuffering = true
+      return
     }
+    if !isRewinding { enterRewind() }
     startRewindItem(at: target)
+  }
+
+  private func enterRewind() {
+    if rewindLinger { endRewindLinger() }
+    isRewinding = true
+    isPaused = false
+    rewindShowing = false
+    rewindIdleSince = nil
+    suspendLive()
+    ActivityLog.shared.add("Rewinding: playing this broadcast's VOD")
+  }
+
+  /// The VOD loaded out of sight (when the seek bar is touched while live).
+  private func preloadRewindItem() {
+    guard rewindQuality < rewindVariants.count, let rewindSource,
+      let url = StreamProxy.shared.mediaURL(for: rewindSource, index: rewindQuality)
+    else { return }
+    let item = AVPlayerItem(url: url)
+    rewindItemObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+      let status = item.status
+      let message = item.error?.localizedDescription
+      guard let model = self else { return }
+      Task { @MainActor in model.rewindItemChanged(status, error: message) }
+    }
+    rewindPlayer.automaticallyWaitsToMinimizeStalling = true
+    rewindPlayer.pause()
+    rewindPlayer.replaceCurrentItem(with: item)
+    rewindIdleSince = Date()
+  }
+
+  /// While the bar is held (live): keeps the loaded VOD near the finger, so letting go starts
+  /// playing almost at once.
+  func scrubRewind(to time: Double) {
+    guard !isRewinding, time < broadcastElapsed - 20, let item = rewindPlayer.currentItem, item.status == .readyToPlay,
+      item.duration.seconds.isFinite, time < item.duration.seconds - 10
+    else { return }
+    scrubTarget = time
+    rewindIdleSince = Date()
+    guard !scrubSeeking else { return }
+    scrubSeek(to: time)
+  }
+
+  private func scrubSeek(to time: Double) {
+    scrubSeeking = true
+    let loose = CMTime(seconds: 4, preferredTimescale: 600)
+    rewindPlayer.seek(to: CMTime(seconds: time, preferredTimescale: 600), toleranceBefore: loose, toleranceAfter: loose) {
+      [weak self] _ in
+      Task { @MainActor in
+        guard let model = self else { return }
+        model.scrubSeeking = false
+        // The finger moved on meanwhile: follow it (one seek at a time).
+        if !model.isRewinding, let next = model.scrubTarget, abs(next - time) > 3 { model.scrubSeek(to: next) }
+      }
+    }
   }
 
   private func startRewindItem(at seconds: Double) {
@@ -943,17 +1060,22 @@ final class PlayerModel: ObservableObject {
   }
 
   private func rewindItemChanged(_ status: AVPlayerItem.Status, error: String?) {
-    guard isRewinding else { return }
+    guard isRewinding || status == .failed else { return }
     switch status {
     case .readyToPlay:
       guard let target = rewindPendingSeek else { return }
       rewindPendingSeek = nil
+      // Loaded before more was recorded and the target is past its end: load it again.
+      if let item = rewindPlayer.currentItem, item.duration.seconds.isFinite, target > item.duration.seconds - 10 {
+        startRewindItem(at: target)
+        return
+      }
       guard target >= 1 else {
         if !isPaused { rewindPlayer.play() }
         return
       }
       rewindSeeking = true
-      rewindPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: Self.seekTolerance, toleranceAfter: Self.seekTolerance) {
+      rewindPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: Self.seekTolerance) {
         [weak self] _ in
         Task { @MainActor in
           guard let model = self, model.isRewinding else { return }
@@ -962,6 +1084,11 @@ final class PlayerModel: ObservableObject {
         }
       }
     case .failed:
+      guard isRewinding else {
+        rewindItemObservation = nil
+        rewindPlayer.replaceCurrentItem(with: nil)
+        return
+      }
       ActivityLog.shared.add("The VOD stopped playing (\(error ?? "error")); back to live")
       returnToLive()
     default:
@@ -980,6 +1107,8 @@ final class PlayerModel: ObservableObject {
     rewindPlayer.pause()
     rewindLinger = rewindShowing
     lingerSince = Date()
+    rewindIdleSince = Date()
+    scrubTarget = nil
     isBuffering = true
     isPaused = false
     #if canImport(AmazonIVSPlayer)
@@ -1002,18 +1131,19 @@ final class PlayerModel: ObservableObject {
     rewindLinger = false
   }
 
-  private func endRewindLinger(release: Bool = true) {
+  private func endRewindLinger() {
     rewindLinger = false
     rewindShowing = false
     lingerSince = nil
-    if release, !isRewinding { rewindPlayer.replaceCurrentItem(with: nil) }
   }
 
-  /// Gets the VOD's playlist ready before it's needed (the switch into rewinding is quicker).
+  /// The seek bar was touched: get the VOD ready before it's needed.
   func prepareRewind() {
-    guard let rewindSource else { return }
-    let index = rewindQuality
-    Task.detached { await rewindSource.prefetch(index) }
+    guard rewindSource != nil else { return }
+    if isRewinding { return }
+    let item = rewindPlayer.currentItem
+    if item == nil || item?.status == .failed { preloadRewindItem() }
+    rewindIdleSince = Date()
   }
 
   private func suspendLive() {
@@ -1028,7 +1158,8 @@ final class PlayerModel: ObservableObject {
 
   private func tickRewind() {
     let current = rewindPlayer.currentTime().seconds
-    if current.isFinite, rewindPendingSeek == nil { rewindPosition = current }
+    // Held at the target while seeking (the player reports the old spot, or 0, until it lands).
+    if current.isFinite, rewindPendingSeek == nil, !rewindSeeking { rewindPosition = current }
     let status = rewindPlayer.timeControlStatus
     let buffering = status == .waitingToPlayAtSpecifiedRate || rewindPendingSeek != nil || rewindSeeking
     if buffering != isBuffering { isBuffering = buffering }
@@ -1042,7 +1173,7 @@ final class PlayerModel: ObservableObject {
     latency = max(0, broadcastElapsed - rewindPosition)
     // The end of what was recorded when it was loaded: more has been recorded since, so load it
     // again, or go live if that's all but caught up.
-    if let item = rewindPlayer.currentItem, rewindPendingSeek == nil, !isPaused,
+    if let item = rewindPlayer.currentItem, rewindPendingSeek == nil, !rewindSeeking, !isPaused,
       item.duration.seconds.isFinite, item.duration.seconds > 0, current >= item.duration.seconds - 1.5
     {
       if rewindEndSince == nil { rewindEndSince = Date() }
@@ -1060,7 +1191,7 @@ final class PlayerModel: ObservableObject {
     } else {
       rewindEndSince = nil
     }
-    watchForStall(rewindPlayer, position: current, pending: rewindPendingSeek != nil)
+    watchForStall(rewindPlayer, position: current, pending: rewindPendingSeek != nil || rewindSeeking)
     if AppSettings.shared.showVideoStats, let item = rewindPlayer.currentItem {
       var lines = [StatLine(label: "Player", value: "Apple (AVPlayer), rewinding the VOD")]
       if rewindQuality < rewindVariants.count { lines.append(StatLine(label: "Quality", value: rewindVariants[rewindQuality].label)) }

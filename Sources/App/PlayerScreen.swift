@@ -569,6 +569,14 @@ struct PlayerScreen: View {
   }
 
   private func close() {
+    // Stop right away (not when the view goes): closing has to end the sound for sure.
+    model.stop()
+    chat.stop()
+    OrientationLock.playerVisible(false)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+      // Let other apps' audio carry on (fails harmlessly if something else is still playing).
+      if app.playing == nil { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+    }
     withAnimation(.easeIn(duration: 0.2)) { closing = true }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
       if app.playing?.id == target.id { app.playing = nil }

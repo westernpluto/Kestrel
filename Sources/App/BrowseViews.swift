@@ -73,7 +73,7 @@ struct CategoryRows: View {
       HStack(alignment: .top, spacing: 12) {
         ForEach(row) { category in
           Button {
-            app.push(category)
+            app.push(.category(category))
           } label: {
             CategoryTile(category: category)
           }
@@ -139,8 +139,11 @@ final class SearchModel: ObservableObject {
   @Published private(set) var isLoading = false
   @Published private(set) var error: String?
   private var task: Task<Void, Never>?
+  /// When the results on screen were fetched (who's live changes: old results get refreshed).
+  private var searchedAt = Date.distantPast
 
-  func search() {
+  /// - Parameter debounce: wait a moment first (while typing).
+  func search(debounce: Bool = true) {
     task?.cancel()
     let query = text.trimmingCharacters(in: .whitespaces)
     guard query.count >= 2 else {
@@ -150,7 +153,7 @@ final class SearchModel: ObservableObject {
       return
     }
     task = Task {
-      try? await Task.sleep(nanoseconds: 300_000_000)
+      if debounce { try? await Task.sleep(nanoseconds: 300_000_000) }
       guard !Task.isCancelled else { return }
       isLoading = true
       defer { isLoading = false }
@@ -166,10 +169,23 @@ final class SearchModel: ObservableObject {
         }
         categories = foundCategories
         error = nil
+        searchedAt = Date()
       } catch {
         if !Task.isCancelled { self.error = error.localizedDescription }
       }
     }
+  }
+
+  /// Back on the search after a while: fetch the results again (live or not, viewers).
+  func refreshIfStale() {
+    guard text.trimmingCharacters(in: .whitespaces).count >= 2, Date().timeIntervalSince(searchedAt) > 20 else { return }
+    search(debounce: false)
+  }
+
+  /// Pull to refresh.
+  func refresh() async {
+    search(debounce: false)
+    await task?.value
   }
 
   /// Keeps the current search in the history (when it was submitted or a result opened).
@@ -232,7 +248,7 @@ struct SearchView: View {
           ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
               ForEach(model.categories) { category in
-                NavigationLink(value: category) { CategoryTile(category: category).frame(width: 96) }
+                NavigationLink(value: Route.category(category)) { CategoryTile(category: category).frame(width: 96) }
                   .buttonStyle(.plain)
               }
             }
@@ -244,7 +260,7 @@ struct SearchView: View {
         Section("Channels") {
           ForEach(model.channels) { result in
             HStack {
-              NavigationLink(value: result.channel) {
+              NavigationLink(value: Route.channel(result.channel)) {
                 ChannelRow(
                   channel: result.channel,
                   subtitle: result.followers.map { "\(Format.viewers($0)) followers" },
@@ -263,8 +279,15 @@ struct SearchView: View {
       if model.text.count >= 2, !model.isLoading, model.channels.isEmpty, model.categories.isEmpty, model.error == nil {
         EmptyState(systemImage: "magnifyingglass", title: "No results", message: "Try a different name.")
       }
+      Section { MiniPlayerSpacer() }
     }
     .listStyle(.insetGrouped)
+    .environment(\.defaultMinListRowHeight, 1)
+    .refreshable { [model] in await detachedRefresh { await model.refresh() } }
+    .onAppear { model.refreshIfStale() }
+    .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+      model.refreshIfStale()
+    }
     .overlay { if model.isLoading && model.channels.isEmpty { ProgressView() } }
     .searchable(text: $model.text, placement: .navigationBarDrawer(displayMode: .always), prompt: "Channels and categories")
     .autocorrectionDisabled()
@@ -416,6 +439,7 @@ final class FollowingStore: ObservableObject {
     }
     error = problem
     loaded = true
+    LiveNotifier.shared.observe(live: live, complete: problem == nil)
   }
 }
 
@@ -464,7 +488,7 @@ struct FollowingView: View {
         if showOffline {
           ForEach(store.offline) { entry in
             Button {
-              app.push(entry.channel)
+              app.push(.channel(entry.channel))
             } label: {
               ChannelRow(channel: entry.channel, subtitle: entry.lastLive.map { "Last live \(Format.relative($0))" })
                 .opacity(0.85)

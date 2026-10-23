@@ -5,6 +5,7 @@ final class ChannelModel: ObservableObject {
   @Published var page: ChannelPage?
   @Published var error: String?
   @Published var isLoading = false
+  private(set) var loadedAt = Date.distantPast
   let videos: Paginator<Video>
   let login: String
 
@@ -16,6 +17,7 @@ final class ChannelModel: ObservableObject {
   func load() async {
     isLoading = true
     defer { isLoading = false }
+    loadedAt = Date()
     do {
       page = try await TwitchAPI.shared.channelPage(login: login)
       error = page == nil ? "Channel not found." : nil
@@ -67,6 +69,10 @@ struct ChannelView: View {
     .navigationTitle(current.name)
     .navigationBarTitleDisplayMode(.inline)
     .task { if model.page == nil { await model.load() } }
+    // Back on the page after a while: whether they're live may have changed.
+    .onAppear {
+      if model.page != nil, Date().timeIntervalSince(model.loadedAt) > 60 { Task { await model.load() } }
+    }
   }
 
   private var header: some View {
