@@ -56,10 +56,10 @@ struct PlayerVideoArea: View {
       PlayerControls(
         model: model, landscape: landscape, chatOpen: chatOpen, visible: controlsShown && chromeVisible && !pulling,
         insets: controlInsets, toggleChat: toggleChat, minimize: minimize, interacted: { scheduleHide(after: $0) })
-      if model.captionsOn, !model.isRewinding, chromeVisible, let caption = model.caption {
+      if model.captionsOn, !model.isRewinding, chromeVisible, let caption = model.caption ?? model.captionStatus {
         Text(caption)
-          .font(.system(size: landscape ? 18 : 15, weight: .semibold))
-          .foregroundColor(.white)
+          .font(model.caption == nil ? .system(size: 13, weight: .medium) : .system(size: landscape ? 18 : 15, weight: .semibold))
+          .foregroundColor(model.caption == nil ? .white.opacity(0.8) : .white)
           .multilineTextAlignment(.center)
           .lineLimit(3)
           .padding(.horizontal, 10)

@@ -14,6 +14,12 @@ enum StreamRoute: Equatable, Sendable {
   case adFreeServer(String)
   case twitch
 
+  /// Twitch may stitch ads into this stream (the playlist came straight from Twitch with ads).
+  var adsPossible: Bool {
+    if case .twitch = self { return true }
+    return false
+  }
+
   var summary: String {
     switch self {
     case .twitchAdFree(let reason): return "none needed (\(reason))"

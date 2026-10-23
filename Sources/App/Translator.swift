@@ -23,17 +23,36 @@ import SwiftUI
 #endif
 
 enum LanguageGuess {
-  /// The language of a piece of chat, when it's clear enough to say (short messages, emote
-  /// names and "lol" aren't).
-  static func code(of text: String, minimumConfidence: Double = 0.7) -> String? {
+  /// The language of a piece of chat, when it's clear enough to say: a few real words, and not
+  /// plausibly `unlessAlso` (the viewer's language; English slang guessed as Spanish made
+  /// strange "translations"). Short messages, emote names and "lol" don't count.
+  static func code(of text: String, minimumConfidence: Double = 0.8, unlessAlso other: String? = nil) -> String? {
     let letters = text.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
-    guard letters >= 8 else { return nil }
+    let words = text.split(whereSeparator: { $0.isWhitespace }).filter { $0.count >= 2 }.count
+    // Languages without spaces (Japanese, Chinese, Thai) count by letters only.
+    let spaceless = text.unicodeScalars.contains { (0x3040...0x9FFF).contains($0.value) || (0x0E00...0x0E7F).contains($0.value) }
+    guard letters >= (spaceless ? 4 : 10), spaceless || words >= 3 else { return nil }
     let recognizer = NLLanguageRecognizer()
     recognizer.processString(text)
-    guard let (language, confidence) = recognizer.languageHypotheses(withMaximum: 1).first,
+    let hypotheses = recognizer.languageHypotheses(withMaximum: 3)
+    guard let (language, confidence) = hypotheses.max(by: { $0.value < $1.value }),
       language != .undetermined, confidence >= minimumConfidence
     else { return nil }
+    if let other, base(language.rawValue) != other,
+      hypotheses.contains(where: { base($0.key.rawValue) == other && $0.value >= 0.1 })
+    {
+      return nil
+    }
     return base(language.rawValue)
+  }
+
+  /// Chat text the way a translator reads it best: single spaces, and all-caps shouting in
+  /// lower case (all caps translate badly).
+  static func tidy(_ text: String) -> String {
+    let single = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    let letters = single.unicodeScalars.filter { CharacterSet.letters.contains($0) }
+    let upper = letters.filter { CharacterSet.uppercaseLetters.contains($0) }.count
+    return letters.count >= 6 && Double(upper) / Double(letters.count) > 0.8 ? single.lowercased() : single
   }
 
   /// "es-419" → "es"; Chinese keeps its script ("zh-Hans").
@@ -118,18 +137,17 @@ final class ChatTranslator: ObservableObject {
     guard let code = noteLanguage(of: text) else { return }
     guard autoTranslate, code != target, !failed.contains(code) else { return }
     if !permitted.contains(code), mainChatLanguage == code { permitted.insert(code) }
-    Task {
-      var allowed = permitted.contains(code)
-      if !allowed { allowed = await isInstalled(code) }
-      guard allowed else { return }
-      enqueue(id: id, text: text, from: code)
-    }
+    // Only the chat's main language (and ones you've translated by hand): a stray message
+    // guessed as some other language was usually a wrong guess.
+    guard permitted.contains(code) else { return }
+    enqueue(id: id, text: LanguageGuess.tidy(text), from: code)
   }
 
   /// Translate one message (asked for; may download its language).
   func translateNow(id: String, text: String) {
     guard Self.isAvailable, !requested.contains(id) || results[id] == nil else { return }
     let code = LanguageGuess.code(of: text, minimumConfidence: 0.3) ?? mainChatLanguage
+    let text = LanguageGuess.tidy(text)
     guard let code, code != target else { return }
     permitted.insert(code)
     failed.remove(code)
@@ -164,7 +182,7 @@ final class ChatTranslator: ObservableObject {
 
   @discardableResult
   private func noteLanguage(of text: String) -> String? {
-    guard let code = LanguageGuess.code(of: text) else { return nil }
+    guard let code = LanguageGuess.code(of: text, unlessAlso: target) else { return nil }
     seen[code, default: 0] += 1
     return code
   }

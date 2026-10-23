@@ -1082,6 +1082,7 @@ func testLiveAudio() {
   check(audio.map([UInt8].init) == frames, "audio taken out of the transport stream (\(audio?.count ?? -1) of \(frames.count) bytes)")
   check(TSAudio.adtsInfo(Data(frames)) == TSAudio.ADTSInfo(sampleRate: 48000, channels: 2, frames: 3), "ADTS: \(String(describing: TSAudio.adtsInfo(Data(frames))))")
   check(TSAudio.adts(fromTS: Data("#EXTM3U".utf8)) == nil, "not a transport stream")
+  check(LiveAudioFeed.isMP4(Data([0, 0, 0, 24] + Array("moof".utf8) + [0, 0])) && !LiveAudioFeed.isMP4(Data(ts)), "fMP4 told apart")
 
   final class Feed: HTTPClient, @unchecked Sendable {
     let lock = NSLock()
@@ -1110,7 +1111,7 @@ func testLiveAudio() {
   let follower = LiveAudioFeed(playlistURL: URL(string: "https://audio.test/audio_only.m3u8")!, http: feed, log: ActivityLog())
   runAsync {
     let received = Counter()
-    let task = Task { await follower.run { data in if data.count == frames.count { received.add() } } }
+    let task = Task { await follower.run { chunk in if chunk == .adts(Data(frames)) { received.add() } } }
     try? await Task.sleep(nanoseconds: 2_600_000_000)
     task.cancel()
     _ = await task.value
@@ -1122,6 +1123,7 @@ func testLiveAudio() {
     check(Set(fetched).count == fetched.count, "each segment once: \(fetched)")
     check(fetched.count >= 2 && fetched.prefix(2) == ["s12.ts", "s13.ts"], "follows new segments: \(fetched)")
     check(received.value == fetched.count, "audio handed over for every segment: \(received.value)")
+    check(follower.progress.segments == fetched.count && follower.progress.playlistLoads >= 2, "progress \(follower.progress)")
   }
 }
 
@@ -1173,6 +1175,20 @@ func testAdFreeProxy() {
     check(log.messages.contains { $0.contains("proxy.test delivered the stream, Twitch sees RU") }, "\(log.messages)")
     check(log.messages.contains { $0.contains("down.test didn't answer") }, "\(log.messages)")
     check(twitch.tokenRequests == ["popout", "proxy"], "no regular token needed: \(twitch.tokenRequests)")
+  }
+  // Through an ad-free server, an announced break doesn't cost low latency (nothing can be
+  // stitched in, so the newest segment isn't held back).
+  runAsync {
+    let twitch = FakeTwitch()
+    twitch.mainMarkers = 20..<40
+    let http = ProxyFake(twitch)
+    var config = LowLatencyConfig()
+    config.adFreeProxies = ["proxy.test"]
+    let session = LowLatencySession(login: "streamer", config: config, http: http, tokens: twitch, log: ActivityLog())
+    _ = try! await session.start()
+    twitch.advance(4)
+    let media = await session.mediaPlaylist(0)
+    check(media.body.contains("TWITCH-PREFETCH"), "prefetch kept through an ad-free server during an announced break")
   }
 }
 

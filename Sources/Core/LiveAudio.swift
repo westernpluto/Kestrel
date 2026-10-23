@@ -79,12 +79,37 @@ enum TSAudio {
   }
 }
 
+/// One segment's sound, in whichever form the stream carries it.
+enum LiveAudioChunk: Equatable {
+  /// AAC with ADTS headers (taken out of an MPEG-TS segment).
+  case adts(Data)
+  /// A fragmented-MP4 segment and the initialization segment it needs.
+  case fragmentedMP4(initialization: Data, segment: Data)
+}
+
+/// What the feed has done so far (for live captions' status line).
+struct LiveAudioProgress: Equatable, Sendable {
+  var playlistLoads = 0
+  var playlistFailures = 0
+  var segments = 0
+  var unreadable = 0
+}
+
 /// Follows a live audio-only playlist and hands over each new segment's audio once, in order,
 /// starting at the live edge. Ad segments are left out.
 final class LiveAudioFeed: @unchecked Sendable {
   let playlistURL: URL
   private let http: HTTPClient
   private let log: ActivityLog
+  private let lock = NSLock()
+  private var _progress = LiveAudioProgress()
+  private var initSegments: [String: Data] = [:]
+
+  var progress: LiveAudioProgress {
+    lock.lock()
+    defer { lock.unlock() }
+    return _progress
+  }
 
   init(playlistURL: URL, http: HTTPClient, log: ActivityLog = .shared) {
     self.playlistURL = playlistURL
@@ -92,8 +117,14 @@ final class LiveAudioFeed: @unchecked Sendable {
     self.log = log
   }
 
+  private func count(_ change: (inout LiveAudioProgress) -> Void) {
+    lock.lock()
+    change(&_progress)
+    lock.unlock()
+  }
+
   /// Runs until the task is cancelled (or the stream ends).
-  func run(_ deliver: @escaping (Data) async -> Void) async {
+  func run(_ deliver: @escaping (LiveAudioChunk) async -> Void) async {
     var lastSequence: Int?
     var failures = 0
     var reportedFormat = false
@@ -101,6 +132,7 @@ final class LiveAudioFeed: @unchecked Sendable {
       var wait = 1.0
       if let playlist = await fetchPlaylist() {
         failures = 0
+        count { $0.playlistLoads += 1 }
         wait = min(3, max(1, playlist.targetDuration / 2))
         let numbered = playlist.segments.enumerated()
           .filter { !$0.element.isPrefetch }
@@ -116,21 +148,54 @@ final class LiveAudioFeed: @unchecked Sendable {
           lastSequence = item.sequence
           if item.segment.isAd { continue }
           guard let url = URL(string: item.segment.uri), let data = await fetch(url) else { continue }
-          if let audio = TSAudio.adts(fromTS: data) {
-            await deliver(audio)
-          } else if !reportedFormat {
-            reportedFormat = true
-            log.add("Live captions: the stream's audio isn't in a format Kestrel can read")
+          if let chunk = await chunk(data, map: item.segment.map) {
+            count { $0.segments += 1 }
+            await deliver(chunk)
+          } else {
+            count { $0.unreadable += 1 }
+            if !reportedFormat {
+              reportedFormat = true
+              log.add("Live captions: the stream's audio isn't in a format Kestrel can read (\(Self.describe(data)))")
+            }
           }
         }
         if playlist.isEnded { return }
       } else {
         failures += 1
-        if failures == 5 { log.add("Live captions: can't load the stream's audio") }
+        count { $0.playlistFailures += 1 }
+        if failures == 3 { log.add("Live captions: can't load the stream's audio playlist") }
         wait = min(8, Double(failures) * 1.5)
       }
       try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
     }
+  }
+
+  private func chunk(_ data: Data, map: String?) async -> LiveAudioChunk? {
+    if let audio = TSAudio.adts(fromTS: data) { return .adts(audio) }
+    guard Self.isMP4(data) else { return nil }
+    guard let map else { return Self.isMP4Initialization(data) ? .fragmentedMP4(initialization: Data(), segment: data) : nil }
+    if initSegments[map] == nil, let url = URL(string: map), let initialization = await fetch(url) {
+      initSegments = [map: initialization]
+    }
+    guard let initialization = initSegments[map] else { return nil }
+    return .fragmentedMP4(initialization: initialization, segment: data)
+  }
+
+  /// MP4 boxes ("styp", "moof", "ftyp", …) rather than a transport stream.
+  static func isMP4(_ data: Data) -> Bool {
+    guard data.count >= 8 else { return false }
+    let type = String(decoding: data[data.startIndex + 4..<data.startIndex + 8], as: UTF8.self)
+    return ["styp", "moof", "ftyp", "sidx", "prft", "emsg"].contains(type)
+  }
+
+  static func isMP4Initialization(_ data: Data) -> Bool {
+    guard data.count >= 8 else { return false }
+    return String(decoding: data[data.startIndex + 4..<data.startIndex + 8], as: UTF8.self) == "ftyp"
+  }
+
+  private static func describe(_ data: Data) -> String {
+    let head = data.prefix(8).map { String(format: "%02x", $0) }.joined(separator: " ")
+    return "\(data.count) bytes, starts \(head)"
   }
 
   private func fetchPlaylist() async -> HLSMediaPlaylist? {

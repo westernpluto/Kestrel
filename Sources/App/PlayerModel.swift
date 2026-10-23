@@ -136,8 +136,10 @@ final class PlayerModel: ObservableObject {
   /// Translate chat messages in other languages.
   @Published var translateChat = false
   @Published private(set) var captionsOn = false
-  /// The caption (or caption status) to show over the video.
+  /// The caption to show over the video.
   @Published private(set) var caption: String?
+  /// How captions are going (downloading, listening, a problem) while there's no caption.
+  @Published private(set) var captionStatus: String?
   /// Chat's translator (also used for captions); set by the player screen.
   weak var translator: ChatTranslator?
   /// The live stream's audio-only playlist (for captions).
@@ -511,6 +513,7 @@ final class PlayerModel: ObservableObject {
       liveCaptions.stop()
       captionExpiry?.cancel()
       caption = nil
+      captionStatus = nil
     }
   }
 
@@ -538,7 +541,7 @@ final class PlayerModel: ObservableObject {
   private func startCaptions() {
     guard captionsOn, isLive, !stopped else { return }
     guard let url = audioPlaylistURL else {
-      showCaption("Waiting for the stream's audio…")
+      captionStatus = "Waiting for the stream's audio…"
       return
     }
     // What the streamer speaks: the stream's language tag, else what chat mostly writes in.
@@ -546,17 +549,22 @@ final class PlayerModel: ObservableObject {
     let translator = self.translator
     liveCaptions.start(
       LiveCaptions.Setup(playlistURL: url, language: language, target: LanguageGuess.mine),
-      translate: { text in await translator?.translate(text, from: language) },
-      show: { [weak self] text in self?.showCaption(text) },
-      finished: { [weak self] sentence in
-        // Read out only translations (the streamer's own words are already being heard).
-        guard let model = self, model.voiceOn, !model.isRewinding, LanguageGuess.base(language) != LanguageGuess.mine else { return }
-        model.voice.say(sentence)
-      })
+      LiveCaptions.Callbacks(
+        translate: { text in await translator?.translate(text, from: language) },
+        caption: { [weak self] text in self?.showCaption(text) },
+        status: { [weak self] text in self?.captionStatus = text },
+        finished: { [weak self] sentence in
+          // Read out only translations (the streamer's own words are already being heard).
+          guard let model = self, model.voiceOn, !model.isRewinding, LanguageGuess.base(language) != LanguageGuess.mine else {
+            return
+          }
+          model.voice.say(sentence)
+        }))
   }
 
   private func showCaption(_ text: String?) {
     caption = text
+    if text != nil { captionStatus = nil }
     captionExpiry?.cancel()
     guard text != nil else { return }
     // Gone after a quiet spell, like TV captions.

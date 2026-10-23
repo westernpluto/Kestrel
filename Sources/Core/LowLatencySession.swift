@@ -142,8 +142,10 @@ actor LowLatencySession: PlaylistSource {
       if marker, config.backupStreams { prewarm(target: target) }
       // While Twitch announces an ad break, hold back the segment it's still producing: if the ad
       // gets stitched in, that segment would be ad video the player shows before Kestrel can
-      // tell (costs ~2 s of latency during the break, saves the ad flash).
-      return serve(index, LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: marker))
+      // tell (costs ~2 s of latency during the break, saves the ad flash). Only where ads can be
+      // stitched in at all: through an ad-free server (or an ad-free account) it would only cost
+      // latency, and a stream that started during the announcement stayed behind afterwards.
+      return serve(index, LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: marker && route.adsPossible))
     }
 
     // Ad video stitched into the stream.
