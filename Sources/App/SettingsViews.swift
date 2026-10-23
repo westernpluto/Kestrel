@@ -7,6 +7,8 @@ struct SettingsView: View {
   @State private var imageCacheCleared = false
   @State private var showLogin = false
   @State private var confirmSignOut = false
+  @State private var confirmReset = false
+  @State private var resetting = false
 
   var body: some View {
     Form {
@@ -82,11 +84,39 @@ struct SettingsView: View {
       } footer: {
         Text("Kestrel \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
       }
+
+      Section {
+        Button(role: .destructive) {
+          confirmReset = true
+        } label: {
+          if resetting {
+            HStack { ProgressView(); Text("Erasing…") }
+          } else {
+            Text("Reset Kestrel")
+          }
+        }
+        .disabled(resetting)
+      } footer: {
+        Text("Erases everything Kestrel has stored on this iPhone: your Twitch login, follows added in Kestrel, watch progress, search history, settings and caches. Kestrel closes when it's done; open it again to start fresh.")
+      }
       Section { MiniPlayerSpacer() }
     }
     .environment(\.defaultMinListRowHeight, 1)
     .navigationTitle("Settings")
     .sheet(isPresented: $showLogin) { TwitchLoginView() }
+    .confirmationDialog("Erase everything and start fresh?", isPresented: $confirmReset, titleVisibility: .visible) {
+      Button("Erase and close Kestrel", role: .destructive) {
+        resetting = true
+        Task {
+          await AppReset.eraseEverything()
+          // Everything in memory goes too: Kestrel closes, and opens fresh next time.
+          try? await Task.sleep(nanoseconds: 300_000_000)
+          exit(0)
+        }
+      }
+    } message: {
+      Text("Your Twitch login, follows added in Kestrel, watch progress, search history and settings are deleted. Your Twitch account itself isn't changed.")
+    }
     .confirmationDialog("Sign out of Twitch?", isPresented: $confirmSignOut, titleVisibility: .visible) {
       Button("Sign out", role: .destructive) { account.signOut() }
     }

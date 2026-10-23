@@ -10,6 +10,8 @@ struct KestrelApp: App {
   @Environment(\.scenePhase) private var scenePhase
 
   init() {
+    // Before anything reads the Keychain: a reinstall starts signed out.
+    AppReset.clearLeftoversAfterReinstall()
     signal(SIGPIPE, SIG_IGN)
     try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
     _ = try? StreamProxy.shared.ensureRunning()

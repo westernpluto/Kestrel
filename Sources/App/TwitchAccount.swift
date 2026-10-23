@@ -31,6 +31,12 @@ enum SecretStore {
     }
   }
 
+  /// Everything Kestrel keeps in the Keychain (and the file fallbacks).
+  static func removeAll() {
+    SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service] as [String: Any] as CFDictionary)
+    for account in ["twitch", "proxy"] { try? FileManager.default.removeItem(at: fallbackURL(account)) }
+  }
+
   static func get(_ account: String) -> Data? {
     var item = query(account)
     item[kSecReturnData as String] = true

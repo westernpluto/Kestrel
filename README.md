@@ -42,6 +42,8 @@ An iOS client for watching Twitch without ads, with low-latency playback, chat a
 - **iOS 26 look:** the main build uses the iOS 26 SDK, so the tab bar is the floating Liquid Glass bar (slide a finger along it to switch sections), with glass navigation bars and menus.
 - **Video stats:** a Twitch-style overlay with player, quality, codecs, resolution, frame rate, bitrate, bandwidth, buffer, latency, dropped frames, ad state and ad-blocking route.
 
+**Starting fresh:** deleting an app on iOS keeps what it saved in the Keychain, so Kestrel now clears its Keychain items (the Twitch login, your proxy password) the first time it runs after a reinstall. **Settings → Reset Kestrel** erases everything it has stored at any time, then closes it so it opens as new.
+
 **Settings → Activity log** shows which ad-free server delivered each stream (and where Twitch thinks you are), ad breaks, player fallbacks, and image hosts that fail to load.
 
 ## Install
