@@ -38,11 +38,29 @@ final class Paginator<Item: Identifiable & Sendable>: ObservableObject {
       cursor = page.cursor
       hasMore = page.hasNextPage && page.cursor != nil && !page.items.isEmpty
       error = nil
+    } catch where error.isCancellation {
+      // A refresh that was interrupted isn't an error: keep what's on screen.
     } catch {
       self.error = error.localizedDescription
       if reset { items = [] }
     }
   }
+}
+
+extension Error {
+  /// A request cancelled because the screen asking for it went away (not worth showing).
+  var isCancellation: Bool {
+    if self is CancellationError { return true }
+    if let url = self as? URLError, url.code == .cancelled { return true }
+    return (self as NSError).domain == NSURLErrorDomain && (self as NSError).code == NSURLErrorCancelled
+  }
+}
+
+/// Pull to refresh that isn't cut short: SwiftUI cancels a `refreshable` task as soon as the list
+/// redraws mid-refresh, which cancelled the requests and showed "cancelled". The work runs in
+/// its own task and the spinner waits for it.
+func detachedRefresh(_ work: @escaping @MainActor () async -> Void) async {
+  await Task { @MainActor in await work() }.value
 }
 
 struct LiveBadge: View {

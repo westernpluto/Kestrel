@@ -35,6 +35,8 @@ struct StreamSessionConfig: Sendable {
   var backupTokenLifetime: TimeInterval = 8 * 60
   /// Ad-free playlist proxies to try first (see AdFreeProxy).
   var adFreeProxies: [String] = []
+  /// Signed in: ask Twitch first and play straight from it when it shows this account no ads.
+  var checkAccountFirst = false
 }
 
 enum AdState: Equatable, Sendable {
@@ -60,6 +62,8 @@ actor StreamSession {
   private let onAdState: @Sendable (AdState, [ClosedRange<Date>]) -> Void
 
   private var served: [HLSVariant] = []
+  /// Where the master playlist came from.
+  private(set) var route: StreamRoute = .twitch
   private var timeline = SlotTimeline()
   private var mainStores: [Int: SegmentStore] = [:]
   private var backupStores: [Int: [String: SegmentStore]] = [:]
@@ -124,23 +128,11 @@ actor StreamSession {
   }
 
   func start() async throws -> StreamInfo {
-    let master: HLSMaster
-    if !config.adFreeProxies.isEmpty,
-      let proxied = await AdFreeProxy.fetchMaster(
-        login: login, codecs: config.codecs, lowLatency: config.fastBread, hosts: config.adFreeProxies, http: http, log: log)
-    {
-      master = HLSMaster.parse(proxied.text, base: proxied.url)
-    } else {
-      let token = try await tokens.streamToken(
-        login: login, playerType: config.mainPlayerType, platform: "web")
-      log.add(token.summary)
-      let url = Usher.live(login: login, token: token, codecs: config.codecs, lowLatency: config.fastBread)
-      let (data, response) = try await http.data(for: Usher.playlistRequest(url))
-      guard response.statusCode == 200, HLS.looksLikePlaylist(data), let text = String(data: data, encoding: .utf8) else {
-        throw response.statusCode == 404 ? StartError.offline : StartError.usher(response.statusCode)
-      }
-      master = HLSMaster.parse(text, base: response.url ?? url)
-    }
+    let fetched = try await MasterPlaylistFetch.fetch(
+      login: login, codecs: config.codecs, lowLatency: config.fastBread, proxies: config.adFreeProxies,
+      checkAccountFirst: config.checkAccountFirst, playerType: config.mainPlayerType, http: http, tokens: tokens, log: log)
+    route = fetched.route
+    let master = HLSMaster.parse(fetched.text, base: fetched.url)
     var variants = master.videoVariants
     if let audio = master.audioVariant { variants.append(audio) }
     guard !variants.isEmpty else { throw StartError.noVariants }

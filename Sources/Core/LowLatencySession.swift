@@ -23,6 +23,8 @@ struct LowLatencyConfig: Sendable {
   var backupTokenLifetime: TimeInterval = 8 * 60
   /// Ad-free playlist proxies to try first (see AdFreeProxy).
   var adFreeProxies: [String] = []
+  /// Signed in: ask Twitch first and play straight from it when it shows this account no ads.
+  var checkAccountFirst = false
 }
 
 struct LowLatencyUpdate: Sendable {
@@ -42,7 +44,7 @@ actor LowLatencySession: PlaylistSource {
 
   private var masterText = ""
   /// The ad-free proxy that delivered this stream, if any.
-  private(set) var proxyHost: String?
+  private(set) var route: StreamRoute = .twitch
   /// Index i is served as `v/i.m3u8` (portrait renditions removed).
   private(set) var variants: [HLSVariant] = []
   private var lastServed: [Int: String] = [:]
@@ -80,26 +82,12 @@ actor LowLatencySession: PlaylistSource {
 
   /// Fetches the master playlist. Returns Twitch's renditions (landscape and audio only).
   func start() async throws -> [HLSVariant] {
-    let text: String
-    let base: URL
-    if !config.adFreeProxies.isEmpty,
-      let proxied = await AdFreeProxy.fetchMaster(
-        login: login, codecs: config.codecs, lowLatency: true, hosts: config.adFreeProxies, http: http, log: log)
-    {
-      text = proxied.text
-      base = proxied.url
-      proxyHost = proxied.host
-    } else {
-      let token = try await tokens.streamToken(login: login, playerType: config.mainPlayerType, platform: "web")
-      log.add(token.summary)
-      let url = Usher.live(login: login, token: token, codecs: config.codecs, lowLatency: true)
-      let (data, response) = try await http.data(for: Usher.playlistRequest(url))
-      guard response.statusCode == 200, HLS.looksLikePlaylist(data), let body = String(data: data, encoding: .utf8) else {
-        throw response.statusCode == 404 ? StreamSession.StartError.offline : StreamSession.StartError.usher(response.statusCode)
-      }
-      text = body
-      base = response.url ?? url
-    }
+    let fetched = try await MasterPlaylistFetch.fetch(
+      login: login, codecs: config.codecs, lowLatency: true, proxies: config.adFreeProxies,
+      checkAccountFirst: config.checkAccountFirst, playerType: config.mainPlayerType, http: http, tokens: tokens, log: log)
+    route = fetched.route
+    let text = fetched.text
+    let base = fetched.url
     var lines: [String] = []
     var pending: HLSVariant?
     var pendingLine = ""

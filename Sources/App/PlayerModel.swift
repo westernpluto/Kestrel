@@ -44,6 +44,35 @@ final class PlayerModel: ObservableObject {
     didSet { observeApplePictureInPicture() }
   }
   private var pipObservation: NSKeyValueObservation?
+  /// Where the live stream's playlist came from (stats overlay).
+  @Published var route: StreamRoute?
+
+  // Rewinding a live stream: the broadcast's VOD while it's being recorded.
+  /// Set when the channel is recording a VOD of this broadcast and it plays for this account.
+  @Published private(set) var rewind: LiveArchive?
+  /// Playing the VOD (behind live) instead of the live stream.
+  @Published private(set) var isRewinding = false
+  /// Seconds into the broadcast being watched while rewinding.
+  @Published private(set) var rewindPosition: Double = 0
+  /// Seconds since the broadcast started (the live edge on the seek bar).
+  @Published private(set) var broadcastElapsed: Double = 0
+  let rewindPlayer = AVPlayer()
+  weak var rewindPictureInPicture: AVPictureInPictureController? {
+    didSet { observeRewindPictureInPicture() }
+  }
+  private var rewindPipObservation: NSKeyValueObservation?
+  private var rewindVariants: [HLSVariant] = []
+  private var rewindQuality = 0
+  private var rewindPendingSeek: Double?
+  private var rewindItemObservation: NSKeyValueObservation?
+  private var rewindEndSince: Date?
+  private var lastArchiveCheck = Date.distantPast
+  private var checkingArchive = false
+
+  /// VOD seek previews (VODs, and live streams that can be rewound).
+  @Published private(set) var storyboard: Storyboard?
+  private var storyboardSource: (url: URL, duration: Double?)?
+  private var storyboardLoaded = Date.distantPast
 
   #if canImport(AmazonIVSPlayer)
     /// Set while the low-latency player is in use.
@@ -127,7 +156,8 @@ final class PlayerModel: ObservableObject {
   private func startLive(_ channel: Channel) async {
     var config = AppSettings.shared.sessionConfig
     config.codecs = codecs
-    config.adFreeProxies = TwitchAccount.shared.hasTurbo == true ? [] : AppSettings.shared.adFreeProxyHosts
+    config.adFreeProxies = AppSettings.shared.adFreeProxyHosts
+    config.checkAccountFirst = TwitchAuth.shared.session != nil
     let session = StreamSession(
       login: channel.login, config: config, http: AppSettings.shared.playbackClient(timeout: 8),
       tokens: TwitchAPI.shared
@@ -141,6 +171,7 @@ final class PlayerModel: ObservableObject {
     do {
       let info = try await session.start()
       guard !stopped, engine == .standard else { return }
+      route = await session.route
       self.session = session
       _ = try StreamProxy.shared.register(session)
       qualities = info.variants.enumerated().map { Quality(id: $0.offset, label: $0.element.label) }
@@ -164,32 +195,65 @@ final class PlayerModel: ObservableObject {
 
   // MARK: - Apple player (VOD)
 
+  struct VODError: LocalizedError {
+    var errorDescription: String?
+  }
+
+  /// A VOD's renditions, best first (then audio only).
+  private func vodRenditions(id: String) async throws -> [HLSVariant] {
+    let token = try await TwitchAPI.shared.videoToken(id: id)
+    let url = Usher.vod(id: id, token: token, codecs: codecs)
+    let (data, response) = try await URLSessionHTTPClient(timeout: 10).data(for: Usher.playlistRequest(url))
+    guard response.statusCode == 200, let text = String(data: data, encoding: .utf8), HLS.looksLikePlaylist(data) else {
+      throw VODError(
+        errorDescription: response.statusCode == 403
+          ? "This video is restricted (subscribers only or region locked)." : "Twitch returned HTTP \(response.statusCode).")
+    }
+    let master = HLSMaster.parse(text, base: response.url ?? url)
+    let variants = master.videoVariants + (master.audioVariant.map { [$0] } ?? [])
+    guard !variants.isEmpty else { throw VODError(errorDescription: "No playable qualities were found.") }
+    return variants
+  }
+
   private func startVideo(_ video: Video) async {
     do {
-      let token = try await TwitchAPI.shared.videoToken(id: video.id)
-      guard !stopped else { return }
-      let url = Usher.vod(id: video.id, token: token, codecs: codecs)
-      let (data, response) = try await URLSessionHTTPClient(timeout: 10).data(for: Usher.playlistRequest(url))
-      guard response.statusCode == 200, let text = String(data: data, encoding: .utf8), HLS.looksLikePlaylist(data) else {
-        phase = .failed(
-          response.statusCode == 403
-            ? "This video is restricted (subscribers only or region locked)." : "Twitch returned HTTP \(response.statusCode).")
-        return
-      }
-      let master = HLSMaster.parse(text, base: response.url ?? url)
-      vodVariants = master.videoVariants + (master.audioVariant.map { [$0] } ?? [])
-      guard let best = vodVariants.first, let mediaURL = URL(string: best.uri) else {
-        phase = .failed("No playable qualities were found.")
-        return
-      }
+      vodVariants = try await vodRenditions(id: video.id)
+      guard !stopped, let mediaURL = URL(string: vodVariants[0].uri) else { return }
       qualities = vodVariants.enumerated().map { Quality(id: $0.offset, label: $0.element.label) }
       selectedQuality = 0
       // Play the best rendition's playlist directly, so the player can't switch to a lower one.
       play(mediaURL)
       phase = .playing
+      loadStoryboard(videoID: video.id, known: nil, duration: Double(video.lengthSeconds))
     } catch {
       phase = .failed(error.localizedDescription)
     }
+  }
+
+  // MARK: - Seek previews
+
+  private func loadStoryboard(videoID: String, known: URL?, duration: Double?) {
+    Task {
+      let url: URL?
+      if let known { url = known } else { url = await TwitchAPI.shared.seekPreviewsURL(videoID: videoID) }
+      guard let url, !stopped else { return }
+      storyboardSource = (url, duration)
+      await reloadStoryboard()
+    }
+  }
+
+  private func reloadStoryboard() async {
+    guard let source = storyboardSource else { return }
+    storyboardLoaded = Date()
+    if let board = await TwitchAPI.shared.storyboard(url: source.url, duration: source.duration), !stopped {
+      storyboard = board
+    }
+  }
+
+  /// While scrubbing a live rewind: the storyboard grows with the recording.
+  func refreshStoryboardIfStale() {
+    guard isLive, Date().timeIntervalSince(storyboardLoaded) > 90 else { return }
+    Task { await reloadStoryboard() }
   }
 
   private func play(_ url: URL?, resumeAt position: CMTime? = nil) {
@@ -246,7 +310,20 @@ final class PlayerModel: ObservableObject {
     }
   }
 
+  /// The quality menu: the live stream's, or the VOD's while rewinding.
+  var menuQualities: [Quality] {
+    isRewinding ? rewindVariants.enumerated().map { Quality(id: $0.offset, label: $0.element.label) } : qualities
+  }
+
+  var menuSelectedQuality: Int? { isRewinding ? rewindQuality : selectedQuality }
+
   func selectQuality(_ quality: Quality) {
+    if isRewinding {
+      guard let index = quality.id, index != rewindQuality, index < rewindVariants.count else { return }
+      rewindQuality = index
+      startRewindItem(at: rewindPosition)
+      return
+    }
     guard quality.id != selectedQuality else { return }
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
@@ -266,6 +343,10 @@ final class PlayerModel: ObservableObject {
 
   /// Jumps back to the live edge (Apple player) after stalls have pushed it behind.
   func goLive() {
+    if isRewinding {
+      returnToLive()
+      return
+    }
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
         lowLatency.goLive()
@@ -283,6 +364,16 @@ final class PlayerModel: ObservableObject {
   // MARK: - Controls (both players)
 
   func togglePause() {
+    if isRewinding {
+      if rewindPlayer.timeControlStatus == .paused {
+        rewindPlayer.play()
+        isPaused = false
+      } else {
+        rewindPlayer.pause()
+        isPaused = true
+      }
+      return
+    }
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
         lowLatency.togglePause()
@@ -300,6 +391,10 @@ final class PlayerModel: ObservableObject {
   }
 
   func togglePictureInPicture() {
+    if isRewinding, let pip = rewindPictureInPicture {
+      if pip.isPictureInPictureActive { pip.stopPictureInPicture() } else { pip.startPictureInPicture() }
+      return
+    }
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
         lowLatency.togglePictureInPicture()
@@ -308,6 +403,17 @@ final class PlayerModel: ObservableObject {
     #endif
     guard let pip = applePictureInPicture else { return }
     if pip.isPictureInPictureActive { pip.stopPictureInPicture() } else { pip.startPictureInPicture() }
+  }
+
+  private func observeRewindPictureInPicture() {
+    rewindPipObservation = rewindPictureInPicture?.observe(\.isPictureInPictureActive, options: [.initial, .new]) {
+      [weak self] pip, _ in
+      let active = pip.isPictureInPictureActive
+      guard let model = self else { return }
+      Task { @MainActor in
+        if model.isRewinding { model.pictureInPictureActive = active }
+      }
+    }
   }
 
   private func observeApplePictureInPicture() {
@@ -369,6 +475,7 @@ final class PlayerModel: ObservableObject {
 
   /// Stops whichever player is running, keeping the model usable.
   private func teardownPlayback() {
+    stopRewindPlayback()
     #if canImport(AmazonIVSPlayer)
       lowLatency?.stop()
       lowLatency = nil
@@ -444,6 +551,12 @@ final class PlayerModel: ObservableObject {
       lastInfoRefresh = now
       Task { await refreshInfo() }
     }
+    if isLive, phase == .playing { checkForArchive() }
+    if let rewind { broadcastElapsed = max(0, now.timeIntervalSince(rewind.startedAt)) }
+    if isRewinding {
+      tickRewind()
+      return
+    }
     let wantsStats = AppSettings.shared.showVideoStats
     if !wantsStats, !stats.isEmpty { stats = [] }
     #if canImport(AmazonIVSPlayer)
@@ -517,10 +630,166 @@ final class PlayerModel: ObservableObject {
     if isLive {
       lines.append(StatLine(label: "Ads", value: adState.statsText))
       lines.append(StatLine(label: "Playlists", value: "Kestrel filter"))
-      lines.append(StatLine(label: "Ad blocking", value: AppSettings.shared.adBlockingSummary))
+      lines.append(StatLine(label: "Ad blocking", value: route?.summary ?? AppSettings.shared.adBlockingSummary))
       lines.append(StatLine(label: "Account", value: TwitchAuth.shared.session?.login ?? "not signed in"))
     }
     return lines
+  }
+
+  // MARK: - Rewind (the broadcast's VOD while it's recorded)
+
+  private func checkForArchive() {
+    guard rewind == nil, !checkingArchive, Date().timeIntervalSince(lastArchiveCheck) > 180,
+      case .live(let channel) = target
+    else { return }
+    checkingArchive = true
+    lastArchiveCheck = Date()
+    Task {
+      defer { checkingArchive = false }
+      guard let archive = await TwitchAPI.shared.liveArchive(login: channel.login), !stopped else { return }
+      // Only offer it when the VOD actually plays for this account (sub-only VODs may not).
+      guard let variants = try? await vodRenditions(id: archive.videoID), !stopped else {
+        ActivityLog.shared.add("This broadcast's VOD exists but doesn't play for you, so rewinding is off")
+        return
+      }
+      rewindVariants = variants.filter { !$0.isAudioOnly }
+      guard !rewindVariants.isEmpty else { return }
+      broadcastElapsed = max(0, Date().timeIntervalSince(archive.startedAt))
+      rewind = archive
+      ActivityLog.shared.add("Rewind available: the VOD of this broadcast is being recorded")
+      loadStoryboard(videoID: archive.videoID, known: archive.seekPreviewsURL.flatMap(URL.init(string:)), duration: nil)
+    }
+  }
+
+  /// Seeks within the broadcast: the VOD while behind, the live stream at the end.
+  func seekBroadcast(to seconds: Double) {
+    guard rewind != nil else { return }
+    if seconds >= broadcastElapsed - 20 {
+      returnToLive()
+      return
+    }
+    let target = max(0, seconds)
+    rewindPosition = target
+    if isRewinding, let item = rewindPlayer.currentItem, item.status == .readyToPlay {
+      rewindPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+      if !isPaused { rewindPlayer.play() }
+      return
+    }
+    if !isRewinding {
+      isRewinding = true
+      isPaused = false
+      suspendLive()
+      ActivityLog.shared.add("Rewinding: playing this broadcast's VOD")
+    }
+    startRewindItem(at: target)
+  }
+
+  private func startRewindItem(at seconds: Double) {
+    guard rewindQuality < rewindVariants.count, let url = URL(string: rewindVariants[rewindQuality].uri) else { return }
+    rewindPendingSeek = seconds
+    rewindEndSince = nil
+    let item = AVPlayerItem(url: url)
+    rewindItemObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+      let status = item.status
+      let message = item.error?.localizedDescription
+      guard let model = self else { return }
+      Task { @MainActor in model.rewindItemChanged(status, error: message) }
+    }
+    rewindPlayer.automaticallyWaitsToMinimizeStalling = true
+    rewindPlayer.replaceCurrentItem(with: item)
+    isBuffering = true
+  }
+
+  private func rewindItemChanged(_ status: AVPlayerItem.Status, error: String?) {
+    guard isRewinding else { return }
+    switch status {
+    case .readyToPlay:
+      guard let target = rewindPendingSeek else { return }
+      rewindPendingSeek = nil
+      rewindPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) {
+        [weak self] _ in
+        Task { @MainActor in
+          guard let model = self, model.isRewinding, !model.isPaused else { return }
+          model.rewindPlayer.play()
+        }
+      }
+    case .failed:
+      ActivityLog.shared.add("The VOD stopped playing (\(error ?? "error")); back to live")
+      returnToLive()
+    default:
+      break
+    }
+  }
+
+  /// Back to the live stream at the live edge.
+  func returnToLive() {
+    guard isRewinding else { return }
+    stopRewindPlayback()
+    isPaused = false
+    #if canImport(AmazonIVSPlayer)
+      if let lowLatency {
+        lowLatency.resumeLive()
+        return
+      }
+    #endif
+    goLive()
+  }
+
+  private func stopRewindPlayback() {
+    isRewinding = false
+    rewindPendingSeek = nil
+    rewindItemObservation = nil
+    rewindPlayer.pause()
+    rewindPlayer.replaceCurrentItem(with: nil)
+  }
+
+  private func suspendLive() {
+    #if canImport(AmazonIVSPlayer)
+      if let lowLatency {
+        lowLatency.suspend()
+        return
+      }
+    #endif
+    player.pause()
+  }
+
+  private func tickRewind() {
+    let current = rewindPlayer.currentTime().seconds
+    if current.isFinite, rewindPendingSeek == nil { rewindPosition = current }
+    let status = rewindPlayer.timeControlStatus
+    let buffering = status == .waitingToPlayAtSpecifiedRate || rewindPendingSeek != nil
+    if buffering != isBuffering { isBuffering = buffering }
+    if !buffering, isPaused != (status == .paused) { isPaused = status == .paused }
+    if pictureInPictureActive != (rewindPictureInPicture?.isPictureInPictureActive ?? false) {
+      pictureInPictureActive = rewindPictureInPicture?.isPictureInPictureActive ?? false
+    }
+    latency = max(0, broadcastElapsed - rewindPosition)
+    // Caught up with the end of the recording: carry on live.
+    if let end = rewindPlayer.currentItem?.seekableTimeRanges.last?.timeRangeValue, status == .waitingToPlayAtSpecifiedRate,
+      current >= CMTimeRangeGetEnd(end).seconds - 4
+    {
+      if rewindEndSince == nil { rewindEndSince = Date() }
+      if let since = rewindEndSince, Date().timeIntervalSince(since) > 3 {
+        ActivityLog.shared.add("Caught up with the recording: back to live")
+        returnToLive()
+      }
+    } else {
+      rewindEndSince = nil
+    }
+    if AppSettings.shared.showVideoStats, let item = rewindPlayer.currentItem {
+      var lines = [StatLine(label: "Player", value: "Apple (AVPlayer), rewinding the VOD")]
+      if rewindQuality < rewindVariants.count { lines.append(StatLine(label: "Quality", value: rewindVariants[rewindQuality].label)) }
+      let size = item.presentationSize
+      if size.width > 0 { lines.append(StatLine(label: "Resolution", value: "\(Int(size.width))×\(Int(size.height))")) }
+      if let event = item.accessLog()?.events.last {
+        lines.append(StatLine(label: "Bitrate", value: StatFormat.mbps(event.indicatedBitrate)))
+        lines.append(StatLine(label: "Bandwidth", value: StatFormat.mbps(event.observedBitrate)))
+      }
+      lines.append(StatLine(label: "Behind live", value: Format.duration(Int(broadcastElapsed - rewindPosition))))
+      stats = lines
+    } else if !stats.isEmpty {
+      stats = []
+    }
   }
 
   private func refreshInfo() async {

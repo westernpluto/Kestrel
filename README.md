@@ -7,17 +7,22 @@ An iOS client for watching Twitch without ads, with low-latency playback, chat a
 - **Ad-free streams through ad-free servers** (Settings → Ad blocking, on by default). Kestrel asks one of the [TTV LOL PRO v1 servers](https://wiki.cdn-perfprod.com/v1/must-read/proxies) (PerfProd / Luminous) for the stream. The server requests it from a country where Twitch doesn't run ads and hands back the playlist; the video itself still comes straight from Twitch at full quality.
   - "Automatic" tries the servers in order, starting with the last one that worked; you can also pin one server.
   - Alternatives: "My own proxy" (an HTTP proxy of yours in an ad-free country; only Twitch's playback requests go through it), or "Basic" (no server: client-side breaks are skipped, stitched-in ads are swapped for an ad-free copy of the stream or hidden).
-  - Signed in with Turbo, Twitch sends no ads, so Kestrel plays straight from Twitch.
+  - Signed in and subscribed to the channel (or with Turbo), Twitch shows you no ads: Kestrel checks that first and then plays straight from Twitch, with every quality (including sub-only and signed-in 1440p) and Twitch's own low latency.
   - As a safety net the player still strips ad markers and, if an ad is stitched in anyway, switches to an ad-free copy (the TwitchAdSolutions/vaft technique). Prefetched segments are held back during announced breaks so an ad doesn't flash on screen.
 - **Player, Twitch-style:**
   - Tap the video for controls; they fade out on their own. The gear holds **Quality**, **Low latency** and **Video stats**.
   - **Gestures:** double-tap for full screen (in landscape: zoom to fill / fit); pinch to fill or fit; swipe up for full screen; swipe down to leave full screen or close the player; in landscape, swipe left/right to show or hide chat.
-  - **Landscape:** the video stays inside the safe area, clear of the Dynamic Island, and chat sits beside it (toggle with the chat button or a swipe). The player turns with the phone; the full-screen button holds landscape until you turn the phone.
+  - **Landscape:** the video only keeps clear of the Dynamic Island; chat sits beside it and runs to the screen edge on the other side (toggle with the chat button or a swipe, drag the line between them to resize). The player turns with the phone; the full-screen button holds landscape until you turn the phone.
+  - **Rewind live streams:** when the channel records a VOD of the broadcast (and it plays for you), a seek bar runs from the start of the stream to now. Drag back to watch from any point; tap LIVE or drag to the end to return. Channels without that VOD don't get the bar.
+  - **VOD seek previews:** dragging the seek bar shows a thumbnail of where you'll land (Twitch's storyboards), on VODs and live rewinds.
+  - One layout for both orientations, so rotating, opening chat, the keyboard and the emote picker all animate instead of rebuilding the player.
   - Picture in Picture, AirPlay, background audio, tap LIVE to jump back to the live edge.
 - **Low latency:** the [Amazon IVS Player SDK](https://docs.aws.amazon.com/ivs/latest/LowLatencyUserGuide/player-ios.html) (the engine Twitch's own apps use) in Twitch's low-latency mode, usually a few seconds behind. Falls back to the Apple player (AVPlayer, ~8–12 s behind) if it can't play a stream. Only in builds made with the SDK (the GitHub Actions build downloads it). VODs use the Apple player.
 - **Highest quality, always:** the top rendition is picked and kept. Kestrel asks Twitch for every codec the iPhone decodes in hardware, so channels using Enhanced Broadcasting list their HEVC/AV1 1440p renditions; renditions the low-latency player can't decode appear as "· Apple player". Twitch only offers 1440p to some signed-in viewers in some regions.
 - **Sign in with Twitch** (optional) on Twitch's own login page inside the app:
   - **Chat as yourself**, with room-mode notices (slow, followers-only, sub-only); tap a name to mention it.
+  - **Emote picker** (smiley button): every emote you can use in this channel — the channel's sub and follower emotes you have, your other subs, Twitch's, and the channel's 7TV/BTTV/FFZ emotes — with Recent first.
+  - **Autocomplete:** type `:` and a few letters for emotes, `@` for people in chat.
   - **Following** shows your Twitch follows, live channels first (sorted by viewers) and offline ones with when they were last live. Channels you heart in the player are added too.
 - **Chat:** Twitch, 7TV, BTTV and FFZ emotes (animated), badges, and recent messages when you join.
 - **Video stats:** a Twitch-style overlay with player, quality, codecs, resolution, frame rate, bitrate, bandwidth, buffer, latency, dropped frames, ad state and ad-blocking route.
@@ -53,7 +58,7 @@ Download `Kestrel.ipa` from the latest GitHub Actions run (**Actions → Build I
 ## Limitations
 
 - The ad-free servers are run by third parties (PerfProd, Luminous). They see which channel you open, not your Twitch login; if none answers, Kestrel falls back to Basic ad blocking.
-- Streams fetched through an ad-free server are requested anonymously, so 1440p that Twitch reserves for signed-in viewers may not be listed. Switch Ad blocking to Basic if you'd rather have that.
+- Streams fetched through an ad-free server are requested anonymously, so 1440p that Twitch reserves for signed-in viewers may not be listed there (channels you're subscribed to play straight from Twitch and keep it). Switch Ad blocking to Basic if you'd rather have it everywhere.
 - Following and unfollowing on Twitch itself isn't possible from Kestrel (Twitch requires its own app for that); the heart adds a channel to Kestrel's list.
 - The Amazon IVS Player SDK isn't open source; it's distributed by AWS under its own terms and isn't included in this repository.
 

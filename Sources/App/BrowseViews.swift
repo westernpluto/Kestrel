@@ -23,7 +23,9 @@ struct BrowseView: View {
       }
     }
     .refreshable {
-      if mode == .live { await streams.refresh() } else { await categories.refresh() }
+      await detachedRefresh { [mode, streams, categories] in
+        if mode == .live { await streams.refresh() } else { await categories.refresh() }
+      }
     }
     .navigationTitle("Browse")
     .task {
@@ -101,7 +103,7 @@ struct CategoryView: View {
       .padding(.horizontal)
       StreamList(paginator: streams, showCategory: false)
     }
-    .refreshable { await streams.refresh() }
+    .refreshable { await detachedRefresh { await streams.refresh() } }
     .navigationTitle(category.name)
     .navigationBarTitleDisplayMode(.inline)
     .task { if streams.items.isEmpty { await streams.refresh() } }
@@ -224,12 +226,25 @@ final class FollowingStore: ObservableObject {
   @Published private(set) var error: String?
   private var lastRefresh = Date.distantPast
 
+  private var current: Task<Void, Never>?
+
   func refreshIfStale() async {
     if Date().timeIntervalSince(lastRefresh) > 60 { await refresh() }
   }
 
-  func refresh() async {
-    guard !isLoading else { return }
+  /// Runs one refresh at a time; a pull to refresh waits for the one already running.
+  func refresh(force: Bool = false) async {
+    if let current {
+      await current.value
+      if !force { return }
+    }
+    let task = Task { await load() }
+    current = task
+    await task.value
+    current = nil
+  }
+
+  private func load() async {
     isLoading = true
     defer { isLoading = false }
     lastRefresh = Date()
@@ -248,6 +263,7 @@ final class FollowingStore: ObservableObject {
             offlineByID[follow.id] = OfflineChannel(channel: follow.channel, lastLive: follow.lastLive)
           }
         }
+      } catch where error.isCancellation {
       } catch {
         problem = "Couldn't load your Twitch follows (\(error.localizedDescription))."
       }
@@ -263,6 +279,7 @@ final class FollowingStore: ObservableObject {
         for (channel, stream) in results {
           if let stream { liveByID[channel.id] = stream } else { offlineByID[channel.id] = OfflineChannel(channel: channel) }
         }
+      } catch where error.isCancellation {
       } catch {
         problem = problem ?? error.localizedDescription
       }
@@ -342,7 +359,7 @@ struct FollowingView: View {
       .padding(.horizontal)
       .padding(.bottom)
     }
-    .refreshable { await store.refresh() }
+    .refreshable { await detachedRefresh { await store.refresh(force: true) } }
     .navigationTitle("Following")
     .task(id: refreshKey) { await store.refresh() }
     .onAppear { Task { await store.refreshIfStale() } }

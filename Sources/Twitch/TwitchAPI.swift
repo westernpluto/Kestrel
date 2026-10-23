@@ -69,6 +69,30 @@ struct ChannelSearchResult: Identifiable, Hashable, Sendable {
   var id: String { channel.id }
 }
 
+struct TwitchEmote: Hashable, Sendable {
+  var id: String
+  var token: String
+  var setID: String?
+  var ownerID: String?
+  var type: String?
+
+  var url: URL? { ChatMessage.twitchEmoteURL(id) }
+}
+
+struct TwitchEmoteGroup: Sendable {
+  var ownerID: String?
+  var ownerName: String?
+  var ownerImage: String?
+  var emotes: [TwitchEmote]
+}
+
+struct LiveArchive: Equatable, Sendable {
+  var videoID: String
+  /// When the recording (and the broadcast) started.
+  var startedAt: Date
+  var seekPreviewsURL: String?
+}
+
 struct Badge: Sendable {
   var setID: String
   var version: String
@@ -560,6 +584,159 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
       cursor = last
     }
     return result
+  }
+
+  // MARK: Emotes you can use
+
+  /// The signed-in account's emotes that work in `channelID`'s chat (subs, follower emotes,
+  /// Turbo/Prime sets, globals), grouped by owner.
+  func availableEmotes(channelID: String?) async -> [TwitchEmoteGroup] {
+    guard TwitchAuth.shared.session != nil else { return [] }
+    var groups: [TwitchEmoteGroup] = []
+    // 1. What the website's emote picker uses.
+    if let channelID {
+      var cursor: String?
+      for _ in 0..<4 {
+        var variables: [String: Any] = ["channelID": channelID, "pageLimit": 350, "withOwner": true]
+        if let cursor { variables["cursor"] = cursor }
+        guard
+          let data = try? await send(
+            [
+              "operationName": "AvailableEmotesForChannelPaginated",
+              "extensions": ["persistedQuery": ["version": 1, "sha256Hash": Self.availableEmotesHash] as [String: Any]],
+              "variables": variables,
+            ])
+        else { break }
+        let sets = data["channel"]["self"]["availableEmoteSetsPaginated"]
+        for edge in sets["edges"].array {
+          let node = edge["node"]
+          let emotes = node["emotes"].array.compactMap(Self.twitchEmote)
+          guard !emotes.isEmpty else { continue }
+          let owner = node["owner"]
+          groups.append(
+            TwitchEmoteGroup(
+              ownerID: owner["id"].string ?? emotes.first?.ownerID, ownerName: owner["displayName"].string ?? owner["login"].string,
+              ownerImage: owner["profileImageURL"].string, emotes: emotes))
+        }
+        guard sets["pageInfo"]["hasNextPage"].bool == true, let next = sets["edges"].array.last?["cursor"].string else { break }
+        cursor = next
+      }
+    }
+    // 2. Fallback: every emote set the account owns.
+    if groups.isEmpty,
+      let data = try? await query(
+        "query null { user { emoteSets { emotes { id owner { id } setID token type } } } }", authenticated: true)
+    {
+      var byOwner: [String: [TwitchEmote]] = [:]
+      var order: [String] = []
+      for set in data["user"]["emoteSets"].array {
+        for emote in set["emotes"].array.compactMap(Self.twitchEmote) {
+          // Follower emotes only work in their own channel.
+          if emote.type?.uppercased() == "FOLLOWER", let owner = emote.ownerID, owner != channelID { continue }
+          let key = emote.ownerID ?? "0"
+          if byOwner[key] == nil { order.append(key) }
+          byOwner[key, default: []].append(emote)
+        }
+      }
+      groups = order.map { TwitchEmoteGroup(ownerID: $0, ownerName: nil, ownerImage: nil, emotes: byOwner[$0] ?? []) }
+    }
+    // Names and pictures for the owners the response didn't describe.
+    let unnamed = groups.compactMap { $0.ownerName == nil ? $0.ownerID : nil }.filter { $0 != "0" && !$0.isEmpty }
+    if !unnamed.isEmpty,
+      let data = try? await query(
+        "query null($ids: [ID!]) { users(ids: $ids) { id displayName login profileImageURL(width: 70) } }",
+        variables: ["ids": Array(Set(unnamed)).prefix(100).map { $0 }])
+    {
+      var names: [String: (String, String?)] = [:]
+      for user in data["users"].array {
+        if let id = user["id"].string { names[id] = (user["displayName"].string ?? user["login"].string ?? id, user["profileImageURL"].string) }
+      }
+      for index in groups.indices {
+        if groups[index].ownerName == nil, let id = groups[index].ownerID, let found = names[id] {
+          groups[index].ownerName = found.0
+          groups[index].ownerImage = found.1
+        }
+      }
+    }
+    return groups
+  }
+
+  static let availableEmotesHash = "6c45e0ecaa823cc7db3ecdd1502af2223c775bdcfb0f18a3a0ce9a0b7db8ef6c"
+
+  static func twitchEmote(_ j: JSONValue) -> TwitchEmote? {
+    guard let id = j["id"].string, var token = j["token"].string, !token.isEmpty else { return nil }
+    let type = j["type"].string
+    if type?.uppercased() == "SMILIES" {
+      // Classic smileys are stored as regexes (e.g. "\\:-?\\)"): show the plain form.
+      token = token.replacingOccurrences(of: "\\", with: "").replacingOccurrences(of: "?", with: "")
+        .replacingOccurrences(of: "&lt;", with: "<").replacingOccurrences(of: "&gt;", with: ">")
+      token = token.replacingOccurrences(of: #"\((.)\|.\)"#, with: "$1", options: .regularExpression)
+      token = token.replacingOccurrences(of: #"\[(.).*?\]"#, with: "$1", options: .regularExpression)
+    }
+    return TwitchEmote(id: id, token: token, setID: j["setID"].string, ownerID: j["owner"]["id"].string, type: type)
+  }
+
+  // MARK: Rewinding a live stream
+
+  /// The VOD being recorded for the live broadcast, if the channel saves VODs.
+  func liveArchive(login: String) async -> LiveArchive? {
+    let withStatus = try? await query(
+      """
+      query null($login: String) {
+        user(login: $login, lookupType: ALL) {
+          stream { createdAt id }
+          videos(first: 1, types: [ARCHIVE], sort: TIME) { edges { node { createdAt id status seekPreviewsURL } } }
+        }
+      }
+      """, variables: ["login": login.lowercased()])
+    let data: JSONValue
+    if let withStatus {
+      data = withStatus
+    } else if let plain = try? await query(
+      """
+      query null($login: String) {
+        user(login: $login, lookupType: ALL) {
+          stream { createdAt id }
+          videos(first: 1, types: [ARCHIVE], sort: TIME) { edges { node { createdAt id } } }
+        }
+      }
+      """, variables: ["login": login.lowercased()])
+    {
+      data = plain
+    } else {
+      return nil
+    }
+    let user = data["user"]
+    guard !user["stream"].isNull, let streamStart = user["stream"]["createdAt"].date,
+      let node = user["videos"]["edges"].array.first?["node"], let id = node["id"].string, let created = node["createdAt"].date
+    else { return nil }
+    if let status = node["status"].string, status.uppercased() != "RECORDING" { return nil }
+    // The archive of this broadcast starts when the broadcast did.
+    guard abs(created.timeIntervalSince(streamStart)) < 15 * 60 else { return nil }
+    return LiveArchive(videoID: id, startedAt: created, seekPreviewsURL: node["seekPreviewsURL"].string)
+  }
+
+  /// Where a VOD's storyboard (seek preview thumbnails) is described.
+  func seekPreviewsURL(videoID: String) async -> URL? {
+    if let data = try? await query("query null($id: ID) { video(id: $id) { seekPreviewsURL } }", variables: ["id": videoID]),
+      let url = data["video"]["seekPreviewsURL"].string.flatMap(URL.init(string:))
+    {
+      return url
+    }
+    let data = try? await send([
+      "operationName": "VideoPlayer_VODSeekbarPreviewVideo",
+      "extensions": ["persistedQuery": ["version": 1, "sha256Hash": "07e99e4d56c5a7c67117a154777b0baf85a5ffefa393b213f4bc712ccaf85dd6"] as [String: Any]],
+      "variables": ["includePrivate": false, "videoID": videoID] as [String: Any],
+    ], anonymous: true)
+    return data?["video"]["seekPreviewsURL"].string.flatMap(URL.init(string:))
+  }
+
+  func storyboard(url: URL, duration: Double?) async -> Storyboard? {
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 10
+    request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
+    guard let (data, response) = try? await http.data(for: request), response.statusCode == 200 else { return nil }
+    return Storyboard.parse(data, base: url, duration: duration)
   }
 
   // MARK: Image URL helpers

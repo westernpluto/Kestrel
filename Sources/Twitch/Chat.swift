@@ -138,7 +138,7 @@ struct ChatMessage: Identifiable, Equatable {
 
   /// A message you sent: Twitch doesn't echo your own messages, so it's shown from your
   /// USERSTATE (name, color, badges).
-  init(sent text: String, userState: [String: String], login: String) {
+  init(sent text: String, userState: [String: String], login: String, emoteIDs: [String: String] = [:]) {
     var body = text
     var kind: Kind = .message
     if body.hasPrefix("/me ") {
@@ -153,8 +153,35 @@ struct ChatMessage: Identifiable, Equatable {
     badges = (userState["badges"] ?? "").split(separator: ",").map(String.init)
     self.text = body
     systemText = nil
-    emotes = []
+    emotes = Self.emoteRanges(in: body, ids: emoteIDs)
     timestamp = Date()
+  }
+
+  /// Twitch emotes in your own text (Twitch doesn't send them back): whole words matching an
+  /// emote you have, as Unicode-scalar ranges like the IRC `emotes` tag.
+  static func emoteRanges(in text: String, ids: [String: String]) -> [(id: String, range: ClosedRange<Int>)] {
+    guard !ids.isEmpty else { return [] }
+    var result: [(String, ClosedRange<Int>)] = []
+    var offset = 0
+    var word = ""
+    var start = 0
+    func flush() {
+      if !word.isEmpty, let id = ids[word] { result.append((id, start...(offset - 1))) }
+      word = ""
+    }
+    for scalar in text.unicodeScalars {
+      if scalar == " " {
+        flush()
+        offset += 1
+        start = offset
+      } else {
+        if word.isEmpty { start = offset }
+        word.unicodeScalars.append(scalar)
+        offset += 1
+      }
+    }
+    flush()
+    return result
   }
 
   /// A line from Kestrel itself (connection state, chat rules).
@@ -259,8 +286,26 @@ struct ChatMessage: Identifiable, Equatable {
 
 // MARK: - Third-party emotes (7TV, BTTV, FFZ)
 
+/// An emote you can type: its name and picture.
+struct NamedEmote: Hashable, Sendable {
+  var name: String
+  var url: URL
+}
+
+/// 7TV, BTTV and FFZ emotes for a channel, by provider (for the emote picker) and merged by name
+/// (for showing messages).
+struct ThirdPartyEmoteSets: Sendable {
+  struct Section: Sendable {
+    var title: String
+    var emotes: [NamedEmote]
+  }
+  var channel: [Section] = []
+  var global: [Section] = []
+  var byName: [String: URL] = [:]
+}
+
 enum ThirdPartyEmotes {
-  static func load(channelID: String?, http: HTTPClient) async -> [String: URL] {
+  static func load(channelID: String?, http: HTTPClient) async -> ThirdPartyEmoteSets {
     async let seventvGlobal = fetch(URL(string: "https://7tv.io/v3/emote-sets/global")!, http) { parse7TV($0["emotes"]) }
     async let bttvGlobal = fetch(URL(string: "https://api.betterttv.net/3/cached/emotes/global")!, http) {
       parseBTTV($0.array)
@@ -281,11 +326,21 @@ enum ThirdPartyEmotes {
       }
       (channel7TV, channelBTTV, channelFFZ) = await (a, b, c)
     }
-    var result: [String: URL] = [:]
+    let globals = await (seventvGlobal, bttvGlobal, ffzGlobal)
+    var result = ThirdPartyEmoteSets()
     // Lowest priority first; channel 7TV wins on name clashes.
-    for map in await [ffzGlobal, bttvGlobal, seventvGlobal] + [channelFFZ, channelBTTV, channel7TV] {
-      result.merge(map) { _, new in new }
+    for map in [globals.2, globals.1, globals.0, channelFFZ, channelBTTV, channel7TV] {
+      result.byName.merge(map) { _, new in new }
     }
+    func section(_ title: String, _ map: [String: URL]) -> ThirdPartyEmoteSets.Section? {
+      guard !map.isEmpty else { return nil }
+      let emotes = map.map { NamedEmote(name: $0.key, url: $0.value) }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+      return ThirdPartyEmoteSets.Section(title: title, emotes: emotes)
+    }
+    result.channel = [section("7TV", channel7TV), section("BTTV", channelBTTV), section("FFZ", channelFFZ)].compactMap { $0 }
+    result.global = [section("7TV global", globals.0), section("BTTV global", globals.1), section("FFZ global", globals.2)]
+      .compactMap { $0 }
     return result
   }
 

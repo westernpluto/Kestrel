@@ -53,6 +53,8 @@ final class FakeTwitch: HTTPClient, PlaybackTokenProvider, @unchecked Sendable {
   var mainMediaStatus: Int?
   /// EXTINF title of stitched ad segments ("Amazon|…" historically; IVS-style ads use an ID).
   var adTitle = "Amazon|5555"
+  /// Tokens describe a signed-in account Twitch shows no ads (a sub).
+  var subscriberAccount = false
 
   let variants = [("1080p60", "1920x1080", 60.0, 6_000_000), ("720p60", "1280x720", 60.0, 3_000_000), ("480p", "852x480", 30.0, 1_400_000)]
 
@@ -70,6 +72,11 @@ final class FakeTwitch: HTTPClient, PlaybackTokenProvider, @unchecked Sendable {
     tokenRequests.append(playerType)
     if mainToken == nil { mainToken = token }
     lock.unlock()
+    if subscriberAccount {
+      return PlaybackToken(
+        value: #"{"hide_ads":true,"show_ads":false,"subscriber":true,"turbo":false,"user_id":42,"k":"\#(token)"}"#,
+        signature: "sig")
+    }
     return PlaybackToken(value: token, signature: "sig")
   }
 
@@ -91,7 +98,12 @@ final class FakeTwitch: HTTPClient, PlaybackTokenProvider, @unchecked Sendable {
     defer { lock.unlock() }
     if url.host == "usher.ttvnw.net" {
       let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)!
-      let token = comps.queryItems?.first { $0.name == "token" }?.value ?? ""
+      var token = comps.queryItems?.first { $0.name == "token" }?.value ?? ""
+      if token.hasPrefix("{"), let object = try? JSONSerialization.jsonObject(with: Data(token.utf8)) as? [String: Any],
+        let key = object["k"] as? String
+      {
+        token = key
+      }
       guard let type = sessions[token] else { return respond(403, "bad token") }
       if failingTypes.contains(type) { return respond(500, "nope") }
       var lines = ["#EXTM3U"]
@@ -609,6 +621,13 @@ func testIRC() {
   check(ChatMessage(irc: IRCMessage.parse(":tmi.twitch.tv 001 justinfan1 :Welcome")!) == nil, "numeric ignored")
 }
 
+func testOwnEmotes() {
+  let sent = ChatMessage(sent: "hi Kappa  catJAM Kappa", userState: [:], login: "me", emoteIDs: ["Kappa": "25"])
+  check(sent.emotes.count == 2 && sent.emotes[0].range == 3...7 && sent.emotes[1].range == 17...21, "\(sent.emotes)")
+  let fragments = sent.fragments(thirdParty: ["catJAM": URL(string: "https://cdn.7tv.app/emote/1/2x.webp")!])
+  check(fragments.filter { if case .emote = $0 { return true } else { return false } }.count == 3, "\(fragments)")
+}
+
 func testEmoteParsers() {
   let seventv = JSONValue(try! JSONSerialization.jsonObject(with: Data("""
     {"emotes":[{"name":"catJAM","data":{"host":{"url":"//cdn.7tv.app/emote/60ae","files":[{"name":"1x.webp","format":"WEBP"},{"name":"2x.webp","format":"WEBP"}]}}}]}
@@ -829,6 +848,56 @@ final class ProxyFake: HTTPClient, @unchecked Sendable {
   }
 }
 
+func testAccountRoute() {
+  // Signed in with a sub: Twitch says no ads, so the ad-free servers aren't asked at all.
+  runAsync {
+    let twitch = FakeTwitch()
+    twitch.subscriberAccount = true
+    let http = ProxyFake(twitch)
+    let log = ActivityLog()
+    var config = LowLatencyConfig()
+    config.adFreeProxies = ["proxy.test"]
+    config.checkAccountFirst = true
+    let session = LowLatencySession(login: "streamer", config: config, http: http, tokens: twitch, log: log)
+    _ = try! await session.start()
+    let route = await session.route
+    check(route == .twitchAdFree("subscribed"), "sub plays direct: \(route)")
+    check(!http.requested.contains("proxy.test"), "no proxy request: \(http.requested)")
+    check(log.messages.contains { $0.contains("playing straight from Twitch") }, "\(log.messages)")
+  }
+  // Signed in without a sub: the token says ads are possible, so the server is used, and the
+  // token already fetched is reused if the servers fail.
+  runAsync {
+    let twitch = FakeTwitch()
+    let http = ProxyFake(twitch)
+    var config = StreamSessionConfig()
+    config.adFreeProxies = ["down.test"]
+    config.checkAccountFirst = true
+    let session = StreamSession(login: "streamer", config: config, http: http, tokens: twitch, log: ActivityLog()) { _, _ in }
+    _ = try! await session.start()
+    let route = await session.route
+    check(route == .twitch, "falls back to Twitch: \(route)")
+    check(twitch.tokenRequests == ["popout"], "one token: \(twitch.tokenRequests)")
+  }
+}
+
+func testStoryboard() {
+  let json = """
+    [{"count":120,"width":220,"rows":10,"images":["v1-low-0.jpg"],"interval":15,"quality":"low","height":124,"cols":12},
+     {"count":120,"width":320,"rows":5,"images":["v1-high-0.jpg","v1-high-1.jpg","v1-high-2.jpg"],"interval":15,"quality":"high","height":180,"cols":8}]
+    """
+  let base = URL(string: "https://cdn.test/abc_streamer_1/storyboards/v1-info.json")!
+  let board = Storyboard.parse(Data(json.utf8), base: base, duration: nil)
+  check(board?.width == 320 && board?.images.count == 3, "sharpest board")
+  check(board?.images[1].absoluteString == "https://cdn.test/abc_streamer_1/storyboards/v1-high-1.jpg", "relative image URL")
+  // 15 s per thumbnail, 40 per sheet: 700 s = thumbnail 46 = sheet 1, cell 6 (column 6, row 0).
+  check(board?.frame(at: 700) == Storyboard.Frame(image: board!.images[1], column: 6, row: 0), "frame math")
+  check(board?.frame(at: 1e9)?.image == board?.images[2], "clamped to the last thumbnail")
+  let noInterval = #"[{"count":10,"width":100,"rows":2,"images":["a.jpg"],"height":50,"cols":5}]"#
+  check(Storyboard.parse(Data(noInterval.utf8), base: base, duration: 100)?.interval == 10, "interval from duration")
+  check(Storyboard.parse(Data(noInterval.utf8), base: base, duration: nil) == nil, "needs an interval")
+}
+
 func testAdFreeProxy() {
   let url = AdFreeProxy.masterURL(host: "eu.luminous.dev", login: "SomeOne", codecs: "h265,h264", lowLatency: true)!
   check(url.absoluteString.hasPrefix("https://eu.luminous.dev/live/someone?") && url.query!.contains("fast_bread=true"), "\(url)")
@@ -845,8 +914,8 @@ func testAdFreeProxy() {
     config.adFreeProxies = ["down.test", "proxy.test"]
     let session = LowLatencySession(login: "streamer", config: config, http: http, tokens: twitch, log: log)
     _ = try! await session.start()
-    let host = await session.proxyHost
-    check(host == "proxy.test", "proxy used")
+    let route = await session.route
+    check(route == .adFreeServer("proxy.test"), "proxy used")
     let media = await session.mediaPlaylist(0)
     check(!media.body.contains("/ad-") && media.body.contains("edge.test/"), "proxied session has no ads")
     check(log.messages.contains { $0.contains("proxy.test delivered the stream, Twitch sees RU") }, "\(log.messages)")
@@ -856,6 +925,8 @@ func testAdFreeProxy() {
 }
 
 testAdFreeProxy()
+testAccountRoute()
+testStoryboard()
 testTokenInfo()
 testDates()
 testMasterParsing()
@@ -873,6 +944,7 @@ testUpstreamErrors()
 testLocalServer()
 testIRC()
 testEmoteParsers()
+testOwnEmotes()
 testAPIParsing()
 print("\(checks) checks, \(failures) failures")
 exit(failures == 0 ? 0 : 1)

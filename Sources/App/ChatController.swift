@@ -15,6 +15,16 @@ final class ChatController: ObservableObject {
   private(set) var messages: [ChatMessage] = []
   private(set) var thirdParty: [String: URL] = [:]
   private(set) var badges: [String: Badge] = [:]
+  /// Emotes you can use here, for the picker (Recent first).
+  @Published private(set) var emoteSections: [EmoteSection] = []
+  /// Every emote you can type here, by name (autocomplete).
+  private(set) var usableEmotes: [NamedEmote] = []
+  /// Your Twitch emotes: name → ID (to show them in your own messages).
+  private(set) var twitchEmoteIDs: [String: String] = [:]
+  private var thirdPartySets = ThirdPartyEmoteSets()
+  private var twitchGroups: [TwitchEmoteGroup] = []
+  /// Recent chatters, newest first (for @ autocomplete).
+  private(set) var recentChatters: [String] = []
   /// Called with `true` when everything should be re-rendered (emotes/badges loaded).
   var onUpdate: ((_ fullReload: Bool) -> Void)?
 
@@ -46,13 +56,106 @@ final class ChatController: ObservableObject {
       async let badgeMap = TwitchAPI.shared.badges(channelID: channel.id)
       let emotes = await ThirdPartyEmotes.load(channelID: channel.id, http: http)
       let (recent, loadedBadges) = await (history, badgeMap)
-      thirdParty = emotes
+      thirdPartySets = emotes
+      thirdParty = emotes.byName
       badges = loadedBadges
       let old = recent.compactMap(ChatMessage.init(irc:)).filter { $0.kind != .notice }
       messages = Array((old + messages).suffix(maxMessages))
+      for message in old.reversed() { noteChatter(message.displayName) }
+      rebuildEmoteSections()
       onUpdate?(true)
     }
+    loadTwitchEmotes()
     connect()
+  }
+
+  /// Your Twitch emotes for this channel (needs sign-in).
+  func loadTwitchEmotes() {
+    let channelID = channel.id.isEmpty ? nil : channel.id
+    Task {
+      twitchGroups = await TwitchAPI.shared.availableEmotes(channelID: channelID)
+      rebuildEmoteSections()
+    }
+  }
+
+  private func rebuildEmoteSections() {
+    var sections: [EmoteSection] = []
+    var ids: [String: String] = [:]
+    // Group your Twitch emotes by owner: this channel first, then other channels, then Twitch's own.
+    var byOwner: [String: (name: String?, image: String?, emotes: [TwitchEmote])] = [:]
+    var ownerOrder: [String] = []
+    for group in twitchGroups {
+      let key = group.ownerID.flatMap { $0.isEmpty || $0 == "0" ? nil : $0 } ?? "twitch"
+      if byOwner[key] == nil { ownerOrder.append(key) }
+      var entry = byOwner[key] ?? (group.ownerName, group.ownerImage, [])
+      entry.emotes += group.emotes
+      if entry.name == nil { entry.name = group.ownerName }
+      if entry.image == nil { entry.image = group.ownerImage }
+      byOwner[key] = entry
+    }
+    func twitchSection(_ key: String, title: String) -> EmoteSection? {
+      guard let entry = byOwner[key] else { return nil }
+      var seen = Set<String>()
+      let emotes = entry.emotes.compactMap { emote -> NamedEmote? in
+        guard seen.insert(emote.token).inserted, let url = emote.url else { return nil }
+        ids[emote.token] = emote.id
+        return NamedEmote(name: emote.token, url: url)
+      }
+      guard !emotes.isEmpty else { return nil }
+      return EmoteSection(id: "twitch-\(key)", title: title, icon: entry.image.flatMap(URL.init(string:)), emotes: emotes)
+    }
+    if let own = twitchSection(channel.id, title: channel.name) { sections.append(own) }
+    for section in thirdPartySets.channel {
+      sections.append(EmoteSection(id: "channel-\(section.title)", title: "\(section.title) · \(channel.name)", icon: nil, emotes: section.emotes))
+    }
+    let others = ownerOrder.filter { $0 != channel.id && $0 != "twitch" }
+      .sorted { (byOwner[$0]?.name ?? "~").localizedCaseInsensitiveCompare(byOwner[$1]?.name ?? "~") == .orderedAscending }
+    for key in others {
+      if let section = twitchSection(key, title: byOwner[key]?.name ?? "Subscriptions") { sections.append(section) }
+    }
+    if let global = twitchSection("twitch", title: "Twitch") { sections.append(global) }
+    for section in thirdPartySets.global {
+      sections.append(EmoteSection(id: "global-\(section.title)", title: section.title, icon: nil, emotes: section.emotes))
+    }
+    twitchEmoteIDs = ids
+
+    // Everything usable by name (Twitch emotes win over third-party ones with the same name).
+    var byName: [String: NamedEmote] = [:]
+    for section in sections.reversed() {
+      for emote in section.emotes { byName[emote.name] = emote }
+    }
+    usableEmotes = byName.values.sorted { $0.name.count < $1.name.count }
+    let recent = RecentEmotes.names.compactMap { byName[$0] }
+    if !recent.isEmpty { sections.insert(EmoteSection(id: "recent", title: "Recent", icon: nil, emotes: recent), at: 0) }
+    emoteSections = sections
+  }
+
+  /// Emotes for `query` (typed after ":"): prefix matches first, then the rest containing it.
+  func emoteSuggestions(_ query: String, limit: Int = 40) -> [NamedEmote] {
+    guard !query.isEmpty else { return [] }
+    var prefix: [NamedEmote] = []
+    var contains: [NamedEmote] = []
+    for emote in usableEmotes {
+      if emote.name.range(of: query, options: [.caseInsensitive, .anchored]) != nil {
+        prefix.append(emote)
+      } else if emote.name.range(of: query, options: .caseInsensitive) != nil {
+        contains.append(emote)
+      }
+      if prefix.count >= limit { break }
+    }
+    return Array((prefix + contains).prefix(limit))
+  }
+
+  func chatterSuggestions(_ query: String, limit: Int = 20) -> [String] {
+    recentChatters.filter { query.isEmpty || $0.range(of: query, options: [.caseInsensitive, .anchored]) != nil }
+      .prefix(limit).map { $0 }
+  }
+
+  private func noteChatter(_ name: String) {
+    guard !name.isEmpty else { return }
+    if let index = recentChatters.firstIndex(of: name) { recentChatters.remove(at: index) }
+    recentChatters.insert(name, at: 0)
+    if recentChatters.count > 300 { recentChatters.removeLast() }
   }
 
   func stop() {
@@ -65,6 +168,7 @@ final class ChatController: ObservableObject {
   func reconnect() {
     guard running else { return }
     authRefused = false
+    loadTwitchEmotes()
     socket?.cancel(with: .goingAway, reason: nil)
     socket = nil
     connect()
@@ -83,7 +187,12 @@ final class ChatController: ObservableObject {
       guard let error, let chat = self else { return }
       Task { @MainActor in chat.enqueue(ChatMessage(notice: "Couldn't send: \(error.localizedDescription)")) }
     }
-    enqueue(ChatMessage(sent: text, userState: userState, login: login))
+    enqueue(ChatMessage(sent: text, userState: userState, login: login, emoteIDs: twitchEmoteIDs))
+    let used = Set(text.split(separator: " ").map(String.init)).filter { name in usableEmotes.contains { $0.name == name } }
+    if !used.isEmpty {
+      RecentEmotes.add(Array(used))
+      rebuildEmoteSections()
+    }
   }
 
   private func connect() {
@@ -175,7 +284,10 @@ final class ChatController: ObservableObject {
         }
         if let notice = ChatMessage(irc: irc) { enqueue(notice) }
       default:
-        if let message = ChatMessage(irc: irc) { enqueue(message) }
+        if let message = ChatMessage(irc: irc) {
+          if message.kind == .message || message.kind == .action { noteChatter(message.displayName) }
+          enqueue(message)
+        }
       }
     }
   }
@@ -214,6 +326,25 @@ final class ChatController: ObservableObject {
     pending.removeAll()
     if messages.count > maxMessages { messages.removeFirst(messages.count - maxMessages) }
     onUpdate?(false)
+  }
+}
+
+struct EmoteSection: Identifiable {
+  var id: String
+  var title: String
+  var icon: URL?
+  var emotes: [NamedEmote]
+}
+
+/// Emotes you used lately, across channels.
+enum RecentEmotes {
+  private static let key = "recentEmotes"
+  static var names: [String] { UserDefaults.standard.stringArray(forKey: key) ?? [] }
+
+  static func add(_ used: [String]) {
+    var list = names.filter { !used.contains($0) }
+    list.insert(contentsOf: used, at: 0)
+    UserDefaults.standard.set(Array(list.prefix(36)), forKey: key)
   }
 }
 
@@ -431,6 +562,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   private var rendered: [String: RenderedMessage] = [:]
   private var heights: [String: CGFloat] = [:]
   private var lastWidth: CGFloat = 0
+  private var lastHeight: CGFloat = 0
   private var following = true
   private var imageObserver: NSObjectProtocol?
   var onMention: ((String) -> Void)?
@@ -450,7 +582,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     tableView.dataSource = self
     tableView.delegate = self
     tableView.register(ChatCell.self, forCellReuseIdentifier: "chat")
-    tableView.keyboardDismissMode = .interactive
+    tableView.keyboardDismissMode = .onDrag
     tableView.showsVerticalScrollIndicator = false
     tableView.translatesAutoresizingMaskIntoConstraints = false
     view.addSubview(tableView)
@@ -495,9 +627,14 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     super.viewDidLayoutSubviews()
     if abs(tableView.bounds.width - lastWidth) > 0.5 {
       lastWidth = tableView.bounds.width
+      lastHeight = tableView.bounds.height
       heights = [:]
       tableView.reloadData()
-      if following { scrollToBottom() }
+      if following { scrollToBottom(animated: false) }
+    } else if abs(tableView.bounds.height - lastHeight) > 0.5 {
+      // Keyboard or emote picker: stay on the newest messages.
+      lastHeight = tableView.bounds.height
+      if following { scrollToBottom(animated: false) }
     }
   }
 
@@ -518,28 +655,77 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
       heights = [:]
     }
     guard following else {
-      resumeButton.isHidden = false
+      if resumeButton.isHidden {
+        resumeButton.alpha = 0
+        resumeButton.isHidden = false
+        UIView.animate(withDuration: 0.2) { self.resumeButton.alpha = 1 }
+      }
       if fullReload { tableView.reloadData() }
       return
     }
-    displayed = chat.messages
+    let old = displayed
+    let new = chat.messages
+    // Usually the newest messages were added and the oldest dropped: update just those rows and
+    // glide down instead of reloading the list (which made chat jump).
+    if !fullReload, tableView.window != nil, let first = new.first, let start = old.firstIndex(where: { $0.id == first.id }),
+      old.count - start <= new.count,
+      zip(old[start...], new).allSatisfy({ $0.id == $1.id && $0.isDeleted == $1.isDeleted })
+    {
+      let added = new.count - (old.count - start)
+      guard start > 0 || added > 0 else { return }
+      // Measured before the data changes: where the first remaining row sits now (UIKit's own
+      // figure, estimated or not) is exactly how far everything moves up.
+      let removedHeight = start > 0 ? tableView.rectForRow(at: IndexPath(row: start, section: 0)).minY : 0
+      displayed = new
+      UIView.performWithoutAnimation {
+        tableView.performBatchUpdates {
+          if start > 0 { tableView.deleteRows(at: (0..<start).map { IndexPath(row: $0, section: 0) }, with: .none) }
+          if added > 0 {
+            tableView.insertRows(at: ((new.count - added)..<new.count).map { IndexPath(row: $0, section: 0) }, with: .none)
+          }
+        }
+        // Rows left the top: keep what's on screen where it was before gliding.
+        if removedHeight > 0 { tableView.contentOffset.y = max(-tableView.adjustedContentInset.top, tableView.contentOffset.y - removedHeight) }
+      }
+      prune()
+      scrollToBottom(animated: true)
+      return
+    }
+    displayed = new
+    prune()
+    tableView.reloadData()
+    scrollToBottom(animated: false)
+  }
+
+  private func prune() {
     let live = Set(displayed.map(key))
     rendered = rendered.filter { live.contains($0.key) }
     heights = heights.filter { live.contains($0.key) }
-    tableView.reloadData()
-    scrollToBottom()
   }
 
-  private func scrollToBottom() {
+  private func scrollToBottom(animated: Bool) {
     guard !displayed.isEmpty else { return }
     tableView.layoutIfNeeded()
-    tableView.scrollToRow(at: IndexPath(row: displayed.count - 1, section: 0), at: .bottom, animated: false)
+    let bottom = max(
+      -tableView.adjustedContentInset.top,
+      tableView.contentSize.height - tableView.bounds.height + tableView.adjustedContentInset.bottom)
+    guard abs(tableView.contentOffset.y - bottom) > 0.5 else { return }
+    if animated {
+      UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]) {
+        self.tableView.contentOffset.y = bottom
+      }
+    } else {
+      tableView.contentOffset.y = bottom
+    }
   }
 
   private func resume() {
     following = true
-    resumeButton.isHidden = true
+    UIView.animate(withDuration: 0.2) { self.resumeButton.alpha = 0 } completion: { _ in
+      if self.following { self.resumeButton.isHidden = true }
+    }
     chatUpdated(fullReload: false)
+    scrollToBottom(animated: true)
   }
 
   func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { displayed.count }
@@ -619,13 +805,21 @@ struct ChatMessagesView: UIViewControllerRepresentable {
   }
 }
 
-/// Messages plus the box to write in (or a prompt to sign in).
+/// Messages plus the box to write in (or a prompt to sign in), with emote picker and
+/// autocomplete (":" for emotes, "@" for people in chat).
 struct ChatPanel: View {
   @ObservedObject var chat: ChatController
+  /// Space to keep clear at the bottom (home indicator or keyboard).
+  var bottomInset: CGFloat = 0
+  /// Landscape: a shorter emote picker.
+  var compact = false
   @ObservedObject private var account = TwitchAccount.shared
   @State private var draft = ""
   @State private var showLogin = false
+  @State private var pickerOpen = false
   @FocusState private var focused: Bool
+
+  private static let spring = Animation.spring(response: 0.32, dampingFraction: 0.86)
 
   var body: some View {
     VStack(spacing: 0) {
@@ -634,17 +828,41 @@ struct ChatPanel: View {
           draft = "@\(login) " + draft
           focused = true
         })
-        if case .disconnected(let reason) = chat.status {
-          pill(reason)
-        } else if chat.status == .connecting {
-          pill("Connecting to chat…")
-        }
+        statusPill
       }
       Divider().overlay(Color.white.opacity(0.08))
+      if !suggestions.isEmpty {
+        suggestionStrip
+          .transition(.move(edge: .bottom).combined(with: .opacity))
+      }
       inputBar
+      if pickerOpen {
+        EmotePicker(sections: chat.emoteSections) { insert($0.name) }
+          .frame(height: compact ? 190 : 280)
+          .transition(.move(edge: .bottom).combined(with: .opacity))
+      }
     }
+    .padding(.bottom, pickerOpen ? min(bottomInset, 24) : bottomInset)
+    .animation(Self.spring, value: pickerOpen)
+    .animation(.easeOut(duration: 0.15), value: suggestions.isEmpty)
     .sheet(isPresented: $showLogin) { TwitchLoginView() }
     .onChange(of: account.session?.login) { _ in chat.reconnect() }
+    .onChange(of: focused) { isFocused in
+      if isFocused, pickerOpen { pickerOpen = false }
+    }
+  }
+
+  @ViewBuilder
+  private var statusPill: some View {
+    Group {
+      if case .disconnected(let reason) = chat.status {
+        pill(reason)
+      } else if chat.status == .connecting {
+        pill("Connecting to chat…")
+      }
+    }
+    .transition(.opacity.combined(with: .move(edge: .top)))
+    .animation(.easeInOut(duration: 0.2), value: chat.status)
   }
 
   private func pill(_ text: String) -> some View {
@@ -654,6 +872,74 @@ struct ChatPanel: View {
       .padding(.top, 8)
   }
 
+  // MARK: Autocomplete
+
+  private enum Suggestion: Hashable {
+    case emote(NamedEmote)
+    case chatter(String)
+  }
+
+  /// The word being typed, if it asks for suggestions.
+  private var currentWord: String? {
+    guard let last = draft.split(separator: " ", omittingEmptySubsequences: false).last, last.count >= 2 else { return nil }
+    return last.hasPrefix(":") || last.hasPrefix("@") ? String(last) : nil
+  }
+
+  private var suggestions: [Suggestion] {
+    guard account.session != nil, let word = currentWord else { return [] }
+    let query = String(word.dropFirst())
+    if word.hasPrefix(":") { return chat.emoteSuggestions(query).map(Suggestion.emote) }
+    return chat.chatterSuggestions(query).map(Suggestion.chatter)
+  }
+
+  private var suggestionStrip: some View {
+    ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 6) {
+        ForEach(suggestions, id: \.self) { suggestion in
+          switch suggestion {
+          case .emote(let emote):
+            Button {
+              complete(with: emote.name)
+            } label: {
+              HStack(spacing: 6) {
+                CachedImage(url: emote.url, maxPixels: 112, contentMode: .scaleAspectFit, placeholder: nil)
+                  .frame(width: 26, height: 26)
+                Text(emote.name).font(.footnote.weight(.semibold)).lineLimit(1)
+              }
+              .padding(.horizontal, 8).padding(.vertical, 5)
+              .background(Color.white.opacity(0.08), in: Capsule())
+            }
+            .buttonStyle(PressableStyle())
+          case .chatter(let name):
+            Button {
+              complete(with: "@" + name)
+            } label: {
+              Text("@" + name).font(.footnote.weight(.semibold))
+                .padding(.horizontal, 10).padding(.vertical, 8)
+                .background(Color.white.opacity(0.08), in: Capsule())
+            }
+            .buttonStyle(PressableStyle())
+          }
+        }
+      }
+      .padding(.horizontal, 10)
+      .padding(.vertical, 6)
+    }
+    .foregroundColor(.white)
+  }
+
+  private func complete(with text: String) {
+    guard let word = currentWord else { return }
+    draft = String(draft.dropLast(word.count)) + text + " "
+  }
+
+  private func insert(_ name: String) {
+    if !draft.isEmpty, !draft.hasSuffix(" ") { draft += " " }
+    draft += name + " "
+  }
+
+  // MARK: Input
+
   @ViewBuilder
   private var inputBar: some View {
     if account.session != nil {
@@ -662,21 +948,43 @@ struct ChatPanel: View {
           Text(rules).font(.caption2).foregroundColor(.secondary).padding(.horizontal, 4)
         }
         HStack(spacing: 8) {
-          TextField(chat.canSend ? "Send a message" : "Joining chat…", text: $draft)
-            .focused($focused)
-            .submitLabel(.send)
-            .onSubmit(send)
-            .disabled(!chat.canSend)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18))
+          HStack(spacing: 4) {
+            TextField(chat.canSend ? "Send a message" : "Joining chat…", text: $draft)
+              .focused($focused)
+              .submitLabel(.send)
+              .onSubmit(send)
+              .disabled(!chat.canSend)
+              .autocorrectionDisabled()
+              .textInputAutocapitalization(.never)
+            Button {
+              if pickerOpen {
+                focused = true
+              } else {
+                focused = false
+                pickerOpen = true
+              }
+            } label: {
+              Image(systemName: pickerOpen ? "keyboard" : "face.smiling")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundColor(pickerOpen ? .accentTeal : .white.opacity(0.75))
+                .frame(width: 32, height: 32)
+                .contentShape(Rectangle())
+            }
+            .accessibilityLabel(pickerOpen ? "Keyboard" : "Emotes")
+          }
+          .padding(.leading, 12)
+          .padding(.trailing, 4)
+          .padding(.vertical, 3)
+          .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18))
           Button(action: send) {
             Image(systemName: "paperplane.fill").font(.system(size: 16, weight: .semibold))
               .frame(width: 36, height: 36)
-              .background(draft.trimmingCharacters(in: .whitespaces).isEmpty ? Color.white.opacity(0.08) : Color.accentTeal, in: Circle())
+              .background(draftIsEmpty ? Color.white.opacity(0.08) : Color.accentTeal, in: Circle())
               .foregroundColor(.white)
+              .animation(.easeInOut(duration: 0.15), value: draftIsEmpty)
           }
-          .disabled(!chat.canSend || draft.trimmingCharacters(in: .whitespaces).isEmpty)
+          .buttonStyle(PressableStyle())
+          .disabled(!chat.canSend || draftIsEmpty)
           .accessibilityLabel("Send")
         }
       }
@@ -696,10 +1004,112 @@ struct ChatPanel: View {
     }
   }
 
+  private var draftIsEmpty: Bool { draft.trimmingCharacters(in: .whitespaces).isEmpty }
+
   private func send() {
     let text = draft
     guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
     chat.send(text)
     draft = ""
+  }
+}
+
+/// Twitch-style emote picker: every emote you can use here, by channel, with a strip to jump.
+struct EmotePicker: View {
+  let sections: [EmoteSection]
+  var onPick: (NamedEmote) -> Void
+  private let columns = [GridItem(.adaptive(minimum: 42, maximum: 56), spacing: 4)]
+
+  var body: some View {
+    ScrollViewReader { proxy in
+      VStack(spacing: 0) {
+        if sections.isEmpty {
+          VStack(spacing: 6) {
+            ProgressView()
+            Text("Loading emotes…").font(.footnote).foregroundColor(.secondary)
+          }
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+          ScrollView {
+            LazyVStack(alignment: .leading, spacing: 4, pinnedViews: [.sectionHeaders]) {
+              ForEach(sections) { section in
+                Section {
+                  LazyVGrid(columns: columns, spacing: 4) {
+                    ForEach(section.emotes, id: \.self) { emote in
+                      Button {
+                        onPick(emote)
+                      } label: {
+                        CachedImage(url: emote.url, maxPixels: 112, contentMode: .scaleAspectFit, placeholder: nil)
+                          .frame(width: 32, height: 32)
+                          .frame(maxWidth: .infinity, minHeight: 42)
+                          .contentShape(Rectangle())
+                      }
+                      .buttonStyle(PressableStyle(scale: 0.82))
+                      .accessibilityLabel(emote.name)
+                    }
+                  }
+                  .padding(.horizontal, 8)
+                } header: {
+                  Text(section.title)
+                    .font(.caption.weight(.bold))
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color(white: 0.09).opacity(0.97))
+                    .id(section.id)
+                }
+              }
+            }
+            .padding(.bottom, 8)
+          }
+          Divider().overlay(Color.white.opacity(0.08))
+          ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+              ForEach(sections) { section in
+                Button {
+                  withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(section.id, anchor: .top) }
+                } label: {
+                  tabIcon(section)
+                    .frame(width: 38, height: 34)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(PressableStyle())
+                .accessibilityLabel(section.title)
+              }
+            }
+            .padding(.horizontal, 6)
+          }
+          .frame(height: 38)
+        }
+      }
+      .background(Color(white: 0.09))
+    }
+  }
+
+  @ViewBuilder
+  private func tabIcon(_ section: EmoteSection) -> some View {
+    if section.id == "recent" {
+      Image(systemName: "clock").font(.system(size: 15, weight: .semibold)).foregroundColor(.secondary)
+    } else if let icon = section.icon {
+      CachedImage(url: icon, maxPixels: 72, contentMode: .scaleAspectFill)
+        .frame(width: 22, height: 22)
+        .clipShape(Circle())
+    } else if let first = section.emotes.first {
+      CachedImage(url: first.url, maxPixels: 72, contentMode: .scaleAspectFit, placeholder: nil)
+        .frame(width: 22, height: 22)
+    }
+  }
+}
+
+/// A light press effect for buttons.
+struct PressableStyle: ButtonStyle {
+  var scale: CGFloat = 0.92
+
+  func makeBody(configuration: Configuration) -> some View {
+    configuration.label
+      .scaleEffect(configuration.isPressed ? scale : 1)
+      .opacity(configuration.isPressed ? 0.85 : 1)
+      .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
   }
 }

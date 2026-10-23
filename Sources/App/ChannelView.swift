@@ -18,7 +18,8 @@ final class ChannelModel: ObservableObject {
     defer { isLoading = false }
     do {
       page = try await TwitchAPI.shared.channelPage(login: login)
-      if page == nil { error = "Channel not found." }
+      error = page == nil ? "Channel not found." : nil
+    } catch where error.isCancellation {
     } catch {
       self.error = error.localizedDescription
     }
@@ -66,7 +67,7 @@ struct ChannelView: View {
     }
     .navigationTitle(current.name)
     .navigationBarTitleDisplayMode(.inline)
-    .refreshable { await model.load() }
+    .refreshable { await detachedRefresh { await model.load() } }
     .task { if model.page == nil { await model.load() } }
   }
 

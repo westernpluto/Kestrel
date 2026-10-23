@@ -89,10 +89,15 @@ struct AdBlockingView: View {
 
   var body: some View {
     Form {
-      if account.hasTurbo == true {
+      if account.session != nil {
         Section {
-          Label("You have Turbo, so Twitch doesn't send you ads. Kestrel skips the ad-free servers and plays straight from Twitch.", systemImage: "checkmark.seal.fill")
-            .font(.footnote)
+          Label(
+            account.hasTurbo == true
+              ? "You have Turbo, so Twitch shows you no ads anywhere: Kestrel plays straight from Twitch."
+              : "On channels you're subscribed to, Twitch shows you no ads, so Kestrel plays those straight from Twitch (every quality, Twitch's own low latency). The setting below is for everything else.",
+            systemImage: "checkmark.seal.fill"
+          )
+          .font(.footnote)
         }
       }
 

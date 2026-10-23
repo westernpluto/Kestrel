@@ -46,11 +46,13 @@
     private var pausedForBackground = false
     private var notificationTokens: [NSObjectProtocol] = []
     private var localURL: URL?
-    private var proxyHost: String?
+    private var route: StreamRoute = .twitch
     private var lastReload = Date.distantPast
     private var bufferingSince: Date?
     private var framesDecoded = (count: 0, at: Date())
     private var renderedFPS: Double?
+    /// Paused while the viewer rewinds through the VOD.
+    private var suspended = false
 
     /// Quality-menu IDs at or above this pick a rendition for the Apple player.
     static let applePlayerQualityBase = 1000
@@ -128,7 +130,8 @@
         config.codecs = codecs
         config.backupStreams = settings.backupStreams
         config.allowLowQualityBackup = settings.allowLowQualityBackup
-        config.adFreeProxies = TwitchAccount.shared.hasTurbo == true ? [] : settings.adFreeProxyHosts
+        config.adFreeProxies = settings.adFreeProxyHosts
+        config.checkAccountFirst = TwitchAuth.shared.session != nil
         let session = LowLatencySession(
           login: login, config: config, http: settings.playbackClient(timeout: 8), tokens: TwitchAPI.shared
         ) { [weak self] update in
@@ -144,7 +147,8 @@
         guard !stopped, !Task.isCancelled else { return }
         if let old = self.session { StreamProxy.shared.remove(old.id) }
         self.session = session
-        proxyHost = await session.proxyHost
+        route = await session.route
+        model?.route = route
         upstream = variants.filter { !$0.isAudioOnly }.sorted {
           ($0.height, $0.frameRate, $0.codecRank, $0.bandwidth) > ($1.height, $1.frameRate, $1.codecRank, $1.bandwidth)
         }
@@ -199,7 +203,7 @@
     // MARK: Player events (forwarded from the delegate proxy on the main queue)
 
     fileprivate func stateChanged(_ state: IVSPlayer.State) {
-      guard !stopped, let model else { return }
+      guard !stopped, !suspended, let model else { return }
       switch state {
       case .ready:
         everReady = true
@@ -316,7 +320,7 @@
     // MARK: Ticking (PlayerModel's timer)
 
     func tick() {
-      guard let model, !stopped else { return }
+      guard let model, !stopped, !suspended else { return }
       let seconds = player.liveLatency.seconds
       let latency = seconds.isFinite && seconds >= 0 ? seconds : nil
       model.latency = latency
@@ -371,7 +375,7 @@
       lines.append(StatLine(label: "Frames", value: "\(player.videoFramesDecoded) decoded · \(player.videoFramesDropped) dropped"))
       lines.append(StatLine(label: "Ads", value: adState.statsText))
       lines.append(StatLine(label: "Playlists", value: localURL == nil ? "Twitch direct (no ad filtering)" : "Kestrel filter"))
-      lines.append(StatLine(label: "Ad blocking", value: proxyHost.map { "ad-free server \($0)" } ?? AppSettings.shared.adBlockingSummary))
+      lines.append(StatLine(label: "Ad blocking", value: route.summary))
       lines.append(StatLine(label: "Account", value: TwitchAuth.shared.session?.login ?? "not signed in"))
       return lines
     }
@@ -392,6 +396,21 @@
 
     /// Reloads at the live edge.
     func goLive() {
+      load()
+    }
+
+    /// The viewer is watching the VOD (rewinding): stop the live stream for now.
+    func suspend() {
+      suspended = true
+      loadTask?.cancel()
+      player.pause()
+      model?.coveringAd = false
+    }
+
+    /// Back from rewinding: live again at the live edge.
+    func resumeLive() {
+      suspended = false
+      isPaused = false
       load()
     }
 
@@ -431,7 +450,7 @@
     }
 
     private func enteredBackground() {
-      guard !stopped, !proxy.pictureInPictureStarting, !(pip?.isPictureInPictureActive ?? false) else { return }
+      guard !stopped, !suspended, !proxy.pictureInPictureStarting, !(pip?.isPictureInPictureActive ?? false) else { return }
       if AppSettings.shared.backgroundAudio {
         // Keep the sound: take the picture off screen and switch to the audio-only rendition.
         detachedForBackground = true
@@ -448,7 +467,7 @@
     }
 
     private func enteringForeground() {
-      guard !stopped else { return }
+      guard !stopped, !suspended else { return }
       if detachedForBackground {
         detachedForBackground = false
         view?.player = player
