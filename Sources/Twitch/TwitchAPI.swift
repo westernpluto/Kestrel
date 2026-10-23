@@ -45,6 +45,9 @@ struct Video: Identifiable, Hashable, Sendable {
   var viewCount: Int
   var categoryName: String?
   var owner: Channel?
+  /// Where you left off on Twitch (seconds), when signed in.
+  var watchedPosition: Double?
+  var watchedAt: Date?
 }
 
 struct ChannelPage: Sendable {
@@ -264,7 +267,9 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     return Video(
       id: id, title: j["title"].string ?? "", lengthSeconds: j["lengthSeconds"].int ?? 0,
       previewURL: j["previewThumbnailURL"].string, createdAt: j["createdAt"].date, viewCount: j["viewCount"].int ?? 0,
-      categoryName: j["game"]["displayName"].string, owner: channel(j["owner"]) ?? owner)
+      categoryName: j["game"]["displayName"].string, owner: channel(j["owner"]) ?? owner,
+      watchedPosition: j["self"]["viewingHistory"]["position"].int.map(Double.init),
+      watchedAt: j["self"]["viewingHistory"]["updatedAt"].date)
   }
 
   private static func page<T>(_ connection: JSONValue, _ map: (JSONValue) -> T?) -> Page<T> {
@@ -399,13 +404,22 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
   }
 
   func videos(login: String, after cursor: String? = nil, first: Int = 20) async throws -> Page<Video> {
+    // Signed in: also where you left off in each one (Twitch's watch history).
+    if TwitchAuth.shared.session != nil, let page = try? await videos(login: login, after: cursor, first: first, withHistory: true) {
+      return page
+    }
+    return try await videos(login: login, after: cursor, first: first, withHistory: false)
+  }
+
+  private func videos(login: String, after cursor: String?, first: Int, withHistory: Bool) async throws -> Page<Video> {
+    let history = withHistory ? " self { viewingHistory { position updatedAt } }" : ""
     let data = try await query(
       """
       query null($login: String, $sort: VideoSort, $types: [BroadcastType!], $first: Int, $after: Cursor) {
         user(login: $login, lookupType: ALL) {
           displayName id login profileImageURL(width: 300)
           videos(first: $first, after: $after, types: $types, sort: $sort) {
-            edges { cursor node { broadcastType createdAt game { displayName id slug } id lengthSeconds previewThumbnailURL title viewCount } }
+            edges { cursor node { broadcastType createdAt game { displayName id slug } id lengthSeconds previewThumbnailURL title viewCount\(history) } }
             pageInfo { hasNextPage }
           }
         }
@@ -413,7 +427,7 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
       """,
       variables: Self.vars(
         ["login": login.lowercased(), "sort": "TIME", "types": ["ARCHIVE", "HIGHLIGHT", "UPLOAD"], "first": first],
-        after: cursor))
+        after: cursor), authenticated: withHistory)
     let owner = Self.channel(data["user"])
     return Self.page(data["user"]["videos"]) { Self.video($0, owner: owner) }
   }
@@ -737,6 +751,89 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
     guard let (data, response) = try? await http.data(for: request), response.statusCode == 200 else { return nil }
     return Storyboard.parse(data, base: url, duration: duration)
+  }
+
+  // MARK: VOD chat
+
+  /// A page of a VOD's chat, starting at `offset` seconds or after `cursor`.
+  func videoComments(videoID: String, offset: Int?, cursor: String?) async throws -> (
+    comments: [ReplayComment], cursor: String?, hasMore: Bool
+  ) {
+    var variables: [String: Any] = ["id": videoID]
+    if let cursor { variables["after"] = cursor } else { variables["offset"] = offset ?? 0 }
+    do {
+      let data = try await query(
+        """
+        query null($id: ID, $after: Cursor, $offset: Int) {
+          video(id: $id) {
+            comments(after: $after, contentOffsetSeconds: $offset) {
+              edges {
+                cursor
+                node {
+                  commenter { displayName id login }
+                  contentOffsetSeconds createdAt id
+                  message { fragments { emote { emoteID } text } userBadges { setID version } userColor }
+                }
+              }
+              pageInfo { hasNextPage }
+            }
+          }
+        }
+        """, variables: variables)
+      return VODComments.parsePage(data)
+    } catch {
+      // The website's own query (may need Twitch's integrity check).
+      var persistedVariables: [String: Any] = ["videoID": videoID]
+      if let cursor { persistedVariables["cursor"] = cursor } else { persistedVariables["contentOffsetSeconds"] = offset ?? 0 }
+      let data = try await send(
+        [
+          "operationName": "VideoCommentsByOffsetOrCursor",
+          "extensions": ["persistedQuery": ["version": 1, "sha256Hash": "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a"] as [String: Any]],
+          "variables": persistedVariables,
+        ], anonymous: true)
+      return VODComments.parsePage(data)
+    }
+  }
+
+  // MARK: Where you left off (synced with Twitch)
+
+  /// Your saved position in a VOD on Twitch, in seconds.
+  func viewingPosition(videoID: String) async -> (position: Double, updated: Date?)? {
+    guard TwitchAuth.shared.session != nil,
+      let data = try? await query(
+        "query null($id: ID) { video(id: $id) { self { viewingHistory { position updatedAt } } } }",
+        variables: ["id": videoID], authenticated: true),
+      let position = data["video"]["self"]["viewingHistory"]["position"].int
+    else { return nil }
+    return (Double(position), data["video"]["self"]["viewingHistory"]["updatedAt"].date)
+  }
+
+  /// Saves your position the way Twitch's player does, so the website and apps resume there.
+  func saveViewingPosition(videoID: String, position: Double, live: Bool = false) async throws {
+    guard let session = TwitchAuth.shared.session else { return }
+    let input: [String: Any] = [
+      "userID": session.userID, "videoID": videoID, "position": Int(position), "videoType": live ? "LIVE" : "VOD",
+    ]
+    let data = try await send(
+      [
+        "operationName": "updateUserViewedVideo",
+        "query": """
+          mutation updateUserViewedVideo($input: UpdateUserViewedVideoInput!) {
+            updateUserViewedVideo(input: $input) { __typename }
+          }
+          """,
+        "variables": ["input": input],
+      ])
+    if data["updateUserViewedVideo"].isNull { throw TwitchAPIError.gql("Twitch didn't save the position") }
+  }
+
+  /// A VOD's length so far (it grows while the broadcast is recorded) and its seek previews.
+  func videoProgress(videoID: String) async -> (length: Double?, previews: URL?) {
+    guard
+      let data = try? await query(
+        "query null($id: ID) { video(id: $id) { lengthSeconds seekPreviewsURL } }", variables: ["id": videoID])
+    else { return (nil, nil) }
+    return (data["video"]["lengthSeconds"].int.map(Double.init), data["video"]["seekPreviewsURL"].string.flatMap(URL.init(string:)))
   }
 
   // MARK: Image URL helpers

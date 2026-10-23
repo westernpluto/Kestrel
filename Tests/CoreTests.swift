@@ -898,6 +898,63 @@ func testStoryboard() {
   check(Storyboard.parse(Data(noInterval.utf8), base: base, duration: nil) == nil, "needs an interval")
 }
 
+func testVODPlaylists() {
+  let base = URL(string: "https://vod.test/abc_streamer_1/chunked/index-dvr.m3u8")!
+  let upstream = """
+    #EXTM3U
+    #EXT-X-VERSION:3
+    #EXT-X-TARGETDURATION:10
+    #EXT-X-PLAYLIST-TYPE:EVENT
+    #EXT-X-MEDIA-SEQUENCE:0
+    #EXTINF:10.000,
+    0-unmuted.ts
+    #EXTINF:10.000,
+    1-muted.ts
+    #EXTINF:10.000,
+    2.ts
+    """
+  let rewritten = VODPlaylists.rewrite(upstream, base: base)
+  check(rewritten.contains("https://vod.test/abc_streamer_1/chunked/0-muted.ts\n"), "muted part renamed: \(rewritten)")
+  check(rewritten.contains("https://vod.test/abc_streamer_1/chunked/1-muted.ts") && rewritten.contains("/chunked/2.ts"), "absolute URIs")
+  check(!rewritten.contains("unmuted") && VODPlaylists.isGrowing(rewritten), "growing VOD")
+  // Served through the local server.
+  final class Upstream: HTTPClient, @unchecked Sendable {
+    let body: String
+    init(_ body: String) { self.body = body }
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+      (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: [:])!)
+    }
+  }
+  let variant = HLSVariant(
+    uri: base.absoluteString, bandwidth: 6_000_000, width: 1920, height: 1080, frameRate: 60, codecs: "avc1.64002A,mp4a.40.2",
+    name: "1080p60", isAudioOnly: false, isPortrait: false)
+  let source = VODPlaylists(variants: [variant], http: Upstream(upstream))
+  runAsync {
+    let media = await source.mediaPlaylist(0)
+    check(media.status == 200 && media.body.contains("0-muted.ts"), "served media playlist")
+    let master = await source.masterPlaylist(only: nil)
+    check(master.contains("RESOLUTION=1920x1080") && master.contains("v/0.m3u8"), master)
+  }
+}
+
+func testVODComments() {
+  let json = """
+    {"video":{"comments":{"edges":[
+      {"cursor":"c1","node":{"id":"m1","contentOffsetSeconds":12,"createdAt":"2026-10-22T01:02:03Z",
+        "commenter":{"displayName":"Viewer","id":"1","login":"viewer"},
+        "message":{"fragments":[{"text":"hi ","emote":null},{"text":"Kappa","emote":{"emoteID":"25"}},{"text":" 👋 ok","emote":null}],
+          "userBadges":[{"setID":"subscriber","version":"12"},{"setID":"","version":""}],"userColor":"#FF0000"}}}],
+      "pageInfo":{"hasNextPage":true}}}}
+    """
+  let data = JSONValue(try! JSONSerialization.jsonObject(with: Data(json.utf8)))
+  let page = VODComments.parsePage(data)
+  check(page.comments.count == 1 && page.cursor == "c1" && page.hasMore, "page")
+  let comment = page.comments.first
+  check(comment?.offset == 12 && comment?.message.text == "hi Kappa 👋 ok", "text")
+  check(comment?.message.emotes.first?.range == 3...7 && comment?.message.emotes.first?.id == "25", "emote range")
+  check(comment?.message.badges == ["subscriber/12"] && comment?.message.color == "#FF0000", "badges and color")
+}
+
 func testAdFreeProxy() {
   let url = AdFreeProxy.masterURL(host: "eu.luminous.dev", login: "SomeOne", codecs: "h265,h264", lowLatency: true)!
   check(url.absoluteString.hasPrefix("https://eu.luminous.dev/live/someone?") && url.query!.contains("fast_bread=true"), "\(url)")
@@ -925,6 +982,8 @@ func testAdFreeProxy() {
 }
 
 testAdFreeProxy()
+testVODPlaylists()
+testVODComments()
 testAccountRoute()
 testStoryboard()
 testTokenInfo()

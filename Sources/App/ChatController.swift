@@ -40,9 +40,22 @@ final class ChatController: ObservableObject {
   private var signedInLogin: String?
   private var authRefused = false
 
-  nonisolated init(channel: Channel) {
+  /// Set for a VOD: chat is replayed in time with the video instead of joined live.
+  let replayVideoID: String?
+  private var replayQueue: [ReplayComment] = []
+  private var replaySeen: Set<String> = []
+  private var replayCursor: String?
+  private var replayHasMore = true
+  private var replayLoading = false
+  private var replayPosition: Double = -1
+  private var replayGeneration = 0
+
+  nonisolated init(channel: Channel, replayVideoID: String? = nil) {
     self.channel = channel
+    self.replayVideoID = replayVideoID
   }
+
+  var isReplay: Bool { replayVideoID != nil }
 
   var ownLogin: String? { signedInLogin }
 
@@ -50,9 +63,10 @@ final class ChatController: ObservableObject {
     guard !running else { return }
     running = true
     let channel = self.channel
+    let replay = isReplay
     Task {
       let http = URLSessionHTTPClient(timeout: 10)
-      async let history = ThirdPartyEmotes.recentMessages(login: channel.login, http: http)
+      async let history = replay ? [] : ThirdPartyEmotes.recentMessages(login: channel.login, http: http)
       async let badgeMap = TwitchAPI.shared.badges(channelID: channel.id)
       let emotes = await ThirdPartyEmotes.load(channelID: channel.id, http: http)
       let (recent, loadedBadges) = await (history, badgeMap)
@@ -65,8 +79,74 @@ final class ChatController: ObservableObject {
       rebuildEmoteSections()
       onUpdate?(true)
     }
+    if isReplay {
+      status = .connected
+      return
+    }
     loadTwitchEmotes()
     connect()
+  }
+
+  // MARK: VOD chat replay
+
+  /// Shows what was said up to `position` (seconds into the VOD), fetching ahead as it plays.
+  func replay(at position: Double) {
+    guard let videoID = replayVideoID, running, position.isFinite else { return }
+    let jumped = replayPosition < 0 || position < replayPosition - 3 || position > replayPosition + 25
+    replayPosition = position
+    if jumped {
+      // A seek: start over from a little before the new position.
+      replayGeneration += 1
+      replayQueue = []
+      replaySeen = []
+      replayCursor = nil
+      replayHasMore = true
+      pending = []
+      messages = []
+      onUpdate?(true)
+      loadReplay(videoID: videoID, offset: max(0, Int(position) - 20), cursor: nil)
+      return
+    }
+    releaseReplay()
+    if !replayLoading, replayHasMore, replayCursor != nil, (replayQueue.last?.offset ?? 0) < position + 30 {
+      loadReplay(videoID: videoID, offset: nil, cursor: replayCursor)
+    }
+  }
+
+  private func releaseReplay() {
+    var count = 0
+    while count < replayQueue.count, replayQueue[count].offset <= replayPosition { count += 1 }
+    guard count > 0 else { return }
+    for comment in replayQueue.prefix(count) { enqueue(comment.message) }
+    replayQueue.removeFirst(count)
+  }
+
+  private func loadReplay(videoID: String, offset: Int?, cursor: String?) {
+    let generation = replayGeneration
+    replayLoading = true
+    Task {
+      do {
+        let page = try await TwitchAPI.shared.videoComments(videoID: videoID, offset: offset, cursor: cursor)
+        guard generation == replayGeneration else { return }
+        replayLoading = false
+        replayCursor = page.cursor
+        replayHasMore = page.hasMore && page.cursor != nil
+        let fresh = page.comments.filter { replaySeen.insert($0.message.id).inserted }
+        replayQueue = (replayQueue + fresh).sorted { $0.offset < $1.offset }
+        releaseReplay()
+        // Sparse chat: keep reading until there's something past the current position.
+        if replayHasMore, (replayQueue.last?.offset ?? 0) < replayPosition + 30, !fresh.isEmpty {
+          loadReplay(videoID: videoID, offset: nil, cursor: replayCursor)
+        }
+      } catch {
+        guard generation == replayGeneration else { return }
+        replayLoading = false
+        replayHasMore = false
+        if messages.isEmpty && pending.isEmpty {
+          enqueue(ChatMessage(notice: "Chat replay isn't available for this video (\(error.localizedDescription))."))
+        }
+      }
+    }
   }
 
   /// Your Twitch emotes for this channel (needs sign-in).
@@ -166,7 +246,7 @@ final class ChatController: ObservableObject {
 
   /// After signing in or out.
   func reconnect() {
-    guard running else { return }
+    guard running, !isReplay else { return }
     authRefused = false
     loadTwitchEmotes()
     socket?.cancel(with: .goingAway, reason: nil)
@@ -497,17 +577,38 @@ final class ChatMessageView: UIView {
     super.layoutSubviews()
     container.size = CGSize(width: bounds.width, height: .greatestFiniteMagnitude)
     manager.ensureLayout(for: container)
+    var baselines: [Int: CGFloat] = [:]
     for (index, slot) in slots.enumerated() where index < imageViews.count {
       let glyph = manager.glyphIndexForCharacter(at: slot.range.location)
       guard glyph < manager.numberOfGlyphs else { continue }
-      let line = manager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+      var lineRange = NSRange()
+      let line = manager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: &lineRange)
       let location = manager.location(forGlyphAt: glyph)
       let attachment = storage.attribute(.attachment, at: slot.range.location, effectiveRange: nil) as? NSTextAttachment
       let bounds = attachment?.bounds ?? CGRect(origin: .zero, size: slot.size)
-      let baseline = line.minY + location.y
+      let baseline: CGFloat
+      if let known = baselines[lineRange.location] {
+        baseline = known
+      } else {
+        baseline = line.minY + baselineOffset(inLine: lineRange, attachmentGlyph: glyph, attachmentBounds: bounds)
+        baselines[lineRange.location] = baseline
+      }
       imageViews[index].frame = CGRect(
         x: line.minX + location.x, y: baseline - (bounds.origin.y + bounds.height), width: bounds.width, height: bounds.height)
     }
+  }
+
+  /// The line's baseline, from a text character on it. (An attachment's reported location is its
+  /// bottom edge, not the baseline, which put emotes too low.)
+  private func baselineOffset(inLine lineRange: NSRange, attachmentGlyph: Int, attachmentBounds: CGRect) -> CGFloat {
+    let string = storage.string as NSString
+    for glyph in lineRange.location..<NSMaxRange(lineRange) {
+      let character = manager.characterIndexForGlyph(at: glyph)
+      guard character < string.length else { continue }
+      let unit = string.character(at: character)
+      if unit != 0xFFFC, unit != 0x0A, unit != 0x0D { return manager.location(forGlyphAt: glyph).y }
+    }
+    return manager.location(forGlyphAt: attachmentGlyph).y + attachmentBounds.origin.y
   }
 
   override func draw(_ rect: CGRect) {
@@ -886,7 +987,7 @@ struct ChatPanel: View {
   }
 
   private var suggestions: [Suggestion] {
-    guard account.session != nil, let word = currentWord else { return [] }
+    guard account.session != nil, !chat.isReplay, let word = currentWord else { return [] }
     let query = String(word.dropFirst())
     if word.hasPrefix(":") { return chat.emoteSuggestions(query).map(Suggestion.emote) }
     return chat.chatterSuggestions(query).map(Suggestion.chatter)
@@ -942,7 +1043,16 @@ struct ChatPanel: View {
 
   @ViewBuilder
   private var inputBar: some View {
-    if account.session != nil {
+    if chat.isReplay {
+      HStack(spacing: 6) {
+        Image(systemName: "clock.arrow.circlepath")
+        Text("Chat replay")
+      }
+      .font(.caption.weight(.semibold))
+      .foregroundColor(.secondary)
+      .frame(maxWidth: .infinity)
+      .padding(.vertical, 10)
+    } else if account.session != nil {
       VStack(alignment: .leading, spacing: 4) {
         if let rules = chat.roomRules {
           Text(rules).font(.caption2).foregroundColor(.secondary).padding(.horizontal, 4)

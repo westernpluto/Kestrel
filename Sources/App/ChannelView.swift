@@ -96,6 +96,7 @@ struct ChannelView: View {
 struct VideosSection: View {
   @ObservedObject var paginator: Paginator<Video>
   @EnvironmentObject private var app: AppModel
+  @ObservedObject private var history = WatchHistory.shared
 
   var body: some View {
     if !paginator.items.isEmpty {
@@ -112,7 +113,11 @@ struct VideosSection: View {
               .overlay(alignment: .bottomTrailing) {
                 Text(Format.duration(video.lengthSeconds)).font(.caption2.monospacedDigit())
                   .padding(.horizontal, 4).padding(.vertical, 1)
-                  .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 3)).foregroundColor(.white).padding(4)
+                  .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 3)).foregroundColor(.white)
+                  .padding(.horizontal, 4).padding(.bottom, 7)
+              }
+              .overlay(alignment: .bottom) {
+                if let progress = history.progress(for: video) { WatchProgressBar(progress: progress) }
               }
               .clipShape(RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 3) {

@@ -284,6 +284,64 @@ struct ChatMessage: Identifiable, Equatable {
   }
 }
 
+// MARK: - VOD chat (replay)
+
+/// A VOD chat message and when it was sent, in seconds into the video.
+struct ReplayComment {
+  var offset: Double
+  var message: ChatMessage
+}
+
+extension ChatMessage {
+  /// A message from Twitch's VOD comments (`video.comments` nodes).
+  init?(comment node: JSONValue) {
+    guard let id = node["id"].string else { return nil }
+    let fragments = node["message"]["fragments"].array
+    var text = ""
+    var emotes: [(id: String, range: ClosedRange<Int>)] = []
+    var offset = 0
+    for fragment in fragments {
+      let piece = fragment["text"].string ?? ""
+      let length = piece.unicodeScalars.count
+      if let emote = fragment["emote"]["emoteID"].string ?? fragment["emote"]["id"].string, length > 0 {
+        emotes.append((emote, offset...(offset + length - 1)))
+      }
+      text += piece
+      offset += length
+    }
+    guard !text.isEmpty else { return nil }
+    let commenter = node["commenter"]
+    let login = commenter["login"].string ?? ""
+    self.init(notice: text)
+    self.id = id
+    kind = .message
+    self.login = login
+    displayName = commenter["displayName"].string ?? login
+    color = node["message"]["userColor"].string.flatMap { $0.isEmpty ? nil : $0 }
+    badges = node["message"]["userBadges"].array.compactMap { badge in
+      guard let set = badge["setID"].string, let version = badge["version"].string, !set.isEmpty else { return nil }
+      return "\(set)/\(version)"
+    }
+    self.emotes = emotes
+    timestamp = node["createdAt"].date ?? Date()
+  }
+}
+
+enum VODComments {
+  /// One page of comments: from an offset into the video, or after a cursor.
+  static func parsePage(_ data: JSONValue) -> (comments: [ReplayComment], cursor: String?, hasMore: Bool) {
+    let connection = data["video"]["comments"]
+    let edges = connection["edges"].array
+    let comments = edges.compactMap { edge -> ReplayComment? in
+      let node = edge["node"]
+      guard let message = ChatMessage(comment: node) else { return nil }
+      return ReplayComment(offset: Double(node["contentOffsetSeconds"].int ?? 0), message: message)
+    }
+    let more = connection["pageInfo"]["hasNextPage"].bool ?? !edges.isEmpty
+    return (comments, edges.last?["cursor"].string, more)
+  }
+}
+
 // MARK: - Third-party emotes (7TV, BTTV, FFZ)
 
 /// An emote you can type: its name and picture.

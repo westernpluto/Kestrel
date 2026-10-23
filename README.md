@@ -11,10 +11,16 @@ An iOS client for watching Twitch without ads, with low-latency playback, chat a
   - As a safety net the player still strips ad markers and, if an ad is stitched in anyway, switches to an ad-free copy (the TwitchAdSolutions/vaft technique). Prefetched segments are held back during announced breaks so an ad doesn't flash on screen.
 - **Player, Twitch-style:**
   - Tap the video for controls; they fade out on their own. The gear holds **Quality**, **Low latency** and **Video stats**.
-  - **Gestures:** double-tap for full screen (in landscape: zoom to fill / fit); pinch to fill or fit; swipe up for full screen; swipe down to leave full screen or close the player; in landscape, swipe left/right to show or hide chat.
+  - **Gestures:** double-tap for full screen (in landscape: zoom to fill / fit); pinch to fill or fit; swipe up for full screen; pull the video down to shrink it into the **mini player** (it follows your finger); in landscape, swipe down to leave full screen and left/right to show or hide chat.
+  - **Mini player:** keeps playing in the corner above the tab bar while you browse. Tap or drag it up to open, pause or close it with its buttons, or throw it aside to close.
   - **Landscape:** the video only keeps clear of the Dynamic Island; chat sits beside it and runs to the screen edge on the other side (toggle with the chat button or a swipe, drag the line between them to resize). The player turns with the phone; the full-screen button holds landscape until you turn the phone.
   - **Rewind live streams:** when the channel records a VOD of the broadcast (and it plays for you), a seek bar runs from the start of the stream to now. Drag back to watch from any point; tap LIVE or drag to the end to return. Channels without that VOD don't get the bar.
-  - **VOD seek previews:** dragging the seek bar shows a thumbnail of where you'll land (Twitch's storyboards), on VODs and live rewinds.
+  - **VOD seek previews:** dragging the seek bar shows a thumbnail of where you'll land (Twitch's storyboards), on VODs and live rewinds; the other controls step aside while you drag.
+- **VODs:**
+  - Start at the beginning, or where you left off: positions are saved on the iPhone and, signed in, to your Twitch account the way Twitch's player does, so the website and apps resume at the same point. Channel video lists show how far you got.
+  - **Chat replay** in time with the video.
+  - Parts Twitch muted for copyright play (silently) instead of freezing: Twitch lists them under file names that don't exist, and Kestrel corrects them like Twitch's own player.
+  - A VOD of a stream that's still live shows "RECORDING" and its seek bar grows as it records.
   - One layout for both orientations, so rotating, opening chat, the keyboard and the emote picker all animate instead of rebuilding the player.
   - Picture in Picture, AirPlay, background audio, tap LIVE to jump back to the live edge.
 - **Low latency:** the [Amazon IVS Player SDK](https://docs.aws.amazon.com/ivs/latest/LowLatencyUserGuide/player-ios.html) (the engine Twitch's own apps use) in Twitch's low-latency mode, usually a few seconds behind. Falls back to the Apple player (AVPlayer, ~8–12 s behind) if it can't play a stream. Only in builds made with the SDK (the GitHub Actions build downloads it). VODs use the Apple player.

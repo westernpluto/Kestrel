@@ -198,8 +198,8 @@ struct EmptyState: View {
 struct AppDestinations: ViewModifier {
   func body(content: Content) -> some View {
     content
-      .navigationDestination(for: Channel.self) { ChannelView(channel: $0) }
-      .navigationDestination(for: Category.self) { CategoryView(category: $0) }
+      .navigationDestination(for: Channel.self) { ChannelView(channel: $0).miniPlayerRoom() }
+      .navigationDestination(for: Category.self) { CategoryView(category: $0).miniPlayerRoom() }
   }
 }
 

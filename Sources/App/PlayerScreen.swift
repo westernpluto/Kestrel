@@ -188,33 +188,62 @@ enum OrientationLock {
 final class InterfaceOrientationObserver: ObservableObject {
   @Published private(set) var orientation: UIInterfaceOrientation = .portrait
   private var observation: NSKeyValueObservation?
+  private var token: NSObjectProtocol?
 
   func start() {
-    guard observation == nil, let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first
-    else { return }
-    orientation = scene.interfaceOrientation
-    observation = scene.observe(\.effectiveGeometry, options: [.new]) { [weak self] scene, _ in
-      let value = scene.effectiveGeometry.interfaceOrientation
-      DispatchQueue.main.async {
-        guard let observer = self, observer.orientation != value else { return }
-        observer.orientation = value
+    guard token == nil else { return }
+    refresh()
+    if let scene = Self.scene {
+      observation = scene.observe(\.effectiveGeometry, options: [.new]) { [weak self] _, _ in
+        DispatchQueue.main.async { self?.refresh() }
+      }
+    }
+    UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+    token = NotificationCenter.default.addObserver(
+      forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      // The interface follows the device a moment later.
+      for delay in [0.05, 0.35, 0.8] {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self?.refresh() }
       }
     }
   }
 
-  /// In landscape: whether the camera (Dynamic Island) is on the left. Nil when unknown.
-  var cameraOnLeft: Bool? {
+  deinit {
+    if let token { NotificationCenter.default.removeObserver(token) }
+  }
+
+  private func refresh() {
+    guard let value = Self.scene?.interfaceOrientation, value != orientation else { return }
+    orientation = value
+  }
+
+  private static var scene: UIWindowScene? {
+    UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+  }
+
+  /// In landscape: whether the camera (Dynamic Island) is on the left, read right now.
+  static var cameraOnLeftNow: Bool? { cameraOnLeft(scene?.interfaceOrientation) }
+
+  /// The last orientation seen.
+  var cameraOnLeft: Bool? { Self.cameraOnLeft(orientation) }
+
+  private static func cameraOnLeft(_ orientation: UIInterfaceOrientation?) -> Bool? {
     switch orientation {
-    case .landscapeRight: return true  // home side on the right, top of the phone on the left
-    case .landscapeLeft: return false
+    case .landscapeRight?: return true  // the phone's top is on the left
+    case .landscapeLeft?: return false
     default: return nil
     }
   }
 }
 
-/// The keyboard's height from the bottom of the screen, animated like the keyboard.
+/// The keyboard's height from the bottom of the screen, animated like the keyboard. Measured with
+/// UIKit's keyboard layout guide (exact, whatever the keyboard looks like) and the keyboard
+/// notifications; the larger wins.
 final class KeyboardObserver: ObservableObject {
   @Published private(set) var overlap: CGFloat = 0
+  private var fromNotification: CGFloat = 0
+  private var fromGuide: CGFloat = 0
   private var tokens: [NSObjectProtocol] = []
 
   init() {
@@ -231,13 +260,70 @@ final class KeyboardObserver: ObservableObject {
 
   private func handle(_ note: Notification) {
     let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue ?? .zero
-    let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
     let screen = UIScreen.main.bounds
-    let value = note.name == UIResponder.keyboardWillHideNotification || end.isEmpty ? 0 : max(0, screen.maxY - end.minY)
+    let hiding = note.name == UIResponder.keyboardWillHideNotification || end.isEmpty || end.minY >= screen.maxY - 1
+    fromNotification = hiding ? 0 : max(0, screen.maxY - end.minY)
+    if hiding { fromGuide = 0 }
+    publish()
+  }
+
+  /// From the layout guide probe (includes the home-indicator strip when the keyboard is hidden,
+  /// so values that small count as no keyboard).
+  func guideChanged(_ value: CGFloat) {
+    fromGuide = value > 60 ? value : 0
+    if fromNotification == 0, fromGuide > 0 { return }  // wait for the notification to confirm
+    publish()
+  }
+
+  private func publish() {
+    let value = fromNotification > 0 ? max(fromNotification, fromGuide) : 0
     guard abs(value - overlap) > 0.5 else { return }
     // The keyboard's own curve (a heavily damped spring).
-    let animation: Animation? = duration > 0 ? .interpolatingSpring(mass: 3, stiffness: 1000, damping: 500, initialVelocity: 0) : nil
-    withAnimation(animation) { overlap = value }
+    withAnimation(.interpolatingSpring(mass: 3, stiffness: 1000, damping: 500, initialVelocity: 0)) { overlap = value }
+  }
+}
+
+/// Reports where UIKit's keyboard layout guide says the keyboard starts.
+struct KeyboardProbe: UIViewRepresentable {
+  let observer: KeyboardObserver
+
+  func makeUIView(context: Context) -> ProbeView {
+    let view = ProbeView()
+    view.isUserInteractionEnabled = false
+    view.onChange = { [weak observer] value in observer?.guideChanged(value) }
+    return view
+  }
+
+  func updateUIView(_ view: ProbeView, context: Context) {}
+
+  final class ProbeView: UIView {
+    var onChange: ((CGFloat) -> Void)?
+    private let marker = UIView()
+    private var last: CGFloat = -1
+
+    override func didMoveToWindow() {
+      super.didMoveToWindow()
+      guard window != nil, marker.superview == nil else { return }
+      marker.translatesAutoresizingMaskIntoConstraints = false
+      marker.isUserInteractionEnabled = false
+      addSubview(marker)
+      NSLayoutConstraint.activate([
+        marker.leadingAnchor.constraint(equalTo: leadingAnchor),
+        marker.widthAnchor.constraint(equalToConstant: 1),
+        marker.topAnchor.constraint(equalTo: keyboardLayoutGuide.topAnchor),
+        marker.bottomAnchor.constraint(equalTo: keyboardLayoutGuide.bottomAnchor),
+      ])
+    }
+
+    override func layoutSubviews() {
+      super.layoutSubviews()
+      guard let window else { return }
+      let top = marker.convert(marker.bounds, to: window).minY
+      let value = max(0, window.bounds.maxY - top)
+      guard abs(value - last) > 0.5 else { return }
+      last = value
+      DispatchQueue.main.async { [weak self] in self?.onChange?(value) }
+    }
   }
 }
 
@@ -257,6 +343,8 @@ struct PlayerLayout: Equatable {
   var landscape: Bool
 
   static let infoHeight: CGFloat = 62
+  /// How far from the screen edge the Dynamic Island reaches in landscape (plus a little air).
+  static let cameraClearance: CGFloat = 52
 
   /// - Parameters:
   ///   - safe: size of the safe area; `insets`: from it to the screen edges.
@@ -264,7 +352,7 @@ struct PlayerLayout: Equatable {
   ///   - cameraOnLeft: landscape only; nil = unknown (keep clear on both sides).
   init(safe: CGSize, insets: EdgeInsets, keyboard: CGFloat, chatOpen: Bool, chatWidth: CGFloat, cameraOnLeft: Bool?) {
     landscape = safe.width > safe.height
-    let bottomPad = max(insets.bottom, keyboard)
+    let bottomPad = keyboard > 0 ? keyboard + 4 : insets.bottom
     if !landscape {
       let width = safe.width
       let videoHeight = (width * 9 / 16).rounded()
@@ -286,78 +374,112 @@ struct PlayerLayout: Equatable {
     let chat = min(max(chatWidth, 240), screenWidth * 0.5).rounded()
     let cameraLeft = cameraOnLeft ?? true
     let cameraRight = cameraOnLeft.map { !$0 } ?? true
+    let clearance = min(Self.cameraClearance, max(insets.leading, insets.trailing))
     if chatOpen {
-      // Chat runs to the screen edge (its text stays clear of the camera if it's on that side);
-      // the video gets everything else, and only keeps clear of the camera.
+      // Chat runs to the screen edge (its text only keeps clear of the camera if it's on that
+      // side); the video gets everything else and only keeps clear of the camera.
       panel = CGRect(x: right - chat, y: top, width: chat, height: height)
-      panelPadding = EdgeInsets(
-        top: insets.top + 4, leading: 0, bottom: bottomPad, trailing: cameraRight ? insets.trailing : 10)
+      panelPadding = EdgeInsets(top: insets.top + 6, leading: 0, bottom: bottomPad, trailing: cameraRight ? clearance : 12)
       panelVisible = true
-      let videoLeft = cameraLeft ? 0 : left
+      let videoLeft = cameraLeft ? left + clearance : left
       video = CGRect(x: videoLeft, y: top, width: panel.minX - videoLeft, height: height)
       controls = EdgeInsets(
-        top: insets.top + 8, leading: cameraLeft ? 8 : insets.leading, bottom: insets.bottom + 4, trailing: 8)
+        top: insets.top + 8, leading: cameraLeft ? 8 : clearance, bottom: insets.bottom + 4, trailing: 8)
     } else {
       // Full screen: a 16:9 picture at full height leaves room for the camera on its own.
       video = CGRect(x: left, y: top, width: screenWidth, height: height)
-      controls = EdgeInsets(top: insets.top + 8, leading: insets.leading, bottom: insets.bottom + 4, trailing: insets.trailing)
+      controls = EdgeInsets(top: insets.top + 8, leading: clearance, bottom: insets.bottom + 4, trailing: clearance)
       panel = CGRect(x: right + 1, y: top, width: chat, height: height)
-      panelPadding = EdgeInsets(top: insets.top + 4, leading: 0, bottom: bottomPad, trailing: insets.trailing)
+      panelPadding = EdgeInsets(top: insets.top + 6, leading: 0, bottom: bottomPad, trailing: clearance)
       panelVisible = false
     }
   }
+
+  /// The mini player: a small floating video above the tab bar, bottom right.
+  static func mini(safe: CGSize) -> CGRect {
+    let width = (min(safe.width, 520) * 0.5).rounded()
+    let height = (width * 9 / 16).rounded()
+    return CGRect(x: safe.width - width - 10, y: safe.height - 49 - height - 10, width: width, height: height)
+  }
+
+  /// Room to leave under scrolling content for the mini player.
+  static var miniInset: CGFloat {
+    let width = min(UIScreen.main.bounds.width, 520) * 0.5
+    return (width * 9 / 16).rounded() + 20
+  }
+}
+
+private func lerp(_ a: CGRect, _ b: CGRect, _ t: CGFloat) -> CGRect {
+  CGRect(
+    x: a.minX + (b.minX - a.minX) * t, y: a.minY + (b.minY - a.minY) * t,
+    width: a.width + (b.width - a.width) * t, height: a.height + (b.height - a.height) * t)
 }
 
 // MARK: - Screen
 
+/// The player, shown over the app: full screen, or shrunk into the mini player.
 struct PlayerScreen: View {
   let target: PlaybackTarget
   @StateObject private var model: PlayerModel
   @StateObject private var chat: ChatController
   @StateObject private var keyboard = KeyboardObserver()
   @StateObject private var orientation = InterfaceOrientationObserver()
-  @Environment(\.dismiss) private var dismiss
+  @EnvironmentObject private var app: AppModel
   @AppStorage("landscapeChat") private var landscapeChat = true
   /// Landscape chat width, as a share of the screen width (drag the chat's edge to change it).
   @AppStorage("landscapeChatShare") private var chatShare = 0.32
   @State private var resizingFrom: CGFloat?
   @State private var resizedWidth: CGFloat?
+  /// 0 = full screen … 1 = mini player, while a finger is moving it.
+  @State private var dragProgress: CGFloat?
+  /// The mini player following a finger (to throw it away).
+  @State private var miniOffset: CGSize = .zero
+  @State private var closing = false
 
-  static let spring = Animation.spring(response: 0.34, dampingFraction: 0.9)
+  static let spring = Animation.spring(response: 0.38, dampingFraction: 0.86)
 
   init(target: PlaybackTarget) {
     self.target = target
     _model = StateObject(wrappedValue: PlayerModel(target: target))
-    let channel: Channel
     switch target {
-    case .live(let c): channel = c
-    case .video(let video): channel = video.owner ?? Channel(id: "", login: "", displayName: "", profileImageURL: nil)
+    case .live(let channel):
+      _chat = StateObject(wrappedValue: ChatController(channel: channel))
+    case .video(let video):
+      let owner = video.owner ?? Channel(id: "", login: "", displayName: "", profileImageURL: nil)
+      _chat = StateObject(wrappedValue: ChatController(channel: owner, replayVideoID: video.id))
     }
-    _chat = StateObject(wrappedValue: ChatController(channel: channel))
   }
 
   var body: some View {
     GeometryReader { geometry in
       let insets = Self.insets(geometry)
       let landscape = geometry.size.width > geometry.size.height
-      let chatOpen = landscape && model.isLive && landscapeChat
+      let progress = landscape ? 0 : (dragProgress ?? (app.playerMinimized ? 1 : 0))
+      let chatOpen = landscape && landscapeChat
       let screenWidth = geometry.size.width + insets.leading + insets.trailing
       let layout = PlayerLayout(
         safe: geometry.size, insets: insets, keyboard: keyboard.overlap, chatOpen: chatOpen,
-        chatWidth: resizedWidth ?? screenWidth * chatShare, cameraOnLeft: orientation.cameraOnLeft)
+        chatWidth: resizedWidth ?? screenWidth * chatShare,
+        cameraOnLeft: landscape ? (InterfaceOrientationObserver.cameraOnLeftNow ?? orientation.cameraOnLeft) : nil)
+      let mini = PlayerLayout.mini(safe: geometry.size).offsetBy(dx: miniOffset.width, dy: miniOffset.height)
+      let video = lerp(layout.video, mini, progress)
+      let pullDistance = max(240, mini.minY - layout.video.minY)
+      let expandedOpacity = Double(max(0, 1 - progress * 2.2))
+
       ZStack(alignment: .topLeading) {
-        PlayerVideoArea(
-          model: model, landscape: landscape, chatOpen: chatOpen, controlInsets: layout.controls,
-          toggleChat: { withAnimation(Self.spring) { landscapeChat.toggle() } }, close: { dismiss() }
-        )
-        .frame(width: layout.video.width, height: layout.video.height)
-        .offset(x: layout.video.minX, y: layout.video.minY)
+        // Backdrop: fades away as the player shrinks, revealing the app.
+        Color.black
+          .frame(width: screenWidth, height: geometry.size.height + insets.top + insets.bottom)
+          .offset(x: -insets.leading, y: -insets.top)
+          .opacity(Double(1 - progress))
+          .allowsHitTesting(progress < 0.01)
 
         if let info = layout.info {
           StreamInfoBar(model: model, target: target)
             .frame(width: info.width, height: info.height)
-            .offset(x: info.minX, y: info.minY)
-            .transition(.opacity)
+            .offset(x: info.minX, y: info.minY + progress * 140)
+            .opacity(expandedOpacity)
+            .allowsHitTesting(progress == 0)
         }
 
         sidePanel(layout)
@@ -366,31 +488,124 @@ struct PlayerScreen: View {
           .overlay(alignment: .top) {
             if !landscape { Divider().overlay(Color.white.opacity(0.08)) }
           }
-          .offset(x: layout.panel.minX, y: layout.panel.minY)
-          .opacity(layout.panelVisible ? 1 : 0)
-          .allowsHitTesting(layout.panelVisible)
+          .offset(x: layout.panel.minX, y: layout.panel.minY + progress * 260)
+          .opacity(layout.panelVisible ? expandedOpacity : 0)
+          .allowsHitTesting(layout.panelVisible && progress == 0)
 
-        if chatOpen { resizeHandle(layout, screenWidth: screenWidth) }
+        PlayerVideoArea(
+          model: model, landscape: landscape, chatOpen: chatOpen, controlInsets: layout.controls,
+          chromeVisible: progress == 0, minimized: app.playerMinimized,
+          toggleChat: { withAnimation(Self.spring) { landscapeChat.toggle() } },
+          minimize: minimize,
+          onPull: { dy in
+            if dragProgress == nil { dismissKeyboard() }
+            dragProgress = min(1, max(0, dy / pullDistance))
+          },
+          onPullEnd: { dy, predicted in
+            let finish = (dragProgress ?? 0) > 0.5 || predicted / pullDistance > 0.55
+            withAnimation(Self.spring) {
+              app.playerMinimized = finish
+              dragProgress = nil
+            }
+          }
+        )
+        .frame(width: video.width, height: video.height)
+        .clipShape(RoundedRectangle(cornerRadius: 12 * progress, style: .continuous))
+        .shadow(color: .black.opacity(0.5 * Double(progress)), radius: 14 * progress, y: 5 * progress)
+        .offset(x: video.minX, y: video.minY)
+
+        if chatOpen && progress == 0 { resizeHandle(layout, screenWidth: screenWidth) }
+
+        if app.playerMinimized || progress > 0.5 {
+          MiniPlayerOverlay(
+            model: model,
+            expand: expand,
+            close: close,
+            onDrag: { translation in
+              if translation.height < -8, abs(translation.height) > abs(translation.width) {
+                miniOffset = .zero
+                dragProgress = min(1, max(0, 1 + translation.height / pullDistance))
+              } else if dragProgress == nil {
+                miniOffset = translation
+              }
+            },
+            onDragEnd: { translation, predicted in
+              if dragProgress != nil {
+                let expandIt = (dragProgress ?? 1) < 0.55 || predicted.height / pullDistance < -0.5
+                withAnimation(Self.spring) {
+                  app.playerMinimized = !expandIt
+                  dragProgress = nil
+                }
+              } else if abs(predicted.width) > 160 || predicted.height > 120 {
+                // Thrown away.
+                withAnimation(.easeOut(duration: 0.22)) {
+                  miniOffset = CGSize(
+                    width: abs(predicted.width) > 160 ? (predicted.width > 0 ? 1 : -1) * screenWidth : 0,
+                    height: predicted.height > 120 ? 300 : 0)
+                }
+                close()
+              } else {
+                withAnimation(Self.spring) { miniOffset = .zero }
+              }
+            }
+          )
+          .frame(width: mini.width, height: mini.height)
+          .offset(x: video.minX, y: video.minY)
+          .opacity(Double(max(0, min(1, (progress - 0.5) * 2))))
+        }
       }
       .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
-      .statusBarHidden(landscape)
-      .persistentSystemOverlays(landscape ? .hidden : .automatic)
+      .background(KeyboardProbe(observer: keyboard))
+      .opacity(closing ? 0 : 1)
+      .scaleEffect(closing ? 0.96 : 1, anchor: .bottomTrailing)
+      .statusBarHidden(landscape && progress == 0)
+      .persistentSystemOverlays(landscape && progress == 0 ? .hidden : .automatic)
     }
     .ignoresSafeArea(.keyboard)
-    .background(Color.black.ignoresSafeArea())
     .preferredColorScheme(.dark)
     .animation(Self.spring, value: landscapeChat)
     .task {
       orientation.start()
       OrientationLock.playerVisible(true)
-      if model.isLive { chat.start() }
+      chat.start()
       await model.start()
+    }
+    .onChange(of: model.position) { position in
+      if chat.isReplay { chat.replay(at: position) }
+    }
+    .onChange(of: app.playerMinimized) { minimized in
+      // The app is portrait; only the full-screen player turns.
+      OrientationLock.playerVisible(!minimized)
+      if minimized { dismissKeyboard() }
     }
     .onDisappear {
       model.stop()
       chat.stop()
       OrientationLock.playerVisible(false)
     }
+  }
+
+  private func minimize() {
+    dismissKeyboard()
+    withAnimation(Self.spring) { app.playerMinimized = true }
+  }
+
+  private func expand() {
+    withAnimation(Self.spring) {
+      miniOffset = .zero
+      app.playerMinimized = false
+    }
+  }
+
+  private func close() {
+    withAnimation(.easeIn(duration: 0.2)) { closing = true }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+      if app.playing?.id == target.id { app.playing = nil }
+    }
+  }
+
+  private func dismissKeyboard() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
   }
 
   /// Distances from the safe area to the screen edges.
@@ -406,17 +621,10 @@ struct PlayerScreen: View {
       bottom: max(0, screen.height - frame.maxY), trailing: max(0, screen.width - frame.maxX))
   }
 
-  @ViewBuilder
   private func sidePanel(_ layout: PlayerLayout) -> some View {
-    Group {
-      if model.isLive {
-        ChatPanel(chat: chat, bottomInset: layout.panelPadding.bottom, compact: layout.landscape)
-      } else {
-        VideoDetails(target: target).padding(.bottom, layout.panelPadding.bottom)
-      }
-    }
-    .padding(.top, layout.panelPadding.top)
-    .padding(.trailing, layout.panelPadding.trailing)
+    ChatPanel(chat: chat, bottomInset: layout.panelPadding.bottom, compact: layout.landscape)
+      .padding(.top, layout.panelPadding.top)
+      .padding(.trailing, layout.panelPadding.trailing)
   }
 
   /// Drag the line between video and chat to make chat wider or narrower.
@@ -441,5 +649,53 @@ struct PlayerScreen: View {
           }
       )
       .accessibilityLabel("Resize chat")
+  }
+}
+
+/// On top of the mini player: tap to open, pause, close; drag up to open, throw to close.
+struct MiniPlayerOverlay: View {
+  @ObservedObject var model: PlayerModel
+  var expand: () -> Void
+  var close: () -> Void
+  var onDrag: (CGSize) -> Void
+  var onDragEnd: (CGSize, CGSize) -> Void
+
+  var body: some View {
+    ZStack(alignment: .top) {
+      Color.black.opacity(0.001)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: expand)
+        .gesture(
+          DragGesture(minimumDistance: 6)
+            .onChanged { onDrag($0.translation) }
+            .onEnded { onDragEnd($0.translation, $0.predictedEndTranslation) }
+        )
+      LinearGradient(colors: [.black.opacity(0.45), .clear], startPoint: .top, endPoint: .center)
+        .allowsHitTesting(false)
+      HStack {
+        Button {
+          model.togglePause()
+        } label: {
+          Image(systemName: model.isPaused ? "play.fill" : "pause.fill")
+            .font(.system(size: 17, weight: .bold))
+            .frame(width: 40, height: 36)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableStyle(scale: 0.85))
+        .accessibilityLabel(model.isPaused ? "Play" : "Pause")
+        Spacer()
+        Button(action: close) {
+          Image(systemName: "xmark")
+            .font(.system(size: 16, weight: .bold))
+            .frame(width: 40, height: 36)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableStyle(scale: 0.85))
+        .accessibilityLabel("Close")
+      }
+      .foregroundColor(.white)
+      .shadow(color: .black.opacity(0.6), radius: 3)
+      .padding(.horizontal, 2)
+    }
   }
 }

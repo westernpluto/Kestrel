@@ -318,6 +318,14 @@ final class StreamProxy: @unchecked Sendable {
     return URL(string: "http://127.0.0.1:\(port)/live/\(session.id)/master.m3u8\(suffix)")
   }
 
+  /// One media playlist of a registered source (e.g. a VOD rendition).
+  func mediaURL(for session: PlaylistSource, index: Int) -> URL? {
+    lock.lock()
+    let port = server?.port ?? lastPort
+    lock.unlock()
+    return URL(string: "http://127.0.0.1:\(port)/live/\(session.id)/v/\(index).m3u8")
+  }
+
   func remove(_ id: String) {
     lock.lock()
     sessions.removeValue(forKey: id)

@@ -71,7 +71,20 @@ final class PlayerModel: ObservableObject {
 
   /// VOD seek previews (VODs, and live streams that can be rewound).
   @Published private(set) var storyboard: Storyboard?
-  private var storyboardSource: (url: URL, duration: Double?)?
+  private var storyboardSource: (url: URL, videoID: String, duration: Double?)?
+
+  // VODs
+  /// VOD playlists served through the local server (muted parts fixed).
+  private var vodSource: VODPlaylists?
+  private var rewindSource: VODPlaylists?
+  /// Where to start once the item is ready (VODs: the beginning or where you left off).
+  private var pendingStart: Double?
+  /// The VOD is still being recorded (its length grows).
+  @Published private(set) var vodIsRecording = false
+  /// Shown for a few seconds after resuming where you left off.
+  @Published private(set) var resumedAt: Double?
+  private var lastSavedPosition = Date()
+  private var lastSyncedPosition = Date()
   private var storyboardLoaded = Date.distantPast
 
   #if canImport(AmazonIVSPlayer)
@@ -217,17 +230,42 @@ final class PlayerModel: ObservableObject {
 
   private func startVideo(_ video: Video) async {
     do {
-      vodVariants = try await vodRenditions(id: video.id)
-      guard !stopped, let mediaURL = URL(string: vodVariants[0].uri) else { return }
+      async let renditions = vodRenditions(id: video.id)
+      async let saved = WatchHistory.shared.resumePosition(for: video)
+      vodVariants = try await renditions
+      let resume = await saved
+      guard !stopped else { return }
+      await StreamProxy.shared.ensureResponsive()
+      let source = VODPlaylists(variants: vodVariants, http: URLSessionHTTPClient(timeout: 10))
+      _ = try StreamProxy.shared.register(source)
+      vodSource = source
       qualities = vodVariants.enumerated().map { Quality(id: $0.offset, label: $0.element.label) }
       selectedQuality = 0
+      // VODs start at the beginning (a VOD that's still recording would otherwise start at its
+      // end), or where you left off.
+      let length = Double(video.lengthSeconds)
+      var start = 0.0
+      if let resume, resume > 15, length <= 0 || resume < length - 20 {
+        start = resume
+        resumedAt = resume
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+          withAnimation(.easeOut(duration: 0.3)) { self?.resumedAt = nil }
+        }
+      }
+      position = start
       // Play the best rendition's playlist directly, so the player can't switch to a lower one.
-      play(mediaURL)
+      play(StreamProxy.shared.mediaURL(for: source, index: 0), startAt: start)
       phase = .playing
-      loadStoryboard(videoID: video.id, known: nil, duration: Double(video.lengthSeconds))
+      loadStoryboard(videoID: video.id, known: nil, duration: length > 0 ? length : nil)
     } catch {
       phase = .failed(error.localizedDescription)
     }
+  }
+
+  /// "Start over" after resuming.
+  func startOver() {
+    resumedAt = nil
+    seek(to: 0)
   }
 
   // MARK: - Seek previews
@@ -237,7 +275,7 @@ final class PlayerModel: ObservableObject {
       let url: URL?
       if let known { url = known } else { url = await TwitchAPI.shared.seekPreviewsURL(videoID: videoID) }
       guard let url, !stopped else { return }
-      storyboardSource = (url, duration)
+      storyboardSource = (url, videoID, duration)
       await reloadStoryboard()
     }
   }
@@ -245,32 +283,57 @@ final class PlayerModel: ObservableObject {
   private func reloadStoryboard() async {
     guard let source = storyboardSource else { return }
     storyboardLoaded = Date()
-    if let board = await TwitchAPI.shared.storyboard(url: source.url, duration: source.duration), !stopped {
+    // A VOD that's still recording: its storyboard covers its current length.
+    var duration = source.duration
+    if duration == nil || vodIsRecording || isLive {
+      duration = await TwitchAPI.shared.videoProgress(videoID: source.videoID).length ?? duration
+    }
+    if let board = await TwitchAPI.shared.storyboard(url: source.url, duration: duration), !stopped {
       storyboard = board
     }
   }
 
-  /// While scrubbing a live rewind: the storyboard grows with the recording.
+  /// While scrubbing a recording: the storyboard grows with it.
   func refreshStoryboardIfStale() {
-    guard isLive, Date().timeIntervalSince(storyboardLoaded) > 90 else { return }
+    guard isLive || vodIsRecording || storyboard == nil, Date().timeIntervalSince(storyboardLoaded) > 60 else { return }
     Task { await reloadStoryboard() }
   }
 
-  private func play(_ url: URL?, resumeAt position: CMTime? = nil) {
+  /// - Parameter startAt: seconds to start from once the item is ready (VODs); nil plays at once
+  ///   (live: the player picks the live edge).
+  private func play(_ url: URL?, startAt seconds: Double? = nil) {
     guard let url else {
       phase = .failed("Couldn't start the local stream server.")
       return
     }
     let item = AVPlayerItem(url: url)
+    pendingStart = seconds
     itemObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
-      guard item.status == .failed else { return }
+      let status = item.status
       let message = item.error?.localizedDescription ?? "Playback failed."
       guard let model = self else { return }
-      Task { @MainActor in model.handleItemFailure(message) }
+      Task { @MainActor in
+        switch status {
+        case .failed: model.handleItemFailure(message)
+        case .readyToPlay: model.itemReady()
+        default: break
+        }
+      }
     }
     player.replaceCurrentItem(with: item)
-    if let position { player.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero) }
-    player.play()
+    if seconds == nil { player.play() }
+  }
+
+  private func itemReady() {
+    guard let start = pendingStart else { return }
+    pendingStart = nil
+    player.seek(to: CMTime(seconds: start, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) {
+      [weak self] _ in
+      Task { @MainActor in
+        guard let model = self, !model.stopped, !model.isPaused else { return }
+        model.player.play()
+      }
+    }
   }
 
   /// The rendition the Apple player is on (nil = Auto).
@@ -335,9 +398,9 @@ final class PlayerModel: ObservableObject {
     if let session {
       selectedQuality = quality.id
       play(StreamProxy.shared.masterURL(for: session, quality: quality.id))
-    } else if let index = quality.id, index < vodVariants.count, let url = URL(string: vodVariants[index].uri) {
+    } else if let index = quality.id, index < vodVariants.count, let vodSource {
       selectedQuality = quality.id
-      play(url, resumeAt: player.currentTime())
+      play(StreamProxy.shared.mediaURL(for: vodSource, index: index), startAt: player.currentTime().seconds)
     }
   }
 
@@ -387,6 +450,9 @@ final class PlayerModel: ObservableObject {
     } else {
       player.pause()
       isPaused = true
+      if case .video(let video) = target {
+        WatchHistory.shared.save(videoID: video.id, position: position, length: duration, syncToTwitch: true)
+      }
     }
   }
 
@@ -448,7 +514,10 @@ final class PlayerModel: ObservableObject {
   }
 
   func seek(to seconds: Double) {
+    position = seconds
+    resumedAt = nil
     player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    if case .video(let video) = target { WatchHistory.shared.save(videoID: video.id, position: seconds, length: duration, syncToTwitch: false) }
   }
 
   func setEngine(_ newEngine: PlayerEngine) {
@@ -485,6 +554,8 @@ final class PlayerModel: ObservableObject {
     itemObservation = nil
     if let session { StreamProxy.shared.remove(session.id) }
     session = nil
+    if let vodSource { StreamProxy.shared.remove(vodSource.id) }
+    vodSource = nil
     qualities = []
     selectedQuality = nil
     latency = nil
@@ -499,6 +570,10 @@ final class PlayerModel: ObservableObject {
   }
 
   func stop() {
+    if case .video(let video) = target, position > 0, phase == .playing {
+      WatchHistory.shared.save(videoID: video.id, position: position, length: duration, syncToTwitch: true)
+    }
+    if let rewindSource { StreamProxy.shared.remove(rewindSource.id) }
     stopped = true
     timer?.invalidate()
     timer = nil
@@ -573,9 +648,25 @@ final class PlayerModel: ObservableObject {
     if paused != isPaused { isPaused = paused }
     if !isLive, let item = player.currentItem {
       let seconds = item.duration.seconds
-      if seconds.isFinite, seconds > 0, seconds != duration { duration = seconds }
+      if seconds.isFinite, seconds > 0 {
+        if seconds != duration { duration = seconds }
+        if vodIsRecording { vodIsRecording = false }
+      } else if let range = item.seekableTimeRanges.last?.timeRangeValue {
+        // Still recording: the playlist has no end yet, so its length is what's been recorded.
+        let end = CMTimeRangeGetEnd(range).seconds
+        if end.isFinite, end > 0, abs(end - duration) > 0.5 { duration = end }
+        if !vodIsRecording { vodIsRecording = true }
+      }
       let current = player.currentTime().seconds
-      if current.isFinite { position = current }
+      if current.isFinite, pendingStart == nil { position = current }
+      if case .video(let video) = target, player.timeControlStatus == .playing, position > 0 {
+        if now.timeIntervalSince(lastSavedPosition) > 15 {
+          lastSavedPosition = now
+          let sync = now.timeIntervalSince(lastSyncedPosition) > 60
+          if sync { lastSyncedPosition = now }
+          WatchHistory.shared.save(videoID: video.id, position: position, length: duration, syncToTwitch: sync)
+        }
+      }
     }
     guard isLive, let item = player.currentItem else { return }
     let currentDate = item.currentDate()
@@ -654,6 +745,9 @@ final class PlayerModel: ObservableObject {
       }
       rewindVariants = variants.filter { !$0.isAudioOnly }
       guard !rewindVariants.isEmpty else { return }
+      let source = VODPlaylists(variants: rewindVariants, http: URLSessionHTTPClient(timeout: 10))
+      _ = try? StreamProxy.shared.register(source)
+      rewindSource = source
       broadcastElapsed = max(0, Date().timeIntervalSince(archive.startedAt))
       rewind = archive
       ActivityLog.shared.add("Rewind available: the VOD of this broadcast is being recorded")
@@ -685,7 +779,9 @@ final class PlayerModel: ObservableObject {
   }
 
   private func startRewindItem(at seconds: Double) {
-    guard rewindQuality < rewindVariants.count, let url = URL(string: rewindVariants[rewindQuality].uri) else { return }
+    guard rewindQuality < rewindVariants.count, let rewindSource,
+      let url = StreamProxy.shared.mediaURL(for: rewindSource, index: rewindQuality)
+    else { return }
     rewindPendingSeek = seconds
     rewindEndSince = nil
     let item = AVPlayerItem(url: url)

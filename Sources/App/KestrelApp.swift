@@ -32,23 +32,43 @@ struct RootView: View {
   @EnvironmentObject private var settings: AppSettings
 
   var body: some View {
-    TabView {
-      NavigationStack { FollowingView().appDestinations() }
-        .tabItem { Label("Following", systemImage: "heart") }
-      NavigationStack { BrowseView().appDestinations() }
-        .tabItem { Label("Browse", systemImage: "square.grid.2x2") }
-      NavigationStack { SearchView().appDestinations() }
-        .tabItem { Label("Search", systemImage: "magnifyingglass") }
-      NavigationStack { SettingsView() }
-        .tabItem { Label("Settings", systemImage: "gearshape") }
+    ZStack {
+      TabView {
+        NavigationStack { FollowingView().appDestinations().miniPlayerRoom() }
+          .tabItem { Label("Following", systemImage: "heart") }
+        NavigationStack { BrowseView().appDestinations().miniPlayerRoom() }
+          .tabItem { Label("Browse", systemImage: "square.grid.2x2") }
+        NavigationStack { SearchView().appDestinations().miniPlayerRoom() }
+          .tabItem { Label("Search", systemImage: "magnifyingglass") }
+        NavigationStack { SettingsView().miniPlayerRoom() }
+          .tabItem { Label("Settings", systemImage: "gearshape") }
+      }
+      // The player sits over the app (not in a separate screen) so it can shrink into the mini
+      // player and keep playing while you browse.
+      if let target = app.playing {
+        PlayerScreen(target: target)
+          .id(target.id)
+          .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
+          .zIndex(1)
+      }
     }
-    .fullScreenCover(item: $app.playing) { target in
-      PlayerScreen(target: target)
-        .environmentObject(app)
-        .environmentObject(favorites)
-        .environmentObject(settings)
+    .animation(.spring(response: 0.42, dampingFraction: 0.88), value: app.playing?.id)
+  }
+}
+
+/// Leaves room under scrolling content for the mini player.
+struct MiniPlayerRoom: ViewModifier {
+  @EnvironmentObject private var app: AppModel
+
+  func body(content: Content) -> some View {
+    content.safeAreaInset(edge: .bottom, spacing: 0) {
+      Color.clear.frame(height: app.playing != nil && app.playerMinimized ? PlayerLayout.miniInset : 0)
     }
   }
+}
+
+extension View {
+  func miniPlayerRoom() -> some View { modifier(MiniPlayerRoom()) }
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate {

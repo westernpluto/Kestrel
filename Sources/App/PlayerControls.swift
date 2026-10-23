@@ -11,13 +11,21 @@ struct PlayerVideoArea: View {
   var landscape: Bool
   var chatOpen: Bool
   var controlInsets: EdgeInsets
+  /// False while the player shrinks into (or is) the mini player.
+  var chromeVisible: Bool = true
+  /// In the mini player (its own overlay takes the touches).
+  var minimized: Bool = false
   var toggleChat: () -> Void
-  var close: () -> Void
+  var minimize: () -> Void
+  /// Pulling the video down (portrait): how far, then where it was let go (and where it was headed).
+  var onPull: (CGFloat) -> Void = { _ in }
+  var onPullEnd: (CGFloat, CGFloat) -> Void = { _, _ in }
   @EnvironmentObject private var settings: AppSettings
   @State private var controlsVisible = true
   @State private var hideTask: Task<Void, Never>?
   /// A pinch also moves the fingers; don't read it as a swipe.
   @State private var lastPinch = Date.distantPast
+  @State private var pulling = false
 
   var body: some View {
     ZStack {
@@ -31,10 +39,12 @@ struct PlayerVideoArea: View {
         .onTapGesture { toggleControls() }
         .gesture(swipe)
         .simultaneousGesture(zoom)
+        // Keyed to the minimized state, not the animation, so a pull in progress keeps its touch.
+        .allowsHitTesting(!minimized)
       statusOverlay
         .animation(.easeInOut(duration: 0.25), value: model.phase)
         .animation(.easeInOut(duration: 0.2), value: model.coveringAd)
-      if settings.showVideoStats && !model.stats.isEmpty {
+      if settings.showVideoStats && !model.stats.isEmpty && chromeVisible {
         StatsOverlay(lines: model.stats)
           .padding(.top, controlsShown ? 44 : 0)
           .padding(.leading, controlInsets.leading)
@@ -42,14 +52,34 @@ struct PlayerVideoArea: View {
           .transition(.opacity)
       }
       PlayerControls(
-        model: model, landscape: landscape, chatOpen: chatOpen, visible: controlsShown, insets: controlInsets,
-        toggleChat: toggleChat, close: close, interacted: { scheduleHide(after: $0) })
+        model: model, landscape: landscape, chatOpen: chatOpen, visible: controlsShown && chromeVisible && !pulling,
+        insets: controlInsets, toggleChat: toggleChat, minimize: minimize, interacted: { scheduleHide(after: $0) })
+      if let resumed = model.resumedAt, chromeVisible {
+        resumeNotice(resumed)
+          .padding(.leading, controlInsets.leading + 8)
+          .padding(.bottom, controlInsets.bottom + (controlsShown ? 78 : 10))
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+          .transition(.opacity.combined(with: .move(edge: .bottom)))
+          .animation(.easeInOut(duration: 0.2), value: controlsShown)
+      }
     }
     .clipped()
     .onAppear { scheduleHide(after: 3.5) }
   }
 
   private var controlsShown: Bool { controlsVisible || model.isPaused || model.phase != .playing }
+
+  /// "Resumed at 1:23:45 · Start over"
+  private func resumeNotice(_ position: Double) -> some View {
+    HStack(spacing: 8) {
+      Text("Resumed at \(Format.duration(Int(position)))").foregroundColor(.white.opacity(0.9))
+      Button("Start over") { model.startOver() }
+        .foregroundColor(.accentTeal)
+    }
+    .font(.caption.weight(.semibold))
+    .padding(.horizontal, 10).padding(.vertical, 6)
+    .background(.black.opacity(0.7), in: Capsule())
+  }
 
   /// The stream's thumbnail while it loads, so opening a stream doesn't start on black.
   private var poster: some View {
@@ -137,23 +167,37 @@ struct PlayerVideoArea: View {
 
   // MARK: Gestures
 
-  /// Swipe down: close (portrait) or leave full screen. Swipe up: full screen. Sideways in
-  /// landscape: show or hide chat.
+  /// Pull down (portrait): the player shrinks with your finger into the mini player. Swipe down
+  /// in landscape: leave full screen. Swipe up: full screen. Sideways in landscape: chat.
   private var swipe: some Gesture {
-    DragGesture(minimumDistance: 24).onEnded { value in
-      guard Date().timeIntervalSince(lastPinch) > 0.5 else { return }
-      let dx = value.translation.width, dy = value.translation.height
-      if abs(dy) > abs(dx) {
-        if dy > 70 {
-          landscape ? OrientationLock.force(.portrait) : close()
-        } else if dy < -70, !landscape {
-          OrientationLock.force(.landscape)
+    DragGesture(minimumDistance: 14)
+      .onChanged { value in
+        guard !landscape, Date().timeIntervalSince(lastPinch) > 0.5 else { return }
+        let dx = value.translation.width, dy = value.translation.height
+        if pulling || (dy > 8 && dy > abs(dx) * 1.2) {
+          pulling = true
+          onPull(max(0, dy))
         }
-      } else if landscape, model.isLive {
-        if dx < -60, !chatOpen { toggleChat() }
-        if dx > 60, chatOpen { toggleChat() }
       }
-    }
+      .onEnded { value in
+        let dx = value.translation.width, dy = value.translation.height
+        if pulling {
+          pulling = false
+          onPullEnd(dy, value.predictedEndTranslation.height)
+          return
+        }
+        guard Date().timeIntervalSince(lastPinch) > 0.5 else { return }
+        if abs(dy) > abs(dx) {
+          if dy > 70, landscape {
+            OrientationLock.force(.portrait)
+          } else if dy < -70, !landscape {
+            OrientationLock.force(.landscape)
+          }
+        } else if landscape {
+          if dx < -60, !chatOpen { toggleChat() }
+          if dx > 60, chatOpen { toggleChat() }
+        }
+      }
   }
 
   /// Pinch out to fill the screen (crops the sides), in to fit.
@@ -206,10 +250,12 @@ struct PlayerControls: View {
   var visible: Bool
   var insets: EdgeInsets
   var toggleChat: () -> Void
-  var close: () -> Void
+  var minimize: () -> Void
   /// Keeps the controls up for this many more seconds.
   var interacted: (Double) -> Void
   @EnvironmentObject private var settings: AppSettings
+  /// While dragging the seek bar everything else steps aside for the preview.
+  @State private var scrubbing = false
 
   var body: some View {
     ZStack {
@@ -219,11 +265,13 @@ struct PlayerControls: View {
       .allowsHitTesting(false)
       VStack(spacing: 0) {
         topBar
+          .opacity(scrubbing ? 0 : 1)
         Spacer(minLength: 0)
         bottomBar
       }
       .padding(insets)
-      if model.phase == .playing && !model.coveringAd {
+      .animation(.easeInOut(duration: 0.15), value: scrubbing)
+      if model.phase == .playing && !model.coveringAd && !scrubbing {
         Button {
           model.togglePause()
           interacted(3.5)
@@ -245,8 +293,8 @@ struct PlayerControls: View {
 
   private var topBar: some View {
     HStack(spacing: 2) {
-      button("chevron.down", label: landscape ? "Exit full screen" : "Close") {
-        landscape ? OrientationLock.force(.portrait) : close()
+      button("chevron.down", label: landscape ? "Exit full screen" : "Minimize") {
+        landscape ? OrientationLock.force(.portrait) : minimize()
       }
       if landscape {
         VStack(alignment: .leading, spacing: 1) {
@@ -315,9 +363,14 @@ struct PlayerControls: View {
         } else if model.duration > 0 {
           Text("\(Format.duration(Int(model.position))) / \(Format.duration(Int(model.duration)))")
             .font(.caption.monospacedDigit())
+          if model.vodIsRecording {
+            Text("RECORDING").font(.caption2.weight(.heavy))
+              .padding(.horizontal, 5).padding(.vertical, 2)
+              .background(Color.liveRed.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
+          }
         }
         Spacer()
-        if landscape && model.isLive {
+        if landscape {
           button(chatOpen ? "bubble.left.fill" : "bubble.left", label: chatOpen ? "Hide chat" : "Show chat", action: toggleChat)
         }
         button(
@@ -342,9 +395,15 @@ struct PlayerControls: View {
           let behind = model.broadcastElapsed - time
           return behind < 20 ? "Live" : "-" + Format.duration(Int(behind))
         },
-        onStart: { model.refreshStoryboardIfStale() },
+        onStart: {
+          scrubbing = true
+          model.refreshStoryboardIfStale()
+        },
         onScrub: { _ in interacted(4) },
-        onCommit: { model.seekBroadcast(to: $0) }
+        onCommit: {
+          scrubbing = false
+          model.seekBroadcast(to: $0)
+        }
       )
       .padding(.horizontal, 4)
       .transition(.opacity)
@@ -352,8 +411,15 @@ struct PlayerControls: View {
       SeekBar(
         position: model.position, duration: model.duration, storyboard: model.storyboard,
         label: { Format.duration(Int($0)) },
+        onStart: {
+          scrubbing = true
+          model.refreshStoryboardIfStale()
+        },
         onScrub: { _ in interacted(4) },
-        onCommit: { model.seek(to: $0) }
+        onCommit: {
+          scrubbing = false
+          model.seek(to: $0)
+        }
       )
       .padding(.horizontal, 4)
     }
@@ -470,13 +536,13 @@ struct SeekBar: View {
             .frame(width: Self.bubbleWidth)
             .offset(
               x: min(max(0, width * fraction - Self.bubbleWidth / 2), width - Self.bubbleWidth),
-              y: -(storyboard == nil ? 34 : 122))
+              y: -(storyboard == nil ? 28 : 116))
             .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .bottom)))
             .allowsHitTesting(false)
         }
       }
     }
-    .frame(height: 26)
+    .frame(height: 40)
   }
 }
 
@@ -573,11 +639,20 @@ struct StreamInfoBar: View {
         Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
         HStack(spacing: 4) {
           Text(model.channel?.name ?? "").font(.footnote.weight(.semibold)).foregroundColor(.white.opacity(0.85))
-          if let category = model.stream?.category?.name {
-            Text("· \(category)").font(.footnote).foregroundColor(.accentTeal)
-          }
-          if model.isLive, let uptime = Format.uptime(since: model.stream?.startedAt) {
-            Text("· \(uptime)").font(.footnote.monospacedDigit()).foregroundColor(.secondary)
+          if case .video(let video) = target {
+            if let category = video.categoryName {
+              Text("· \(category)").font(.footnote).foregroundColor(.accentTeal)
+            }
+            if video.createdAt != nil {
+              Text("· \(Format.relative(video.createdAt))").font(.footnote).foregroundColor(.secondary)
+            }
+          } else {
+            if let category = model.stream?.category?.name {
+              Text("· \(category)").font(.footnote).foregroundColor(.accentTeal)
+            }
+            if let uptime = Format.uptime(since: model.stream?.startedAt) {
+              Text("· \(uptime)").font(.footnote.monospacedDigit()).foregroundColor(.secondary)
+            }
           }
         }
         .lineLimit(1)
@@ -609,27 +684,6 @@ struct StreamInfoBar: View {
     switch target {
     case .live: return model.stream?.title ?? model.channel?.name ?? ""
     case .video(let video): return video.title
-    }
-  }
-}
-
-struct VideoDetails: View {
-  let target: PlaybackTarget
-
-  var body: some View {
-    ScrollView {
-      if case .video(let video) = target {
-        VStack(alignment: .leading, spacing: 6) {
-          Text(video.title).font(.headline)
-          Text(
-            [video.categoryName, Format.relative(video.createdAt), "\(Format.viewers(video.viewCount)) views"]
-              .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
-          )
-          .font(.footnote).foregroundColor(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-      }
     }
   }
 }

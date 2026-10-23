@@ -209,7 +209,12 @@ enum PlaybackTarget: Identifiable, Hashable {
 
 final class AppModel: ObservableObject {
   static let shared = AppModel()
-  @Published var playing: PlaybackTarget?
+  /// What's playing. Setting it (even to what's already in the mini player) opens the player.
+  @Published var playing: PlaybackTarget? {
+    didSet { if playing != nil { playerMinimized = false } }
+  }
+  /// The player is shrunk into the mini player above the tab bar.
+  @Published var playerMinimized = false
 }
 
 // MARK: - Formatting
