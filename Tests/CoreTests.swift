@@ -621,6 +621,78 @@ func testIRC() {
   check(ChatMessage(irc: IRCMessage.parse(":tmi.twitch.tv 001 justinfan1 :Welcome")!) == nil, "numeric ignored")
 }
 
+func testChatReplay() {
+  // A fake VOD chat: a message every 2 s for an hour. The API returns up to 40 messages from the
+  // asked offset (only by offset, like Twitch for other apps).
+  let all = (0..<1800).map { n -> ReplayComment in
+    var message = ChatMessage(notice: "m\(n)")
+    message.id = "id\(n)"
+    return ReplayComment(offset: Double(n * 2), message: message)
+  }
+  func page(_ offset: Int) -> [ReplayComment] { Array(all.filter { $0.offset >= Double(offset) }.prefix(40)) }
+  var buffer = ChatReplayBuffer()
+  var shown: [String] = []
+  var fetches = 0
+  let start = Date(timeIntervalSince1970: 0)
+  _ = buffer.move(to: 300)  // opened at 5:00
+  // Ten minutes of playback, ticking twice a second; each fetch answers right away.
+  for tick in 0...1200 {
+    let position = 300 + Double(tick) * 0.5
+    _ = buffer.move(to: position)
+    while let offset = buffer.fetchNeeded(now: start.addingTimeInterval(Double(tick) / 2)) {
+      fetches += 1
+      buffer.received(page(offset), for: offset, generation: buffer.generation)
+      if fetches > 500 { break }
+    }
+    shown += buffer.due().map(\.text)
+  }
+  check(shown.first == "m140" && shown.last == "m450", "replay ran from 4:40 to 15:00: \(shown.first ?? "-") … \(shown.last ?? "-")")
+  check(Set(shown).count == shown.count && shown.count == 311, "every message once: \(shown.count)")
+  check(fetches < 30, "paged sensibly: \(fetches)")
+  // A seek back starts over; a late page for the old position is ignored.
+  let old = buffer.generation
+  check(buffer.move(to: 60), "seek detected")
+  buffer.received(page(900), for: 900, generation: old)
+  check(buffer.due().isEmpty, "stale page ignored")
+  let offset = buffer.fetchNeeded(now: start)
+  check(offset == 40, "refetch from just before: \(offset ?? -1)")
+  buffer.received(page(40), for: 40, generation: buffer.generation)
+  check(buffer.due().map(\.text).first == "m20", "context before the seek point")
+  // The end of the chat (a recording VOD has no more yet): wait before asking again.
+  var end = ChatReplayBuffer()
+  _ = end.move(to: 3600)
+  var endFetches = 0
+  while let offset = end.fetchNeeded(now: start), endFetches < 10 {
+    endFetches += 1
+    end.received(page(offset), for: offset, generation: end.generation, now: start)
+  }
+  check(endFetches <= 3, "finds the end quickly: \(endFetches)")
+  _ = end.move(to: 3600.5)
+  check(end.due().last?.text == "m1799", "last message shown")
+  check(end.fetchNeeded(now: start.addingTimeInterval(5)) == nil, "no hammering at the end")
+  check(end.fetchNeeded(now: start.addingTimeInterval(25)) != nil, "asks again later")
+}
+
+func testEmoteText() {
+  let emotes: Set<String> = ["Kappa", "catJAM"]
+  // A finished emote (space after it) is a picture; one still being typed stays text.
+  var layout = EmoteText.pieces("hi Kappa ", cursor: 9) { emotes.contains($0) }
+  check(layout.pieces == [.text("hi"), .text(" "), .emote("Kappa"), .text(" ")] && layout.cursor == 5, "\(layout)")
+  layout = EmoteText.pieces("hi Kappa", cursor: 8) { emotes.contains($0) }
+  check(layout.pieces == [.text("hi"), .text(" "), .text("Kappa")] && layout.cursor == 8, "still typing: \(layout)")
+  // The cursor inside an emote's name lands after its picture; elsewhere it keeps its place.
+  layout = EmoteText.pieces("Kappa catJAM yo", cursor: 2) { emotes.contains($0) }
+  check(layout.pieces == [.emote("Kappa"), .text(" "), .emote("catJAM"), .text(" "), .text("yo")] && layout.cursor == 1, "\(layout)")
+  layout = EmoteText.pieces("Kappa catJAM yo", cursor: 14) { emotes.contains($0) }
+  check(layout.cursor == 5, "cursor in trailing text: \(layout.cursor)")
+  layout = EmoteText.pieces("Kappa catJAM yo", cursor: 6) { emotes.contains($0) }
+  check(layout.cursor == 2, "cursor before the second emote: \(layout.cursor)")
+  layout = EmoteText.pieces("", cursor: 0) { emotes.contains($0) }
+  check(layout.pieces.isEmpty && layout.cursor == 0, "empty")
+  layout = EmoteText.pieces("👋 Kappa ", cursor: 9) { emotes.contains($0) }
+  check(layout.pieces.last == .text(" ") && layout.cursor == 5, "UTF-16 counting: \(layout.cursor)")
+}
+
 func testOwnEmotes() {
   let sent = ChatMessage(sent: "hi Kappa  catJAM Kappa", userState: [:], login: "me", emoteIDs: ["Kappa": "25"])
   check(sent.emotes.count == 2 && sent.emotes[0].range == 3...7 && sent.emotes[1].range == 17...21, "\(sent.emotes)")
@@ -932,6 +1004,10 @@ func testVODPlaylists() {
   runAsync {
     let media = await source.mediaPlaylist(0)
     check(media.status == 200 && media.body.contains("0-muted.ts"), "served media playlist")
+    // Still recording: served as a finished VOD of what's there so far.
+    check(media.body.contains("#EXT-X-PLAYLIST-TYPE:VOD") && !media.body.contains("EVENT"), "VOD type: \(media.body)")
+    check(media.body.hasSuffix("#EXT-X-ENDLIST\n"), "closed off")
+    check(source.isRecording && source.recordedSeconds == 30, "recording, 30 s so far: \(source.recordedSeconds)")
     let master = await source.masterPlaylist(only: nil)
     check(master.contains("RESOLUTION=1920x1080") && master.contains("v/0.m3u8"), master)
   }
@@ -1004,6 +1080,8 @@ testLocalServer()
 testIRC()
 testEmoteParsers()
 testOwnEmotes()
+testEmoteText()
+testChatReplay()
 testAPIParsing()
 print("\(checks) checks, \(failures) failures")
 exit(failures == 0 ? 0 : 1)

@@ -170,7 +170,8 @@ struct PlayerVideoArea: View {
   /// Pull down (portrait): the player shrinks with your finger into the mini player. Swipe down
   /// in landscape: leave full screen. Swipe up: full screen. Sideways in landscape: chat.
   private var swipe: some Gesture {
-    DragGesture(minimumDistance: 14)
+    // Screen coordinates: the video shrinks under the finger while it's pulled.
+    DragGesture(minimumDistance: 14, coordinateSpace: .global)
       .onChanged { value in
         guard !landscape, Date().timeIntervalSince(lastPinch) > 0.5 else { return }
         let dx = value.translation.width, dy = value.translation.height
@@ -392,8 +393,7 @@ struct PlayerControls: View {
         position: model.isRewinding ? model.rewindPosition : model.broadcastElapsed,
         duration: model.broadcastElapsed, storyboard: model.storyboard,
         label: { time in
-          let behind = model.broadcastElapsed - time
-          return behind < 20 ? "Live" : "-" + Format.duration(Int(behind))
+          model.broadcastElapsed - time < 20 ? "Live" : Format.duration(Int(time))
         },
         onStart: {
           scrubbing = true
@@ -435,7 +435,8 @@ struct PlayerControls: View {
           .padding(.horizontal, 6).padding(.vertical, 2)
           .background(atLiveEdge ? Color.liveRed : Color.gray, in: RoundedRectangle(cornerRadius: 4))
         if model.isRewinding {
-          Text("-" + Format.duration(Int(max(0, model.broadcastElapsed - model.rewindPosition))))
+          // Where you are in the broadcast (counts up while it plays, holds while paused).
+          Text("\(Format.duration(Int(model.rewindPosition))) / \(Format.duration(Int(model.broadcastElapsed)))")
             .font(.caption.monospacedDigit()).foregroundColor(.white.opacity(0.85))
         } else if let latency = model.latency {
           Text(String(format: "%.1fs", latency)).font(.caption.monospacedDigit()).foregroundColor(.white.opacity(0.85))

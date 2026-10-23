@@ -761,12 +761,15 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
   ) {
     var variables: [String: Any] = ["id": videoID]
     if let cursor { variables["after"] = cursor } else { variables["offset"] = offset ?? 0 }
+    // Only the argument in use (Twitch can reject an offset and a cursor together).
+    let arguments = cursor == nil ? "contentOffsetSeconds: $offset" : "after: $after"
+    let declarations = cursor == nil ? "$offset: Int" : "$after: Cursor"
     do {
       let data = try await query(
         """
-        query null($id: ID, $after: Cursor, $offset: Int) {
+        query null($id: ID, \(declarations)) {
           video(id: $id) {
-            comments(after: $after, contentOffsetSeconds: $offset) {
+            comments(\(arguments)) {
               edges {
                 cursor
                 node {

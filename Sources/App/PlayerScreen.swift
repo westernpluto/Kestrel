@@ -555,7 +555,9 @@ struct PlayerScreen: View {
         }
       }
       .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
-      .background(KeyboardProbe(observer: keyboard))
+      // Measures the keyboard only: it must never take touches (it covers the whole screen, and
+      // took every tap meant for the app behind the mini player).
+      .background(KeyboardProbe(observer: keyboard).allowsHitTesting(false))
       .opacity(closing ? 0 : 1)
       .scaleEffect(closing ? 0.96 : 1, anchor: .bottomTrailing)
       .statusBarHidden(landscape && progress == 0)
@@ -666,7 +668,9 @@ struct MiniPlayerOverlay: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: expand)
         .gesture(
-          DragGesture(minimumDistance: 6)
+          // Measured on the screen, not on the mini player (which moves with the finger: measuring
+          // on it made it shake).
+          DragGesture(minimumDistance: 6, coordinateSpace: .global)
             .onChanged { onDrag($0.translation) }
             .onEnded { onDragEnd($0.translation, $0.predictedEndTranslation) }
         )

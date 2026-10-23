@@ -20,7 +20,7 @@ An iOS client for watching Twitch without ads, with low-latency playback, chat a
   - Start at the beginning, or where you left off: positions are saved on the iPhone and, signed in, to your Twitch account the way Twitch's player does, so the website and apps resume at the same point. Channel video lists show how far you got.
   - **Chat replay** in time with the video.
   - Parts Twitch muted for copyright play (silently) instead of freezing: Twitch lists them under file names that don't exist, and Kestrel corrects them like Twitch's own player.
-  - A VOD of a stream that's still live shows "RECORDING" and its seek bar grows as it records.
+  - A VOD of a stream that's still live shows "RECORDING". It plays as a finished VOD of what's been recorded so far (the Apple player stalls on open-ended recordings) and loads more as you near the end. If playback ever gets stuck on a broken part, Kestrel skips ahead a few seconds.
   - One layout for both orientations, so rotating, opening chat, the keyboard and the emote picker all animate instead of rebuilding the player.
   - Picture in Picture, AirPlay, background audio, tap LIVE to jump back to the live edge.
 - **Low latency:** the [Amazon IVS Player SDK](https://docs.aws.amazon.com/ivs/latest/LowLatencyUserGuide/player-ios.html) (the engine Twitch's own apps use) in Twitch's low-latency mode, usually a few seconds behind. Falls back to the Apple player (AVPlayer, ~8–12 s behind) if it can't play a stream. Only in builds made with the SDK (the GitHub Actions build downloads it). VODs use the Apple player.
@@ -28,7 +28,7 @@ An iOS client for watching Twitch without ads, with low-latency playback, chat a
 - **Sign in with Twitch** (optional) on Twitch's own login page inside the app:
   - **Chat as yourself**, with room-mode notices (slow, followers-only, sub-only); tap a name to mention it.
   - **Emote picker** (smiley button): every emote you can use in this channel — the channel's sub and follower emotes you have, your other subs, Twitch's, and the channel's 7TV/BTTV/FFZ emotes — with Recent first.
-  - **Autocomplete:** type `:` and a few letters for emotes, `@` for people in chat.
+  - **Autocomplete:** type `:` and a few letters for emotes, `@` for people in chat. Emotes show as pictures in the message box once typed (delete the picture to remove the emote).
   - **Following** shows your Twitch follows, live channels first (sorted by viewers) and offline ones with when they were last live. Channels you heart in the player are added too.
 - **Chat:** Twitch, 7TV, BTTV and FFZ emotes (animated), badges, and recent messages when you join.
 - **Video stats:** a Twitch-style overlay with player, quality, codecs, resolution, frame rate, bitrate, bandwidth, buffer, latency, dropped frames, ad state and ad-blocking route.

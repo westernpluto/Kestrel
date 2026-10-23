@@ -284,6 +284,50 @@ struct ChatMessage: Identifiable, Equatable {
   }
 }
 
+// MARK: - Message box text
+
+/// How the message box shows a message: finished words that are emotes (a space after them)
+/// become pictures, the rest stays text. Positions are UTF-16 offsets; a picture counts as one.
+enum EmoteText {
+  enum Piece: Equatable {
+    case text(String)
+    case emote(String)
+  }
+
+  /// - Parameter cursor: a position in `text`. Returns where it lands in what's shown.
+  static func pieces(_ text: String, cursor: Int, isEmote: (String) -> Bool) -> (pieces: [Piece], cursor: Int) {
+    let source = text as NSString
+    var pieces: [Piece] = []
+    var shownLength = 0
+    var shownCursor: Int?
+    var index = 0
+    while index < source.length {
+      if source.character(at: index) == 32 {
+        if shownCursor == nil, cursor == index { shownCursor = shownLength }
+        pieces.append(.text(" "))
+        shownLength += 1
+        index += 1
+        continue
+      }
+      var end = index
+      while end < source.length, source.character(at: end) != 32 { end += 1 }
+      let word = source.substring(with: NSRange(location: index, length: end - index))
+      if end < source.length, isEmote(word) {
+        if shownCursor == nil, cursor == index { shownCursor = shownLength }
+        if shownCursor == nil, cursor > index, cursor < end { shownCursor = shownLength + 1 }
+        pieces.append(.emote(word))
+        shownLength += 1
+      } else {
+        if shownCursor == nil, cursor >= index, cursor < end { shownCursor = shownLength + (cursor - index) }
+        pieces.append(.text(word))
+        shownLength += end - index
+      }
+      index = end
+    }
+    return (pieces, min(shownCursor ?? shownLength, shownLength))
+  }
+}
+
 // MARK: - VOD chat (replay)
 
 /// A VOD chat message and when it was sent, in seconds into the video.
@@ -324,6 +368,77 @@ extension ChatMessage {
     }
     self.emotes = emotes
     timestamp = node["createdAt"].date ?? Date()
+  }
+}
+
+/// The VOD chat replay's bookkeeping, separate from the network: what's been fetched, what's been
+/// shown, and where the next page starts. Twitch only lets other apps page VOD chat by time (not
+/// by its cursors), so pages are asked for by offset.
+struct ChatReplayBuffer {
+  private(set) var position: Double = -1
+  private(set) var nextOffset = 0
+  private(set) var exhaustedAt: Date?
+  private(set) var loading = false
+  private var queue: [ReplayComment] = []
+  private var seen: Set<String> = []
+  /// Bumped on every seek, so pages that arrive late for an old position are ignored.
+  private(set) var generation = 0
+
+  /// Moves to `position`. Returns true when that's a seek (chat should start over).
+  mutating func move(to position: Double) -> Bool {
+    let jumped = self.position < 0 || position < self.position - 3 || position > self.position + 25
+    self.position = position
+    guard jumped else { return false }
+    generation += 1
+    queue = []
+    seen = []
+    nextOffset = max(0, Int(position) - 20)
+    exhaustedAt = nil
+    loading = false
+    return true
+  }
+
+  /// The offset to fetch now, if chat is running low (about half a minute is kept ready).
+  mutating func fetchNeeded(now: Date = Date()) -> Int? {
+    guard !loading else { return nil }
+    if let exhaustedAt, now.timeIntervalSince(exhaustedAt) < 20 { return nil }
+    let readyUntil = queue.last?.offset ?? Double(nextOffset)
+    guard readyUntil < position + 30 || queue.isEmpty && Double(nextOffset) <= position + 30 else { return nil }
+    loading = true
+    return nextOffset
+  }
+
+  /// A page arrived for `offset` (ignored if it's for an old position).
+  mutating func received(_ comments: [ReplayComment], for offset: Int, generation: Int, now: Date = Date()) {
+    guard generation == self.generation else { return }
+    loading = false
+    let fresh = comments.filter { seen.insert($0.message.id).inserted }
+    if let last = comments.last {
+      // Next page from the last second seen (its messages already seen are skipped); a page with
+      // nothing new moves a second on.
+      let lastSecond = Int(last.offset)
+      nextOffset = fresh.isEmpty || lastSecond <= offset ? max(offset, lastSecond) + 1 : lastSecond
+      exhaustedAt = nil
+    } else {
+      exhaustedAt = now
+    }
+    queue = (queue + fresh).sorted { $0.offset < $1.offset }
+  }
+
+  mutating func failed(generation: Int, now: Date = Date()) {
+    guard generation == self.generation else { return }
+    loading = false
+    exhaustedAt = now
+  }
+
+  /// Messages due by now.
+  mutating func due() -> [ChatMessage] {
+    var count = 0
+    while count < queue.count, queue[count].offset <= position { count += 1 }
+    guard count > 0 else { return [] }
+    let messages = queue.prefix(count).map(\.message)
+    queue.removeFirst(count)
+    return messages
   }
 }
 

@@ -19,6 +19,10 @@ final class ChatController: ObservableObject {
   @Published private(set) var emoteSections: [EmoteSection] = []
   /// Every emote you can type here, by name (autocomplete).
   private(set) var usableEmotes: [NamedEmote] = []
+  private var emoteURLs: [String: URL] = [:]
+
+  /// The picture for an emote name you can use here (the message box shows it).
+  func emoteURL(for name: String) -> URL? { emoteURLs[name] }
   /// Your Twitch emotes: name → ID (to show them in your own messages).
   private(set) var twitchEmoteIDs: [String: String] = [:]
   private var thirdPartySets = ThirdPartyEmoteSets()
@@ -42,13 +46,7 @@ final class ChatController: ObservableObject {
 
   /// Set for a VOD: chat is replayed in time with the video instead of joined live.
   let replayVideoID: String?
-  private var replayQueue: [ReplayComment] = []
-  private var replaySeen: Set<String> = []
-  private var replayCursor: String?
-  private var replayHasMore = true
-  private var replayLoading = false
-  private var replayPosition: Double = -1
-  private var replayGeneration = 0
+  private var replay = ChatReplayBuffer()
 
   nonisolated init(channel: Channel, replayVideoID: String? = nil) {
     self.channel = channel
@@ -92,60 +90,40 @@ final class ChatController: ObservableObject {
   /// Shows what was said up to `position` (seconds into the VOD), fetching ahead as it plays.
   func replay(at position: Double) {
     guard let videoID = replayVideoID, running, position.isFinite else { return }
-    let jumped = replayPosition < 0 || position < replayPosition - 3 || position > replayPosition + 25
-    replayPosition = position
-    if jumped {
+    if replay.move(to: position) {
       // A seek: start over from a little before the new position.
-      replayGeneration += 1
-      replayQueue = []
-      replaySeen = []
-      replayCursor = nil
-      replayHasMore = true
       pending = []
       messages = []
       onUpdate?(true)
-      loadReplay(videoID: videoID, offset: max(0, Int(position) - 20), cursor: nil)
-      return
     }
     releaseReplay()
-    if !replayLoading, replayHasMore, replayCursor != nil, (replayQueue.last?.offset ?? 0) < position + 30 {
-      loadReplay(videoID: videoID, offset: nil, cursor: replayCursor)
-    }
+    fetchReplayIfNeeded(videoID: videoID)
   }
 
   private func releaseReplay() {
-    var count = 0
-    while count < replayQueue.count, replayQueue[count].offset <= replayPosition { count += 1 }
-    guard count > 0 else { return }
-    for comment in replayQueue.prefix(count) { enqueue(comment.message) }
-    replayQueue.removeFirst(count)
+    for message in replay.due() { enqueue(message) }
   }
 
-  private func loadReplay(videoID: String, offset: Int?, cursor: String?) {
-    let generation = replayGeneration
-    replayLoading = true
+  private func fetchReplayIfNeeded(videoID: String) {
+    guard let offset = replay.fetchNeeded() else { return }
+    let generation = replay.generation
     Task {
       do {
-        let page = try await TwitchAPI.shared.videoComments(videoID: videoID, offset: offset, cursor: cursor)
-        guard generation == replayGeneration else { return }
-        replayLoading = false
-        replayCursor = page.cursor
-        replayHasMore = page.hasMore && page.cursor != nil
-        let fresh = page.comments.filter { replaySeen.insert($0.message.id).inserted }
-        replayQueue = (replayQueue + fresh).sorted { $0.offset < $1.offset }
-        releaseReplay()
-        // Sparse chat: keep reading until there's something past the current position.
-        if replayHasMore, (replayQueue.last?.offset ?? 0) < replayPosition + 30, !fresh.isEmpty {
-          loadReplay(videoID: videoID, offset: nil, cursor: replayCursor)
-        }
+        let page = try await TwitchAPI.shared.videoComments(videoID: videoID, offset: offset, cursor: nil)
+        replay.received(page.comments, for: offset, generation: generation)
       } catch {
-        guard generation == replayGeneration else { return }
-        replayLoading = false
-        replayHasMore = false
-        if messages.isEmpty && pending.isEmpty {
-          enqueue(ChatMessage(notice: "Chat replay isn't available for this video (\(error.localizedDescription))."))
+        replay.failed(generation: generation)
+        if generation == replay.generation {
+          ActivityLog.shared.add("Chat replay: \(error.localizedDescription)")
+          if messages.isEmpty && pending.isEmpty {
+            enqueue(ChatMessage(notice: "Chat replay isn't available for this video right now."))
+          }
         }
       }
+      guard generation == replay.generation else { return }
+      releaseReplay()
+      // Keep reading until there's chat ahead of the video (or there's none yet).
+      fetchReplayIfNeeded(videoID: videoID)
     }
   }
 
@@ -205,6 +183,7 @@ final class ChatController: ObservableObject {
       for emote in section.emotes { byName[emote.name] = emote }
     }
     usableEmotes = byName.values.sorted { $0.name.count < $1.name.count }
+    emoteURLs = byName.mapValues(\.url)
     let recent = RecentEmotes.names.compactMap { byName[$0] }
     if !recent.isEmpty { sections.insert(EmoteSection(id: "recent", title: "Recent", icon: nil, emotes: recent), at: 0) }
     emoteSections = sections
@@ -268,7 +247,7 @@ final class ChatController: ObservableObject {
       Task { @MainActor in chat.enqueue(ChatMessage(notice: "Couldn't send: \(error.localizedDescription)")) }
     }
     enqueue(ChatMessage(sent: text, userState: userState, login: login, emoteIDs: twitchEmoteIDs))
-    let used = Set(text.split(separator: " ").map(String.init)).filter { name in usableEmotes.contains { $0.name == name } }
+    let used = Set(text.split(separator: " ").map(String.init)).filter { emoteURLs[$0] != nil }
     if !used.isEmpty {
       RecentEmotes.add(Array(used))
       rebuildEmoteSections()
@@ -918,7 +897,8 @@ struct ChatPanel: View {
   @State private var draft = ""
   @State private var showLogin = false
   @State private var pickerOpen = false
-  @FocusState private var focused: Bool
+  @State private var focused = false
+  @State private var inputHeight = EmoteTextField.minHeight
 
   private static let spring = Animation.spring(response: 0.32, dampingFraction: 0.86)
 
@@ -1059,13 +1039,12 @@ struct ChatPanel: View {
         }
         HStack(spacing: 8) {
           HStack(spacing: 4) {
-            TextField(chat.canSend ? "Send a message" : "Joining chat…", text: $draft)
-              .focused($focused)
-              .submitLabel(.send)
-              .onSubmit(send)
-              .disabled(!chat.canSend)
-              .autocorrectionDisabled()
-              .textInputAutocapitalization(.never)
+            EmoteTextField(
+              text: $draft, isFocused: $focused, height: $inputHeight,
+              placeholder: chat.canSend ? "Send a message" : "Joining chat…", enabled: chat.canSend,
+              emoteURL: { chat.emoteURL(for: $0) }, onSubmit: send
+            )
+            .frame(height: inputHeight)
             Button {
               if pickerOpen {
                 focused = true
@@ -1084,8 +1063,8 @@ struct ChatPanel: View {
           }
           .padding(.leading, 12)
           .padding(.trailing, 4)
-          .padding(.vertical, 3)
           .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18))
+          .animation(.easeOut(duration: 0.15), value: inputHeight)
           Button(action: send) {
             Image(systemName: "paperplane.fill").font(.system(size: 16, weight: .semibold))
               .frame(width: 36, height: 36)

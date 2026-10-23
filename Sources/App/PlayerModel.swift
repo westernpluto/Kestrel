@@ -85,6 +85,10 @@ final class PlayerModel: ObservableObject {
   @Published private(set) var resumedAt: Double?
   private var lastSavedPosition = Date()
   private var lastSyncedPosition = Date()
+  private var lastExtended = Date.distantPast
+  private var lastRewindReload = Date.distantPast
+  /// Stall watchdog (VODs and rewinding): where playback got stuck and since when.
+  private var stall: (position: Double, since: Date)?
   private var storyboardLoaded = Date.distantPast
 
   #if canImport(AmazonIVSPlayer)
@@ -327,7 +331,13 @@ final class PlayerModel: ObservableObject {
   private func itemReady() {
     guard let start = pendingStart else { return }
     pendingStart = nil
-    player.seek(to: CMTime(seconds: start, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) {
+    if let vodSource, vodSource.isRecording != vodIsRecording { vodIsRecording = vodSource.isRecording }
+    // A VOD starts at its beginning by itself: only seek for a later start.
+    guard start >= 1 else {
+      if !isPaused { player.play() }
+      return
+    }
+    player.seek(to: CMTime(seconds: start, preferredTimescale: 600), toleranceBefore: Self.seekTolerance, toleranceAfter: Self.seekTolerance) {
       [weak self] _ in
       Task { @MainActor in
         guard let model = self, !model.stopped, !model.isPaused else { return }
@@ -335,6 +345,9 @@ final class PlayerModel: ObservableObject {
       }
     }
   }
+
+  /// Landing on the nearest keyframe is quicker than an exact frame and nobody can tell.
+  static let seekTolerance = CMTime(seconds: 1, preferredTimescale: 600)
 
   /// The rendition the Apple player is on (nil = Auto).
   private var currentVariant: HLSVariant? {
@@ -648,17 +661,19 @@ final class PlayerModel: ObservableObject {
     if paused != isPaused { isPaused = paused }
     if !isLive, let item = player.currentItem {
       let seconds = item.duration.seconds
-      if seconds.isFinite, seconds > 0 {
-        if seconds != duration { duration = seconds }
-        if vodIsRecording { vodIsRecording = false }
-      } else if let range = item.seekableTimeRanges.last?.timeRangeValue {
-        // Still recording: the playlist has no end yet, so its length is what's been recorded.
-        let end = CMTimeRangeGetEnd(range).seconds
-        if end.isFinite, end > 0, abs(end - duration) > 0.5 { duration = end }
-        if !vodIsRecording { vodIsRecording = true }
-      }
+      if seconds.isFinite, seconds > 0, abs(seconds - duration) > 0.5 { duration = seconds }
       let current = player.currentTime().seconds
       if current.isFinite, pendingStart == nil { position = current }
+      // Still recording: it was loaded as what's been recorded so far; near the end, load it
+      // again to get what's been recorded since.
+      if vodIsRecording, duration > 0, position > duration - 30, pendingStart == nil,
+        now.timeIntervalSince(lastExtended) > 45, let vodSource
+      {
+        lastExtended = now
+        ActivityLog.shared.add("The VOD is still recording: loading what's been recorded since")
+        play(StreamProxy.shared.mediaURL(for: vodSource, index: selectedQuality ?? 0), startAt: position)
+      }
+      watchForStall(player, position: position, pending: pendingStart != nil)
       if case .video(let video) = target, player.timeControlStatus == .playing, position > 0 {
         if now.timeIntervalSince(lastSavedPosition) > 15 {
           lastSavedPosition = now
@@ -764,8 +779,11 @@ final class PlayerModel: ObservableObject {
     }
     let target = max(0, seconds)
     rewindPosition = target
-    if isRewinding, let item = rewindPlayer.currentItem, item.status == .readyToPlay {
-      rewindPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    stall = nil
+    if isRewinding, let item = rewindPlayer.currentItem, item.status == .readyToPlay,
+      item.duration.seconds.isFinite, target < item.duration.seconds - 10
+    {
+      rewindPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: Self.seekTolerance, toleranceAfter: Self.seekTolerance)
       if !isPaused { rewindPlayer.play() }
       return
     }
@@ -802,7 +820,11 @@ final class PlayerModel: ObservableObject {
     case .readyToPlay:
       guard let target = rewindPendingSeek else { return }
       rewindPendingSeek = nil
-      rewindPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) {
+      guard target >= 1 else {
+        if !isPaused { rewindPlayer.play() }
+        return
+      }
+      rewindPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: Self.seekTolerance, toleranceAfter: Self.seekTolerance) {
         [weak self] _ in
         Task { @MainActor in
           guard let model = self, model.isRewinding, !model.isPaused else { return }
@@ -860,18 +882,27 @@ final class PlayerModel: ObservableObject {
       pictureInPictureActive = rewindPictureInPicture?.isPictureInPictureActive ?? false
     }
     latency = max(0, broadcastElapsed - rewindPosition)
-    // Caught up with the end of the recording: carry on live.
-    if let end = rewindPlayer.currentItem?.seekableTimeRanges.last?.timeRangeValue, status == .waitingToPlayAtSpecifiedRate,
-      current >= CMTimeRangeGetEnd(end).seconds - 4
+    // The end of what was recorded when it was loaded: more has been recorded since, so load it
+    // again, or go live if that's all but caught up.
+    if let item = rewindPlayer.currentItem, rewindPendingSeek == nil, !isPaused,
+      item.duration.seconds.isFinite, item.duration.seconds > 0, current >= item.duration.seconds - 1.5
     {
       if rewindEndSince == nil { rewindEndSince = Date() }
-      if let since = rewindEndSince, Date().timeIntervalSince(since) > 3 {
-        ActivityLog.shared.add("Caught up with the recording: back to live")
-        returnToLive()
+      if let since = rewindEndSince, Date().timeIntervalSince(since) > 1 {
+        rewindEndSince = nil
+        if broadcastElapsed - current > 90, Date().timeIntervalSince(lastRewindReload) > 20 {
+          lastRewindReload = Date()
+          startRewindItem(at: current)
+        } else {
+          ActivityLog.shared.add("Caught up with the recording: back to live")
+          returnToLive()
+          return
+        }
       }
     } else {
       rewindEndSince = nil
     }
+    watchForStall(rewindPlayer, position: current, pending: rewindPendingSeek != nil)
     if AppSettings.shared.showVideoStats, let item = rewindPlayer.currentItem {
       var lines = [StatLine(label: "Player", value: "Apple (AVPlayer), rewinding the VOD")]
       if rewindQuality < rewindVariants.count { lines.append(StatLine(label: "Quality", value: rewindVariants[rewindQuality].label)) }
@@ -885,6 +916,27 @@ final class PlayerModel: ObservableObject {
       stats = lines
     } else if !stats.isEmpty {
       stats = []
+    }
+  }
+
+  /// Stuck loading at the same spot for a while (a missing or broken part of a VOD): skip ahead
+  /// a little instead of freezing.
+  private func watchForStall(_ player: AVPlayer, position: Double, pending: Bool) {
+    guard !pending, player.timeControlStatus == .waitingToPlayAtSpecifiedRate, position.isFinite else {
+      stall = nil
+      return
+    }
+    guard let current = stall, abs(current.position - position) < 0.5 else {
+      stall = (position, Date())
+      return
+    }
+    guard Date().timeIntervalSince(current.since) > 7 else { return }
+    stall = nil
+    let target = position + 8
+    ActivityLog.shared.add("Playback stuck at \(Format.duration(Int(position))); skipping ahead a few seconds")
+    player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: Self.seekTolerance, toleranceAfter: Self.seekTolerance) {
+      _ in
+      Task { @MainActor in player.play() }
     }
   }
 

@@ -5,6 +5,11 @@
 // only exist as "N-muted.ts" (Twitch's own player renames them). Played as listed, the player
 // stalls on the first muted part: often the very start of a stream (intro music), which is why
 // rewinding to the beginning froze.
+//
+// A VOD that's still being recorded is an open-ended ("EVENT") playlist, which the Apple player
+// treats like a live stream: it reloads it constantly, starts at its end and stalled near the
+// beginning. It's served as a finished VOD instead (what's been recorded so far); the player
+// reloads it to get more as playback nears the end.
 
 import Foundation
 
@@ -17,6 +22,23 @@ final class VODPlaylists: PlaylistSource, @unchecked Sendable {
   /// Twitch's renditions, best first.
   let variants: [HLSVariant]
   private let http: HTTPClient
+  private let lock = NSLock()
+  private var _isRecording = false
+  private var _recordedSeconds: Double = 0
+
+  /// The upstream playlist had no end yet (the broadcast is still being recorded).
+  var isRecording: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return _isRecording
+  }
+
+  /// How much of it the last served playlist covered.
+  var recordedSeconds: Double {
+    lock.lock()
+    defer { lock.unlock() }
+    return _recordedSeconds
+  }
 
   init(id: String = UUID().uuidString, variants: [HLSVariant], http: HTTPClient) {
     self.id = id
@@ -45,16 +67,30 @@ final class VODPlaylists: PlaylistSource, @unchecked Sendable {
     guard response.statusCode == 200, let text = String(data: data, encoding: .utf8), text.hasPrefix("#EXTM3U") else {
       return (response.statusCode == 200 ? 502 : response.statusCode, "")
     }
-    return (200, Self.rewrite(text, base: response.url ?? url))
+    let growing = Self.isGrowing(text)
+    let rewritten = Self.rewrite(text, base: response.url ?? url, finish: true)
+    note(recording: growing, seconds: Self.totalDuration(rewritten))
+    return (200, rewritten)
   }
 
-  /// Absolute segment addresses (the playlist is served from localhost) and muted parts under
-  /// the names that exist.
-  static func rewrite(_ text: String, base: URL) -> String {
+  private func note(recording: Bool, seconds: Double) {
+    lock.lock()
+    _isRecording = recording
+    _recordedSeconds = seconds
+    lock.unlock()
+  }
+
+  /// Absolute segment addresses (the playlist is served from localhost), muted parts under the
+  /// names that exist, and (with `finish`) a still-recording playlist closed off as a VOD.
+  static func rewrite(_ text: String, base: URL, finish: Bool = false) -> String {
     var out: [String] = []
+    var sawType = false
     for raw in HLS.lines(text) {
       let line = String(raw).trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
-      if line.hasPrefix("#") {
+      if line.hasPrefix("#EXT-X-PLAYLIST-TYPE") {
+        sawType = true
+        out.append(finish ? "#EXT-X-PLAYLIST-TYPE:VOD" : line)
+      } else if line.hasPrefix("#") {
         out.append(LowLatencyPlaylist.absolutizeTag(line, base: base))
       } else if line.trimmingCharacters(in: .whitespaces).isEmpty {
         out.append(line)
@@ -62,7 +98,24 @@ final class VODPlaylists: PlaylistSource, @unchecked Sendable {
         out.append(HLS.resolve(Substring(line), base: base).replacingOccurrences(of: "-unmuted.", with: "-muted."))
       }
     }
+    if finish {
+      while let last = out.last, last.trimmingCharacters(in: .whitespaces).isEmpty { out.removeLast() }
+      if !sawType, let header = out.firstIndex(where: { $0.hasPrefix("#EXTM3U") }) {
+        out.insert("#EXT-X-PLAYLIST-TYPE:VOD", at: header + 1)
+      }
+      if isGrowing(text) { out.append("#EXT-X-ENDLIST") }
+    }
     return out.joined(separator: "\n") + "\n"
+  }
+
+  /// Sum of the segment durations.
+  static func totalDuration(_ text: String) -> Double {
+    var total = 0.0
+    for line in HLS.lines(text) where line.hasPrefix("#EXTINF:") {
+      let value = line.dropFirst(8).split(separator: ",", maxSplits: 1).first.map(String.init) ?? ""
+      total += Double(value.trimmingCharacters(in: .whitespaces)) ?? 0
+    }
+    return total
   }
 
   /// Whether the VOD is still being recorded (no end tag yet).
