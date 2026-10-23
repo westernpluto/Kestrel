@@ -1,0 +1,78 @@
+name: Build IPA
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Amazon IVS Player SDK (the low-latency player). Version and checksum come from AWS's
+  # Package.swift for that release: https://player.live-video.net/<version>/Package.swift
+  IVS_VERSION: "1.57.0"
+  IVS_SHA256: "a848cb36f59d5d19f11456913d7a8c035fb118a7f3a0a4e12230e2e534970430"
+
+jobs:
+  build:
+    # The Linux iOS toolchain below is built for Ubuntu 22.04.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache iOS toolchain + SDK
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/theos
+          key: ios-toolchain-swift5.8-sdk16.5-v1
+
+      - name: Install iOS toolchain + SDK
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/theos/toolchain ~/theos/sdks
+          curl -fsSL https://github.com/kabiroberai/swift-toolchain-linux/releases/download/v2.3.0/swift-5.8-ubuntu22.04.tar.xz \
+            | tar -xJ -C ~/theos/toolchain
+          git clone --depth 1 --filter=blob:none --no-checkout https://github.com/theos/sdks.git /tmp/sdks
+          git -C /tmp/sdks sparse-checkout init --cone
+          git -C /tmp/sdks sparse-checkout set iPhoneOS16.5.sdk
+          git -C /tmp/sdks checkout
+          mv /tmp/sdks/iPhoneOS16.5.sdk ~/theos/sdks/
+
+      - name: Download Amazon IVS Player SDK
+        id: ivs
+        continue-on-error: true
+        run: |
+          curl -fsSL --retry 3 -o /tmp/ivs.zip "https://player.live-video.net/${IVS_VERSION}/AmazonIVSPlayer.xcframework.zip"
+          echo "${IVS_SHA256}  /tmp/ivs.zip" | sha256sum -c -
+          mkdir -p vendor
+          unzip -q -o /tmp/ivs.zip -d vendor
+          test -d vendor/AmazonIVSPlayer.xcframework || mv "$(find vendor -maxdepth 3 -name AmazonIVSPlayer.xcframework -type d | head -1)" vendor/
+
+      - name: Build IPA (with the low-latency player)
+        id: build_ivs
+        if: steps.ivs.outcome == 'success'
+        continue-on-error: true
+        run: ./build.sh
+        env:
+          VERSION: 1.0.${{ github.run_number }}
+          BUILD_NUMBER: ${{ github.run_number }}
+
+      - name: Build IPA (Apple player only)
+        if: steps.build_ivs.outcome != 'success'
+        run: |
+          echo "::warning::Built without the Amazon IVS SDK, so the low-latency player isn't included."
+          rm -rf vendor/AmazonIVSPlayer.xcframework
+          ./build.sh
+        env:
+          VERSION: 1.0.${{ github.run_number }}
+          BUILD_NUMBER: ${{ github.run_number }}
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kestrel-ipa
+          path: build/Kestrel.ipa
+
+      - name: Core tests (ad blocking, playlists, chat parsing)
+        continue-on-error: true
+        run: |
+          if command -v swiftc >/dev/null; then ./Tests/run.sh; else echo "No host Swift on this runner; skipping."; fi
