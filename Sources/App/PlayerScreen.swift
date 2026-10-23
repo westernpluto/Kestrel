@@ -538,13 +538,9 @@ struct PlayerScreen: View {
     .task {
       orientation.start()
       OrientationLock.playerVisible(true)
-      model.translator = chat.translator
       chat.start()
       await model.start()
     }
-    // The translation sessions (chat and captions) live in hidden views here.
-    .background(TranslationHosts(translator: chat.translator))
-    .onChange(of: model.translateChat) { on in chat.setAutoTranslate(on) }
     .onChange(of: model.position) { position in
       if chat.isReplay { chat.replay(at: position) }
     }

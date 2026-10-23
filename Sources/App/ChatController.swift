@@ -43,8 +43,6 @@ final class ChatController: ObservableObject {
   private(set) var recentChatters: [String] = []
   /// Called with `true` when everything should be re-rendered (emotes/badges loaded).
   var onUpdate: ((_ fullReload: Bool) -> Void)?
-  /// On-device translation of chat (iOS 18+; also used by live captions).
-  let translator = ChatTranslator()
 
   let channel: Channel
   private var socket: URLSessionWebSocketTask?
@@ -120,30 +118,6 @@ final class ChatController: ObservableObject {
     }
     releaseReplay()
     fetchReplayIfNeeded(videoID: videoID)
-  }
-
-  // MARK: Translation
-
-  func setAutoTranslate(_ on: Bool) {
-    translator.setAutoTranslate(on, recent: messages.suffix(80).compactMap(translatable))
-  }
-
-  func translate(_ message: ChatMessage) {
-    guard let item = translatable(message) else { return }
-    translator.translateNow(id: item.id, text: item.text)
-  }
-
-  /// A message's words without its emotes (nil for notices, deleted and own messages).
-  func translatable(_ message: ChatMessage) -> (id: String, text: String)? {
-    guard message.kind == .message || message.kind == .action, !message.isDeleted,
-      message.login.lowercased() != signedInLogin?.lowercased()
-    else { return nil }
-    let words = message.fragments(thirdParty: thirdParty).compactMap { fragment -> String? in
-      if case .text(let text) = fragment { return text }
-      return nil
-    }
-    let text = words.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-    return text.isEmpty ? nil : (message.id, text)
   }
 
   /// Rewinding a live stream: show chat as it was at `position` (seconds into the broadcast).
@@ -493,9 +467,6 @@ final class ChatController: ObservableObject {
   private func flush() {
     flushScheduled = false
     guard !pending.isEmpty else { return }
-    if ChatTranslator.isAvailable {
-      for message in pending { if let item = translatable(message) { translator.consider(id: item.id, text: item.text) } }
-    }
     messages.append(contentsOf: pending)
     pending.removeAll()
     if messages.count > maxMessages { messages.removeFirst(messages.count - maxMessages) }
@@ -578,10 +549,9 @@ enum ChatRenderer {
     text.append(NSAttributedString(attachment: attachment))
   }
 
-  static func render(
-    _ message: ChatMessage, badges: [String: Badge], thirdParty: [String: URL], fontSize: CGFloat, me: String?,
-    translation: String? = nil
-  ) -> RenderedMessage {
+  static func render(_ message: ChatMessage, badges: [String: Badge], thirdParty: [String: URL], fontSize: CGFloat, me: String?)
+    -> RenderedMessage
+  {
     let font = UIFont.systemFont(ofSize: fontSize)
     let bold = UIFont.systemFont(ofSize: fontSize, weight: .bold)
     let text = NSMutableAttributedString()
@@ -619,21 +589,6 @@ enum ChatRenderer {
       case .text(let t): text.append(NSAttributedString(string: t, attributes: body))
       case .emote(_, let url): slot(url, height: (fontSize * 1.75).rounded(), font: font, into: text, slots: &slots, waiting: &waiting)
       }
-    }
-    if let translation {
-      // The translation under the message, quieter, after a small globe.
-      let small = UIFont.systemFont(ofSize: max(11, fontSize - 1))
-      let quiet: [NSAttributedString.Key: Any] = [.font: small, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: paragraph]
-      text.append(NSAttributedString(string: "\n", attributes: quiet))
-      if let globe = UIImage(systemName: "globe")?.withTintColor(.secondaryLabel, renderingMode: .alwaysOriginal) {
-        let icon = NSTextAttachment()
-        icon.image = globe
-        let side = (small.capHeight + 3).rounded()
-        icon.bounds = CGRect(x: 0, y: (small.capHeight - side) / 2, width: side, height: side)
-        text.append(NSAttributedString(attachment: icon))
-        text.append(NSAttributedString(string: " ", attributes: quiet))
-      }
-      text.append(NSAttributedString(string: translation, attributes: quiet))
     }
     let highlighted = message.systemText != nil || (me.map { message.mentions($0) } ?? false)
     return RenderedMessage(text: text, slots: slots, highlighted: highlighted, waiting: waiting)
@@ -848,7 +803,6 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     ])
 
     chat.onUpdate = { [weak self] full in self?.chatUpdated(fullReload: full) }
-    chat.translator.onTranslated = { [weak self] id in self?.translationArrived(id) }
     imageObserver = NotificationCenter.default.addObserver(
       forName: ChatImageEvents.notification, object: nil, queue: .main
     ) { [weak self] _ in
@@ -881,16 +835,13 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     }
   }
 
-  private func key(_ message: ChatMessage) -> String {
-    "\(message.id)-\(message.isDeleted)-\(chat.translator.results[message.id] != nil)"
-  }
+  private func key(_ message: ChatMessage) -> String { "\(message.id)-\(message.isDeleted)" }
 
   private func render(_ message: ChatMessage) -> RenderedMessage {
     let k = key(message)
     if let cached = rendered[k] { return cached }
     let result = ChatRenderer.render(
-      message, badges: chat.badges, thirdParty: chat.thirdParty, fontSize: AppSettings.shared.chatFontSize, me: chat.ownLogin,
-      translation: chat.translator.results[message.id])
+      message, badges: chat.badges, thirdParty: chat.thirdParty, fontSize: AppSettings.shared.chatFontSize, me: chat.ownLogin)
     rendered[k] = result
     return result
   }
@@ -953,18 +904,6 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     heights = heights.filter { live.contains($0.key) }
   }
 
-  /// A message's translation came in: just its row grows to show it.
-  private func translationArrived(_ id: String) {
-    guard tableView.window != nil, let row = displayed.firstIndex(where: { $0.id == id }) else { return }
-    UIView.performWithoutAnimation {
-      tableView.performBatchUpdates {
-        tableView.reloadRows(at: [IndexPath(row: row, section: 0)], with: .none)
-      }
-    }
-    prune()
-    if following { scrollToBottom(animated: true) }
-  }
-
   /// Pictures finished loading: messages laid out before theirs arrived get their real widths.
   /// Only those rows change (a full reload made busy chats flash and jump).
   private func imagesArrived() {
@@ -979,8 +918,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         old.waiting.contains(where: { ImagePipeline.shared.cached($0, maxPixels: 112) != nil })
       else { continue }
       let fresh = ChatRenderer.render(
-        message, badges: chat.badges, thirdParty: chat.thirdParty, fontSize: AppSettings.shared.chatFontSize, me: chat.ownLogin,
-        translation: chat.translator.results[message.id])
+        message, badges: chat.badges, thirdParty: chat.thirdParty, fontSize: AppSettings.shared.chatFontSize, me: chat.ownLogin)
       rendered[k] = fresh
       guard fresh.slots.map(\.size) != old.slots.map(\.size) else { continue }
       changed.append(row)
@@ -1112,13 +1050,6 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
       var actions = [
         UIAction(title: "Copy message", image: UIImage(systemName: "doc.on.doc")) { _ in UIPasteboard.general.string = message.text }
       ]
-      if ChatTranslator.isAvailable, let self, self.chat.translator.results[message.id] == nil,
-        self.chat.translatable(message) != nil
-      {
-        actions.append(UIAction(title: "Translate", image: UIImage(systemName: "character.bubble")) { [weak self] _ in
-          self?.chat.translate(message)
-        })
-      }
       if self?.onMention != nil {
         actions.append(UIAction(title: "Reply to @\(message.displayName)", image: UIImage(systemName: "arrowshape.turn.up.left")) { _ in
           self?.onMention?(message.login)

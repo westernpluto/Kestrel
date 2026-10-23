@@ -49,20 +49,6 @@
     private var route: StreamRoute = .twitch
     private var lastReload = Date.distantPast
     private var bufferingSince: Date?
-    /// Staying near the live edge by itself (so LIVE doesn't need tapping after a slow start).
-    private struct CatchUp {
-      var behindSince: Date?
-      var speedingSince: Date?
-      var latencyAtStart: Double = 0
-      var jumps = 0
-      var lastJump = Date.distantPast
-      var lastBuffering = Date()
-      /// The latency this channel settles at right after a jump to the live edge (some channels
-      /// can't go lower), and when to measure it.
-      var floor: Double?
-      var measureFloorAt: Date?
-    }
-    private var catchUp = CatchUp()
     private var framesDecoded = (count: 0, at: Date())
     private var renderedFPS: Double?
     /// Paused while the viewer rewinds through the VOD.
@@ -121,9 +107,6 @@
     /// Fresh token and playlists, then (re)load the player at the live edge.
     private func load() {
       guard !stopped else { return }
-      stopSpeeding()
-      catchUp.behindSince = nil
-      catchUp.lastBuffering = Date()
       loadTask?.cancel()
       loadTask = Task { [weak self] in
         guard let controller = self else { return }
@@ -167,7 +150,6 @@
         route = await session.route
         model?.route = route
         model?.checkDirectQualities(served: variants)
-        model?.audioPlaylistURL = variants.first { $0.isAudioOnly }.flatMap { URL(string: $0.uri) }
         upstream = variants.filter { !$0.isAudioOnly }.sorted {
           ($0.height, $0.frameRate, $0.codecRank, $0.bandwidth) > ($1.height, $1.frameRate, $1.codecRank, $1.bandwidth)
         }
@@ -231,8 +213,6 @@
         if !pausedForBackground { player.play() }
       case .buffering:
         model.isBuffering = true
-        catchUp.lastBuffering = Date()
-        if catchUp.speedingSince != nil { stopSpeeding() }
       case .playing:
         model.isBuffering = false
         if model.phase != .playing { model.phase = .playing }
@@ -348,82 +328,6 @@
       }
     }
 
-    // MARK: Staying near the live edge
-
-    /// Latency worth catching up from: a little above what a fresh start at the live edge gets
-    /// (Twitch's low-latency mode, or normal HLS), or above what this channel settles at.
-    private var catchUpThreshold: Double {
-      let base = player.isLiveLowLatency ? 3.5 : 9
-      return max(base, (catchUp.floor ?? 0) + 1.2)
-    }
-
-    /// Streams often start a few seconds further behind than tapping LIVE gets them. Once
-    /// playback has been smooth for a few seconds and it's still behind, Kestrel does what LIVE
-    /// does (a fresh start at the live edge) by itself; later on, small drifts are caught up by
-    /// playing at 1.1× while the buffer is healthy. It notes the latency a fresh start gets on
-    /// this channel, so a channel that simply can't go lower isn't restarted over and over.
-    private func keepNearLive(_ latency: Double?) {
-      let now = Date()
-      guard let latency, player.state == .playing, !pausedForBackground, !detachedForBackground, !audioOnlyForBackground,
-        !mutedForAd, model?.coveringAd != true
-      else {
-        if catchUp.speedingSince != nil { stopSpeeding() }
-        catchUp.behindSince = nil
-        return
-      }
-      if let at = catchUp.measureFloorAt, now >= at {
-        catchUp.measureFloorAt = nil
-        catchUp.floor = latency
-        ActivityLog.shared.add(String(format: "At the live edge: %.1f s behind the broadcaster", latency))
-      }
-      let ahead = player.buffered.seconds - player.position.seconds
-      let smooth = ahead.isFinite && ahead >= 0.6 && now.timeIntervalSince(catchUp.lastBuffering) > 5
-      let threshold = catchUpThreshold
-      if let since = catchUp.speedingSince {
-        if latency <= threshold - 0.6 || !smooth {
-          stopSpeeding()
-        } else if now.timeIntervalSince(since) > 8, catchUp.latencyAtStart - latency < 0.7 {
-          // Playing faster doesn't bring it closer: start again at the live edge instead.
-          stopSpeeding()
-          jumpToLive(latency)
-        }
-        return
-      }
-      guard latency > threshold, smooth, catchUp.measureFloorAt == nil else {
-        catchUp.behindSince = nil
-        return
-      }
-      if catchUp.behindSince == nil { catchUp.behindSince = now }
-      guard let behind = catchUp.behindSince, now.timeIntervalSince(behind) > 2 else { return }
-      catchUp.behindSince = nil
-      // A small drift after the first jump: speed up. Otherwise (and at the start): jump.
-      if catchUp.jumps > 0, latency - threshold < 1.5, ahead >= 1.2 {
-        catchUp.speedingSince = now
-        catchUp.latencyAtStart = latency
-        player.playbackRate = 1.1
-        ActivityLog.shared.add(String(format: "%.1f s behind live: catching up (playing at 1.1×)", latency))
-      } else {
-        jumpToLive(latency)
-      }
-    }
-
-    private func stopSpeeding() {
-      catchUp.speedingSince = nil
-      if player.playbackRate != 1 { player.playbackRate = 1 }
-    }
-
-    /// What the LIVE button does: a fresh start at the live edge.
-    private func jumpToLive(_ latency: Double) {
-      let now = Date()
-      guard catchUp.jumps < 4, now.timeIntervalSince(catchUp.lastJump) > (catchUp.jumps == 0 ? 0 : 60) else { return }
-      catchUp.jumps += 1
-      catchUp.lastJump = now
-      catchUp.floor = nil
-      catchUp.measureFloorAt = now.addingTimeInterval(9)
-      ActivityLog.shared.add(String(format: "%.1f s behind live: jumping to the live edge", latency))
-      load()
-    }
-
     // MARK: Ticking (PlayerModel's timer)
 
     func tick() {
@@ -431,7 +335,6 @@
       let seconds = player.liveLatency.seconds
       let latency = seconds.isFinite && seconds >= 0 ? seconds : nil
       model.latency = latency
-      keepNearLive(latency)
 
       // Stuck buffering (e.g. after a switch between copies of the stream): start again.
       if player.state == .buffering, !pausedForBackground, !detachedForBackground {
@@ -521,7 +424,6 @@
     func resumeLive() {
       suspended = false
       isPaused = false
-      catchUp = CatchUp()
       load()
     }
 
@@ -530,11 +432,6 @@
       player.setLiveLowLatencyEnabled(enabled)
       lastReload = .distantPast
       reload(reason: enabled ? "low latency on" : "low latency off")
-    }
-
-    /// Turned down under the spoken translation.
-    func setVolume(_ volume: Float) {
-      player.volume = volume
     }
 
     func setFill(_ fill: Bool) {

@@ -41,13 +41,11 @@ jobs:
           unzip -q -o /tmp/ivs.zip -d vendor
           test -d vendor/AmazonIVSPlayer.xcframework || mv "$(find vendor -maxdepth 3 -name AmazonIVSPlayer.xcframework -type d | head -1)" vendor/
 
-      # Chat translation and live captions use iOS 18/26 APIs: if one of them doesn't compile with
-      # this Xcode, the app is built without it (flagged on the run) rather than not at all.
       - name: Build IPA (with the low-latency player)
         id: build_ivs
         if: steps.ivs.outcome == 'success'
         continue-on-error: true
-        run: bash ./.github/build-with-fallbacks.sh
+        run: ./build.sh
         env:
           VERSION: 1.0.${{ github.run_number }}
           BUILD_NUMBER: ${{ github.run_number }}
@@ -57,7 +55,7 @@ jobs:
         run: |
           echo "::warning::Built without the Amazon IVS SDK, so the low-latency player isn't included."
           rm -rf vendor/AmazonIVSPlayer.xcframework
-          bash ./.github/build-with-fallbacks.sh
+          ./build.sh
         env:
           VERSION: 1.0.${{ github.run_number }}
           BUILD_NUMBER: ${{ github.run_number }}

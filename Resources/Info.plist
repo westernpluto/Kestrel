@@ -68,8 +68,6 @@
 	</dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Live captions turn what the streamer says into text on your iPhone.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

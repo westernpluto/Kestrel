@@ -1036,104 +1036,6 @@ func testStreamTags() {
   check(untagged?.tags == [], "no tags")
 }
 
-/// MPEG-TS packets carrying `payload` as one PES packet on `pid` (stream `streamID`).
-func tsPackets(pid: Int, streamID: UInt8, payload: [UInt8]) -> [UInt8] {
-  var pes: [UInt8] = [0, 0, 1, streamID, 0, 0, 0x80, 0x80, 5, 0x21, 0, 1, 0, 1]  // PTS only
-  pes += payload
-  var out: [UInt8] = []
-  var offset = 0
-  var first = true
-  var counter: UInt8 = 0
-  while offset < pes.count {
-    var packet: [UInt8] = [0x47, UInt8((first ? 0x40 : 0) | (pid >> 8)), UInt8(pid & 0xFF)]
-    let room = 184
-    let chunk = Array(pes[offset..<min(pes.count, offset + room)])
-    if chunk.count < room {
-      // Pad with an adaptation field.
-      let stuffing = room - chunk.count
-      packet.append(0x30 | counter)
-      packet.append(UInt8(stuffing - 1))
-      if stuffing > 1 { packet.append(0x00); packet += [UInt8](repeating: 0xFF, count: stuffing - 2) }
-    } else {
-      packet.append(0x10 | counter)
-    }
-    packet += chunk
-    out += packet
-    offset += chunk.count
-    first = false
-    counter = (counter + 1) & 0xF
-  }
-  return out
-}
-
-/// An ADTS frame (AAC LC, 48 kHz, stereo) with `size` bytes of (fake) audio.
-func adtsFrame(size: Int, fill: UInt8) -> [UInt8] {
-  let length = size + 7
-  return [0xFF, 0xF1, 0x4C, UInt8(0x80 | (length >> 11)), UInt8((length >> 3) & 0xFF), UInt8(((length & 7) << 5) | 0x1F), 0xFC]
-    + [UInt8](repeating: fill, count: size)
-}
-
-func testLiveAudio() {
-  let frames = adtsFrame(size: 300, fill: 1) + adtsFrame(size: 250, fill: 2) + adtsFrame(size: 400, fill: 3)
-  // Timed metadata (ID3, private stream) first, then the audio spread over several packets.
-  let ts = tsPackets(pid: 0x102, streamID: 0xBD, payload: [UInt8](repeating: 9, count: 40))
-    + tsPackets(pid: 0x100, streamID: 0xC0, payload: frames)
-  let audio = TSAudio.adts(fromTS: Data(ts))
-  check(audio.map([UInt8].init) == frames, "audio taken out of the transport stream (\(audio?.count ?? -1) of \(frames.count) bytes)")
-  check(TSAudio.adtsInfo(Data(frames)) == TSAudio.ADTSInfo(sampleRate: 48000, channels: 2, frames: 3), "ADTS: \(String(describing: TSAudio.adtsInfo(Data(frames))))")
-  check(TSAudio.adts(fromTS: Data("#EXTM3U".utf8)) == nil, "not a transport stream")
-  check(LiveAudioFeed.isMP4(Data([0, 0, 0, 24] + Array("moof".utf8) + [0, 0])) && !LiveAudioFeed.isMP4(Data(ts)), "fMP4 told apart")
-
-  final class Feed: HTTPClient, @unchecked Sendable {
-    let lock = NSLock()
-    var sequence = 10
-    var fetched: [String] = []
-    let segment: Data
-    init(segment: Data) { self.segment = segment }
-    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-      let url = request.url!
-      lock.lock()
-      defer { lock.unlock() }
-      let ok = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: [:])!
-      if url.path.hasSuffix(".m3u8") {
-        let first = sequence
-        sequence += 1  // one new segment per reload
-        var lines = ["#EXTM3U", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:\(first)"]
-        for n in first..<(first + 3) { lines += ["#EXTINF:2.000,live", "s\(n).ts"] }
-        lines.append("#EXT-X-TWITCH-PREFETCH:https://audio.test/s\(first + 3).ts")
-        return (Data(lines.joined(separator: "\n").utf8), ok)
-      }
-      fetched.append(url.lastPathComponent)
-      return (segment, ok)
-    }
-  }
-  let feed = Feed(segment: Data(ts))
-  let follower = LiveAudioFeed(playlistURL: URL(string: "https://audio.test/audio_only.m3u8")!, http: feed, log: ActivityLog())
-  runAsync {
-    let received = Counter()
-    let task = Task { await follower.run { chunk in if chunk == .adts(Data(frames)) { received.add() } } }
-    try? await Task.sleep(nanoseconds: 2_600_000_000)
-    task.cancel()
-    _ = await task.value
-    feed.lock.lock()
-    let fetched = feed.fetched
-    feed.lock.unlock()
-    // Starts at the newest complete segment (never the prefetch one), then each new one once.
-    check(fetched.first == "s12.ts", "starts at the live edge, not the prefetch segment: \(fetched)")
-    check(Set(fetched).count == fetched.count, "each segment once: \(fetched)")
-    check(fetched.count >= 2 && fetched.prefix(2) == ["s12.ts", "s13.ts"], "follows new segments: \(fetched)")
-    check(received.value == fetched.count, "audio handed over for every segment: \(received.value)")
-    check(follower.progress.segments == fetched.count && follower.progress.playlistLoads >= 2, "progress \(follower.progress)")
-  }
-}
-
-final class Counter: @unchecked Sendable {
-  private let lock = NSLock()
-  private var count = 0
-  var value: Int { lock.lock(); defer { lock.unlock() }; return count }
-  func add() { lock.lock(); count += 1; lock.unlock() }
-}
-
 func testVODComments() {
   let json = """
     {"video":{"comments":{"edges":[
@@ -1196,7 +1098,6 @@ testAdFreeProxy()
 testVODPlaylists()
 testVODComments()
 testStreamTags()
-testLiveAudio()
 testAccountRoute()
 testStoryboard()
 testTokenInfo()

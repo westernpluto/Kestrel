@@ -5,7 +5,6 @@ struct SettingsView: View {
   @ObservedObject private var account = TwitchAccount.shared
   @ObservedObject private var notifier = LiveNotifier.shared
   @State private var imageCacheCleared = false
-  @State private var speechReleased: String?
   @State private var showLogin = false
   @State private var confirmSignOut = false
 
@@ -65,26 +64,6 @@ struct SettingsView: View {
         Text(
           "A notification when a channel you follow goes live (your Twitch follows and the channels you heart); tap it to watch. Kestrel checks every minute while it's open or playing. Once it's closed, iOS decides when it may check (often every 15–30 minutes, less if you rarely open Kestrel), so alerts can come later. Keep Background App Refresh on for Kestrel."
         )
-      }
-
-      if ChatTranslator.isAvailable || LiveCaptions.isAvailable {
-        Section {
-          if LiveCaptions.isAvailable {
-            Button(speechReleased ?? "Remove downloaded speech languages") {
-              Task {
-                let count = await LiveCaptions.releaseSpeechModels()
-                speechReleased = count == 0 ? "No speech languages to remove" : "Removed \(count) (iOS deletes them shortly)"
-              }
-            }
-            .disabled(speechReleased != nil)
-          }
-        } header: {
-          Text("Translation")
-        } footer: {
-          Text(
-            "The languages used for chat translation and live captions are downloaded by iOS, not stored inside Kestrel: they're shared with other apps and count toward iOS's own storage, not Kestrel's size. Translation languages can be removed in iOS Settings → Apps → Translate."
-          )
-        }
       }
 
       Section("Chat") {
