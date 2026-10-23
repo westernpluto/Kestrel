@@ -1,5 +1,8 @@
 // The low-latency live player, built on the Amazon IVS Player SDK (the engine Twitch's own apps
 // use). Compiled only when the SDK is present: the GitHub Actions build downloads it.
+//
+// The player loads its playlists from Kestrel's local server (LowLatencySession), which removes
+// ad markers and swaps in an ad-free copy of the stream while an ad is stitched into the video.
 
 #if canImport(AmazonIVSPlayer)
   import AmazonIVSPlayer
@@ -18,20 +21,22 @@
     private let codecs: String
     private weak var model: PlayerModel?
     private let proxy = LowLatencyDelegateProxy()
-    private let masterID = "ll-" + UUID().uuidString
+    private var session: LowLatencySession?
     private var loadTask: Task<Void, Never>?
-    private var watchTask: Task<Void, Never>?
-    /// Landscape renditions from Twitch's master (to find the playlist the player is on).
-    private var variants: [HLSVariant] = []
-    /// What the quality menu lists: landscape qualities best first, then audio only.
+    /// Twitch's renditions (from the master playlist), best first.
+    private var upstream: [HLSVariant] = []
+    /// Qualities the player can play: landscape best first, then audio only.
     private var menuQualities: [IVSQuality] = []
+    /// Better renditions Twitch offers that this player can't decode (played by the Apple player).
+    private var applePlayerOnly: [HLSVariant] = []
     private var chosen: Int? = 0  // index into menuQualities, nil = Auto
     private var everReady = false
+    private var reportedQualities = false
     private var useDirectURL = false
     private var failures: [Date] = []
     private var adTimeline = AdTimeline()
+    private var adState: AdState = .none
     private var mutedForAd = false
-    private var loggedBreak = false
     private var stopped = false
     private weak var view: IVSPlayerView?
     private var pip: AVPictureInPictureController?
@@ -40,6 +45,9 @@
     private var audioOnlyForBackground = false
     private var pausedForBackground = false
     private var notificationTokens: [NSObjectProtocol] = []
+
+    /// Quality-menu IDs at or above this pick a rendition for the Apple player.
+    static let applePlayerQualityBase = 1000
 
     init(login: String, codecs: String, model: PlayerModel) {
       self.login = login.lowercased()
@@ -76,7 +84,6 @@
     func stop() {
       stopped = true
       loadTask?.cancel()
-      watchTask?.cancel()
       player.pause()
       player.delegate = nil
       proxy.controller = nil
@@ -85,14 +92,14 @@
       pip = nil
       notificationTokens.forEach(NotificationCenter.default.removeObserver)
       notificationTokens = []
-      StreamProxy.shared.remove(masterID)
+      if let session { StreamProxy.shared.remove(session.id) }
+      session = nil
     }
 
-    /// Fresh token and master, then (re)load the player.
+    /// Fresh token and playlists, then (re)load the player at the live edge.
     private func load() {
       guard !stopped else { return }
       loadTask?.cancel()
-      watchTask?.cancel()
       loadTask = Task { [weak self] in
         guard let controller = self else { return }
         await controller.loadStream()
@@ -101,37 +108,39 @@
 
     private func loadStream() async {
       do {
-        let token = try await TwitchAPI.shared.streamToken(login: login, playerType: "popout", platform: "web")
-        let usher = Usher.live(login: login, token: token, codecs: codecs, lowLatency: true)
         if useDirectURL {
-          // Fallback if the player won't take a master from the local server: Twitch's URL
-          // as-is (stitched-ad detection is off then, since it needs the same playlists).
+          // Last resort if the player won't load playlists from the local server: Twitch's URL
+          // as-is. Ads can't be filtered this way.
+          let token = try await TwitchAPI.shared.streamToken(login: login, playerType: "popout", platform: "web")
           guard !stopped else { return }
-          variants = []
-          player.load(usher)
+          player.load(Usher.live(login: login, token: token, codecs: codecs, lowLatency: true))
           return
         }
-        let (data, response) = try await URLSessionHTTPClient(timeout: 8).data(for: Usher.playlistRequest(usher))
+        let settings = AppSettings.shared
+        var config = LowLatencyConfig()
+        config.codecs = codecs
+        config.backupStreams = settings.backupStreams
+        config.allowLowQualityBackup = settings.allowLowQualityBackup
+        let session = LowLatencySession(
+          login: login, config: config, http: URLSessionHTTPClient(timeout: 8), tokens: TwitchAPI.shared
+        ) { [weak self] update in
+          guard let controller = self else { return }
+          Task { @MainActor in controller.apply(update) }
+        }
+        let variants = try await session.start()
         guard !stopped, !Task.isCancelled else { return }
-        if response.statusCode == 404 {
-          model?.lowLatencyOffline()
-          return
-        }
-        guard response.statusCode == 200, HLS.looksLikePlaylist(data), let text = String(data: data, encoding: .utf8) else {
-          throw StreamSession.StartError.usher(response.statusCode)
-        }
-        let base = response.url ?? usher
-        variants = HLSMaster.parse(text, base: base).videoVariants
-        guard !variants.isEmpty else { throw StreamSession.StartError.noVariants }
-        // The player loads the very same master (same Twitch playback session) from the local
-        // server, so the playlists Kestrel polls for stitched ads are the ones it plays.
         await StreamProxy.shared.ensureResponsive()
         guard !stopped, !Task.isCancelled else { return }
-        let url = try StreamProxy.shared.publish(HLSMaster.localCopy(of: text, base: base), id: masterID)
-        player.load(url)
-        ActivityLog.shared.add("Low-latency player: \(login) (\(variants.map(\.label).joined(separator: ", ")))")
-        startWatching()
+        if let old = self.session { StreamProxy.shared.remove(old.id) }
+        self.session = session
+        upstream = variants.filter { !$0.isAudioOnly }.sorted {
+          ($0.height, $0.frameRate, $0.codecRank, $0.bandwidth) > ($1.height, $1.frameRate, $1.codecRank, $1.bandwidth)
+        }
+        adTimeline = AdTimeline()
+        player.load(try StreamProxy.shared.register(session))
       } catch is CancellationError {
+      } catch StreamSession.StartError.offline {
+        model?.lowLatencyOffline()
       } catch {
         failed(error.localizedDescription, byPlayer: false)
       }
@@ -142,7 +151,7 @@
       failures = failures.filter { Date().timeIntervalSince($0) < 90 } + [Date()]
       if byPlayer, !everReady, !useDirectURL {
         useDirectURL = true
-        ActivityLog.shared.add("Low-latency player couldn't open the stream (\(message)); trying Twitch's URL directly")
+        ActivityLog.shared.add("Low-latency player couldn't open the stream (\(message)); trying Twitch's URL directly (no ad filtering)")
         load()
       } else if failures.count <= 2 {
         ActivityLog.shared.add("Low-latency player error (\(message)), reconnecting")
@@ -150,6 +159,11 @@
       } else {
         model?.lowLatencyFailed(message)
       }
+    }
+
+    private func apply(_ update: LowLatencyUpdate) {
+      adTimeline = update.ads
+      adState = update.state
     }
 
     // MARK: Player events (forwarded from the delegate proxy on the main queue)
@@ -203,8 +217,29 @@
       }
       let audio = all.filter { $0.width == 0 }
       menuQualities = landscape + audio.prefix(1)
+
+      // Renditions above the best one this player can decode (e.g. 1440p in a codec it doesn't
+      // support): offered through the Apple player.
+      let bestHeight = landscape.first?.height ?? 0
+      applePlayerOnly = upstream.filter { $0.height > bestHeight }
+      if !reportedQualities {
+        reportedQualities = true
+        var message = "Low-latency player can play: \(menuQualities.map(Self.label).joined(separator: ", "))"
+        if !applePlayerOnly.isEmpty {
+          message += ". Only in the Apple player: \(applePlayerOnly.map(\.label).joined(separator: ", "))"
+        }
+        ActivityLog.shared.add(message)
+      }
+      if let best = applePlayerOnly.first, AppSettings.shared.highestQualityOverLatency, model?.mayAutoSwitchPlayer == true {
+        model?.switchToApplePlayer(quality: best.label, reason: "\(best.label) only plays in the Apple player", automatic: true)
+        return
+      }
+
       model?.qualities =
         menuQualities.enumerated().map { PlayerModel.Quality(id: $0.offset, label: Self.label($0.element)) }
+        + applePlayerOnly.enumerated().map {
+          PlayerModel.Quality(id: Self.applePlayerQualityBase + $0.offset, label: "\($0.element.label) · Apple player")
+        }
         + [PlayerModel.Quality(id: nil, label: "Auto")]
       if let chosen, chosen >= menuQualities.count { self.chosen = 0 }
       model?.selectedQuality = chosen
@@ -212,6 +247,12 @@
     }
 
     func select(_ index: Int?) {
+      if let index, index >= Self.applePlayerQualityBase {
+        let offset = index - Self.applePlayerQualityBase
+        guard offset < applePlayerOnly.count else { return }
+        model?.switchToApplePlayer(quality: applePlayerOnly[offset].label, reason: "picked \(applePlayerOnly[offset].label)", automatic: false)
+        return
+      }
       chosen = index
       applyChosen()
     }
@@ -246,39 +287,6 @@
       }
     }
 
-    // MARK: Stitched ads (rare since Twitch moved to client-side ads)
-
-    /// The playlist of the rendition being played, from the master Kestrel fetched.
-    private var watchedPlaylistURL: URL? {
-      guard !variants.isEmpty else { return nil }
-      guard let quality = player.quality, quality.width > 0 else { return URL(string: variants[0].uri) }
-      let family = HLS.codecFamily(quality.codecs)
-      let match = variants.filter { $0.width == quality.width && $0.height == quality.height }
-        .min { a, b in
-          let ca = a.codecFamily == family ? 0 : 1, cb = b.codecFamily == family ? 0 : 1
-          return (ca, abs(a.bandwidth - quality.bitrate)) < (cb, abs(b.bandwidth - quality.bitrate))
-        }
-      return URL(string: (match ?? variants[0]).uri)
-    }
-
-    private func startWatching() {
-      watchTask?.cancel()
-      adTimeline = AdTimeline()
-      watchTask = Task { [weak self] in
-        let http = URLSessionHTTPClient(timeout: 5)
-        while !Task.isCancelled {
-          guard let controller = self else { return }
-          if let url = controller.watchedPlaylistURL,
-            let result = try? await http.data(for: Usher.playlistRequest(url, timeout: 5)),
-            result.1.statusCode == 200, let text = String(data: result.0, encoding: .utf8)
-          {
-            controller.adTimeline.update(with: HLSMediaPlaylist.parse(text, base: url))
-          }
-          try? await Task.sleep(nanoseconds: 2_000_000_000)
-        }
-      }
-    }
-
     // MARK: Ticking (PlayerModel's timer)
 
     func tick() {
@@ -287,7 +295,8 @@
       let latency = seconds.isFinite && seconds >= 0 ? seconds : nil
       model.latency = latency
 
-      // The frame on screen was stamped `latency` seconds ago.
+      // Only when no ad-free copy was found does the player get ad video; hide it while the frame
+      // on screen (stamped `latency` seconds ago) is inside an ad.
       let inAd = latency.map { adTimeline.covers(Date().addingTimeInterval(-$0)) } ?? adTimeline.isActive
       if inAd != model.coveringAd { model.coveringAd = inAd }
       if inAd, !player.muted {
@@ -297,15 +306,8 @@
         player.muted = false
         mutedForAd = false
       }
-      let state: AdState = inAd ? .covering : (adTimeline.markerActive ? .skipped : .none)
-      if model.adState != state { model.adState = state }
-      if adTimeline.isActive, !loggedBreak {
-        loggedBreak = true
-        ActivityLog.shared.add("Ad stitched into \(login)'s stream: hidden and muted (low-latency player)")
-      } else if !adTimeline.isActive, loggedBreak {
-        loggedBreak = false
-        ActivityLog.shared.add("Stitched ad over on \(login)")
-      }
+      let shown: AdState = inAd ? .covering : (adState == .covering ? .searching : adState)
+      if model.adState != shown { model.adState = shown }
     }
 
     // MARK: Controls
@@ -326,8 +328,6 @@
     func goLive() {
       load()
     }
-
-    var canPictureInPicture: Bool { pip?.isPictureInPicturePossible ?? false }
 
     func togglePictureInPicture() {
       guard let pip else { return }

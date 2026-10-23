@@ -318,7 +318,9 @@ struct HLSDateRange {
   var cls: String
   var start: Date?
   var duration: Double?
-  var isAd: Bool { cls == "twitch-stitched-ad" || id.hasPrefix("stitched-ad") || cls == "twitch-maf-ad" }
+  var isAd: Bool {
+    cls == "twitch-stitched-ad" || id.hasPrefix("stitched-ad") || cls == "twitch-maf-ad" || cls == "live-video-net-stitched-ad"
+  }
   func contains(_ date: Date) -> Bool {
     guard let start else { return false }
     let end = start.addingTimeInterval(duration ?? 30)
@@ -429,6 +431,7 @@ struct HLSMediaPlaylist {
           playlist.isEnded = true
         }
         if line.contains("stitched-ad") || line.contains("EXT-X-CUE-OUT") || line.contains("twitch-stitched")
+          || line.contains("live-video-net-stitched")
           || line.contains("twitch-maf-ad") || line.contains("twitch-trigger")
         {
           playlist.hasAdSignifier = true
@@ -450,13 +453,17 @@ struct HLSMediaPlaylist {
       pendingDiscontinuity = false
     }
 
-    // Ad classification: only segments that really contain ad video count (stitched ads are
-    // titled "Amazon|…" instead of "live"). A DATERANGE marker alone is not an ad segment.
+    // Ad classification: only segments that really contain ad video count. Live video is titled
+    // "live"; stitched ads get another title ("Amazon|…", or an ad ID) and come with an ad marker.
+    // A DATERANGE marker over "live" segments is a client-side break: not an ad segment.
     for index in playlist.segments.indices {
       var segment = playlist.segments[index]
-      let byTitle = segment.title.contains("Amazon")
+      let title = segment.title.trimmingCharacters(in: .whitespaces)
+      let byTitle = title.contains("Amazon")
       let byURL = HLS.adSegmentPatterns.contains { segment.uri.contains($0) }
-      let byLiveTitle = !segment.isPrefetch && playlist.hasAdSignifier && anyLiveTitle && !segment.title.hasPrefix("live")
+      // (Also when the whole window is ad, i.e. no "live" title left to compare with.)
+      let byLiveTitle =
+        !segment.isPrefetch && playlist.hasAdSignifier && !title.hasPrefix("live") && (anyLiveTitle || !title.isEmpty)
       if byTitle || byURL || byLiveTitle { segment.isAd = true }
       if segment.isPrefetch, index > 0, playlist.segments[index - 1].isAd { segment.isAd = true }
       playlist.segments[index] = segment

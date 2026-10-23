@@ -246,13 +246,22 @@ final class LocalHTTPServer: @unchecked Sendable {
   }
 }
 
-/// Routes `/live/<session>/master.m3u8` and `/live/<session>/v/<n>.m3u8` to stream sessions,
-/// and `/static/<id>.m3u8` to fixed playlists (the low-latency player's master).
+/// Something that serves a master playlist and its media playlists to a local player.
+protocol PlaylistSource: AnyObject, Sendable {
+  var id: String { get }
+  func masterPlaylist(only: Int?) async -> String
+  func mediaPlaylist(_ index: Int) async -> (status: Int, body: String)
+}
+
+extension StreamSession: PlaylistSource {}
+
+/// Routes `/live/<session>/master.m3u8` and `/live/<session>/v/<n>.m3u8` to playlist sources,
+/// and `/static/<id>.m3u8` to fixed playlists.
 final class StreamProxy: @unchecked Sendable {
   static let shared = StreamProxy()
 
   private let lock = NSLock()
-  private var sessions: [String: StreamSession] = [:]
+  private var sessions: [String: PlaylistSource] = [:]
   private var statics: [String: String] = [:]
   private var server: LocalHTTPServer?
   private var lastPort: UInt16 = 0
@@ -293,7 +302,7 @@ final class StreamProxy: @unchecked Sendable {
     return try ensureRunning()
   }
 
-  func register(_ session: StreamSession) throws -> URL {
+  func register(_ session: PlaylistSource) throws -> URL {
     let port = try ensureRunning()
     lock.lock()
     sessions[session.id] = session
@@ -301,7 +310,7 @@ final class StreamProxy: @unchecked Sendable {
     return URL(string: "http://127.0.0.1:\(port)/live/\(session.id)/master.m3u8")!
   }
 
-  func masterURL(for session: StreamSession, quality: Int?) -> URL? {
+  func masterURL(for session: PlaylistSource, quality: Int?) -> URL? {
     lock.lock()
     let port = server?.port ?? lastPort
     lock.unlock()
@@ -331,7 +340,7 @@ final class StreamProxy: @unchecked Sendable {
     return statics[id]
   }
 
-  private func session(_ id: String) -> StreamSession? {
+  private func session(_ id: String) -> PlaylistSource? {
     lock.lock()
     defer { lock.unlock() }
     return sessions[id]

@@ -14,6 +14,11 @@ final class AppSettings: ObservableObject {
   /// Ask for HEVC/AV1 renditions (1440p on Enhanced Broadcasting channels) when the device decodes them.
   @Published var enhancedCodecs: Bool { didSet { defaults.set(enhancedCodecs, forKey: "enhancedCodecs") } }
   @Published var backgroundAudio: Bool { didSet { defaults.set(backgroundAudio, forKey: "backgroundAudio") } }
+  /// Use the Apple player when a stream's best rendition (e.g. 1440p HEVC/AV1) is one the
+  /// low-latency player can't decode.
+  @Published var highestQualityOverLatency: Bool {
+    didSet { defaults.set(highestQualityOverLatency, forKey: "highestQualityOverLatency") }
+  }
   @Published var playerEngine: PlayerEngine { didSet { defaults.set(playerEngine.rawValue, forKey: "playerEngine") } }
   @Published var chatEnabled: Bool { didSet { defaults.set(chatEnabled, forKey: "chatEnabled") } }
   @Published var thirdPartyEmotes: Bool { didSet { defaults.set(thirdPartyEmotes, forKey: "thirdPartyEmotes") } }
@@ -23,7 +28,7 @@ final class AppSettings: ObservableObject {
   private init() {
     defaults.register(defaults: [
       "backupStreams": true, "allowLowQualityBackup": true, "adFallback": AdFallback.muteAndCover.rawValue,
-      "lowLatency": true, "enhancedCodecs": true, "backgroundAudio": true, "chatEnabled": true,
+      "lowLatency": true, "enhancedCodecs": true, "highestQualityOverLatency": false, "backgroundAudio": true, "chatEnabled": true,
       "thirdPartyEmotes": true, "chatTimestamps": false, "chatFontSize": 15.0,
     ])
     backupStreams = defaults.bool(forKey: "backupStreams")
@@ -32,6 +37,7 @@ final class AppSettings: ObservableObject {
     lowLatency = defaults.bool(forKey: "lowLatency")
     enhancedCodecs = defaults.bool(forKey: "enhancedCodecs")
     backgroundAudio = defaults.bool(forKey: "backgroundAudio")
+    highestQualityOverLatency = defaults.bool(forKey: "highestQualityOverLatency")
     playerEngine = PlayerEngine.resolve(defaults.string(forKey: "playerEngine"))
     chatEnabled = defaults.bool(forKey: "chatEnabled")
     thirdPartyEmotes = defaults.bool(forKey: "thirdPartyEmotes")

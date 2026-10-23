@@ -222,12 +222,14 @@ struct AdTimeline {
   private(set) var openStart: Date?
   /// Twitch marked an ad break (usually delivered client-side, so nothing to hide).
   private(set) var markerActive = false
+  private var lastAdEnd: Date?
 
   mutating func update(with playlist: HLSMediaPlaylist, now: Date = Date()) {
     markerActive = playlist.adMarkerActive
     for segment in playlist.regularSegments where segment.isAd {
       guard let start = segment.pdt, let end = segment.end else { continue }
       insert(start...end)
+      lastAdEnd = max(lastAdEnd ?? end, end)
     }
     if playlist.adBreakActive {
       // Start of the trailing run of ad segments.
@@ -250,6 +252,13 @@ struct AdTimeline {
   }
 
   var isActive: Bool { openStart != nil }
+
+  /// The player switched to an ad-free copy: only what it already got from the ad needs hiding.
+  mutating func closeOpenBreak() {
+    guard let start = openStart else { return }
+    openStart = nil
+    if let end = lastAdEnd, end > start { insert(start...end) }
+  }
 
   private mutating func insert(_ range: ClosedRange<Date>) {
     var merged = range

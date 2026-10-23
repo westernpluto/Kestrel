@@ -27,6 +27,8 @@ struct SettingsView: View {
           }
           Toggle("Twitch low-latency mode", isOn: $settings.lowLatency)
             .disabled(settings.playerEngine != .lowLatency)
+          Toggle("1440p over low latency", isOn: $settings.highestQualityOverLatency)
+            .disabled(settings.playerEngine != .lowLatency)
         } else {
           LabeledContent("Live player", value: PlayerEngine.standard.title)
         }
@@ -35,7 +37,7 @@ struct SettingsView: View {
       } footer: {
         Text(
           PlayerEngine.isLowLatencyBuilt
-            ? "Low-latency player: Amazon IVS, the engine Twitch's own apps are built on, in Twitch's low-latency mode (usually a few seconds behind). If it can't play a stream, Kestrel switches to the Apple player. Apple player: AVPlayer with Picture in Picture and AirPlay, roughly 8–12 s behind, and swaps in an ad-free copy if an ad is stitched into the stream. Client-side ads (how Twitch serves most ads now) never play in either. You can also switch from the player screen."
+            ? "Low-latency player: Amazon IVS, the engine Twitch's own apps are built on, in Twitch's low-latency mode (usually a few seconds behind). If it can't play a stream, Kestrel switches to the Apple player. Some 1440p streams use a format it can't decode: they're listed in the quality menu as “· Apple player”, and with “1440p over low latency” on, Kestrel switches to the Apple player for them by itself. Apple player: AVPlayer with Picture in Picture and AirPlay, roughly 8–12 s behind, and swaps in an ad-free copy if an ad is stitched into the stream. Client-side ads (how Twitch serves most ads now) never play in either. You can also switch from the player screen."
             : "This build doesn't include the low-latency player (the GitHub Actions build adds the Amazon IVS SDK it needs). The Apple player stays roughly 8–12 s behind live.")
       }
 

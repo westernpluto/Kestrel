@@ -51,6 +51,8 @@ final class FakeTwitch: HTTPClient, PlaybackTokenProvider, @unchecked Sendable {
   var delay: Double = 0.01
   var withPrefetch = true
   var mainMediaStatus: Int?
+  /// EXTINF title of stitched ad segments ("Amazon|…" historically; IVS-style ads use an ID).
+  var adTitle = "Amazon|5555"
 
   let variants = [("1080p60", "1920x1080", 60.0, 6_000_000), ("720p60", "1280x720", 60.0, 3_000_000), ("480p", "852x480", 30.0, 1_400_000)]
 
@@ -130,7 +132,7 @@ final class FakeTwitch: HTTPClient, PlaybackTokenProvider, @unchecked Sendable {
       let isAd = ads.contains(n)
       if n > first, isAd != ads.contains(n - 1) { lines.append("#EXT-X-DISCONTINUITY") }
       lines.append("#EXT-X-PROGRAM-DATE-TIME:\(ISO8601DateFormatter.fractional.string(from: pdt(n)))")
-      lines.append(isAd ? "#EXTINF:2.000,Amazon|5555" : "#EXTINF:2.000,live")
+      lines.append(isAd ? "#EXTINF:2.000,\(adTitle)" : "#EXTINF:2.000,live")
       lines.append(isAd ? "https://edge.test/\(tag)/ad-\(n).ts" : "https://edge.test/\(tag)/\(n).ts")
     }
     if withPrefetch, !ads.contains(liveIndex), !ads.contains(liveIndex + 1) {
@@ -633,8 +635,157 @@ func testAPIParsing() {
   check(url.query!.contains("multigroup_video=true") && url.query!.contains("supported_codecs=h264"), "usher enhanced params")
 }
 
+func testFullWindowAdDetection() {
+  // A long break fills the whole playlist window: no "live" title left to compare against.
+  let fake = FakeTwitch()
+  fake.liveIndex = 40
+  fake.adTitle = "3f0b6c2e-9d1a-4c8e-b1f2-7a6d5e4c3b2a"
+  let all = HLSMediaPlaylist.parse(fake.mediaPlaylist(tag: "t", ads: 30..<60), base: nil)
+  check(all.regularSegments.allSatisfy(\.isAd) && all.adBreakActive && !all.isClean, "whole-window ad with ID titles")
+  fake.adTitle = "Amazon|5555"
+  let amazon = HLSMediaPlaylist.parse(fake.mediaPlaylist(tag: "t", ads: 30..<60), base: nil)
+  check(amazon.adBreakActive, "whole-window Amazon ad")
+  let csai = HLSMediaPlaylist.parse(fake.mediaPlaylist(tag: "t", ads: 30..<60, markersOnly: true), base: nil)
+  check(csai.isClean && !csai.adBreakActive, "markers over live segments stay client-side")
+}
+
+final class UpdateBox: @unchecked Sendable {
+  let lock = NSLock()
+  var updates: [LowLatencyUpdate] = []
+  func add(_ update: LowLatencyUpdate) {
+    lock.lock()
+    updates.append(update)
+    lock.unlock()
+  }
+  var last: LowLatencyUpdate? {
+    lock.lock()
+    defer { lock.unlock() }
+    return updates.last
+  }
+}
+
+func testLowLatencySession() {
+  // Clean stream and client-side breaks: Twitch's playlist passes through with its low-latency
+  // tags, minus ad markers.
+  runAsync {
+    let fake = FakeTwitch()
+    fake.mainMarkers = 22..<30
+    let box = UpdateBox()
+    let session = LowLatencySession(login: "streamer", config: LowLatencyConfig(), http: fake, tokens: fake, log: ActivityLog()) {
+      box.add($0)
+    }
+    let variants = try! await session.start()
+    check(variants.count == 4 && !variants.contains { $0.isPortrait }, "variants \(variants.map(\.label))")
+    let master = await session.masterPlaylist(only: nil)
+    check(master.contains("v/0.m3u8") && master.contains("v/3.m3u8") && !master.contains("v/4.m3u8"), "local master \(master)")
+    check(master.contains("IVS-NAME=\"1080p60\"") && !master.contains("portrait"), "attributes kept, portrait gone")
+    let clean = await session.mediaPlaylist(0)
+    check(clean.status == 200 && clean.body.contains("#EXT-X-TWITCH-PREFETCH:https://edge.test/"), "prefetch kept: \(clean.body)")
+    check(!clean.body.contains("DATERANGE:ID=\"stitched"), "ad marker removed")
+    check(clean.body.contains("#EXTINF:2.000,live") && clean.body.contains("https://edge.test/"), "segments kept")
+    check(box.last?.state == .skipped, "client-side break shown as skipped: \(String(describing: box.last?.state))")
+    check(fake.tokenRequests == ["popout"], "no backup search for client-side ads")
+  }
+
+  // Stitched ad with an ad-free copy available: the copy's playlist is served.
+  runAsync {
+    let fake = FakeTwitch()
+    fake.mainAds = 21..<26
+    fake.backupAds = ["site": 0..<100, "popout": 0..<100, "mobile_web": 0..<0, "embed": 0..<100]
+    let box = UpdateBox()
+    let log = ActivityLog()
+    let session = LowLatencySession(login: "streamer", config: LowLatencyConfig(), http: fake, tokens: fake, log: log) { box.add($0) }
+    _ = try! await session.start()
+    var adSegments = 0
+    var usedBackup = false
+    var sawMainAfter = false
+    for step in 0..<16 {
+      let result = await session.mediaPlaylist(0)
+      check(result.status == 200, "status \(result.status) at \(step)")
+      adSegments += result.body.components(separatedBy: "/ad-").count - 1
+      if let token = fake.token(for: "mobile_web"), result.body.contains("edge.test/\(token)-") {
+        usedBackup = true
+        check(result.body.contains("#EXT-X-TWITCH-PREFETCH:"), "copy keeps low latency")
+      }
+      if usedBackup, let main = fake.mainToken, result.body.contains("edge.test/\(main)-") { sawMainAfter = true }
+      fake.advance()
+    }
+    check(adSegments == 0, "an ad segment reached the player \(adSegments) times")
+    check(usedBackup && sawMainAfter, "switched to the copy and back (\(usedBackup), \(sawMainAfter))")
+    check(log.messages.contains { $0.contains("Switched to ad-free copy (mobile_web") }, "\(log.messages)")
+    check(box.last?.state == AdState.none, "state cleared after the break")
+  }
+
+  // No ad-free copy: the ad goes through without prefetch, and the app is told to hide it.
+  runAsync {
+    let fake = FakeTwitch()
+    fake.mainAds = 21..<40
+    fake.liveIndex = 24
+    fake.adTitle = "3f0b6c2e-9d1a"
+    fake.backupAds = ["site": 0..<100, "popout": 0..<100, "mobile_web": 0..<100, "embed": 0..<100, "autoplay": 0..<100]
+    let box = UpdateBox()
+    var config = LowLatencyConfig()
+    config.firstPollWait = 2
+    let session = LowLatencySession(login: "streamer", config: config, http: fake, tokens: fake, log: ActivityLog()) { box.add($0) }
+    _ = try! await session.start()
+    let first = await session.mediaPlaylist(0)
+    check(first.body.contains("/ad-") && !first.body.contains("TWITCH-PREFETCH"), "ad served without prefetch")
+    check(box.last?.state == .covering && box.last?.ads.isActive == true, "app told to cover")
+    check(box.last?.ads.covers(fake.pdt(21).addingTimeInterval(1)) == true, "ad time range known")
+  }
+
+  // Upstream hiccup: the last playlist is repeated; a gone stream is passed on.
+  runAsync {
+    let fake = FakeTwitch()
+    let session = LowLatencySession(login: "streamer", config: LowLatencyConfig(), http: fake, tokens: fake, log: ActivityLog())
+    _ = try! await session.start()
+    let good = await session.mediaPlaylist(1)
+    fake.mainMediaStatus = 502
+    let hiccup = await session.mediaPlaylist(1)
+    check(hiccup.status == 200 && hiccup.body == good.body, "hiccup repeats last playlist")
+    fake.mainMediaStatus = 404
+    let gone = await session.mediaPlaylist(1)
+    check(gone.status == 404, "404 passed on")
+  }
+
+  // Filtering details.
+  let text = """
+    #EXTM3U
+    #EXT-X-TARGETDURATION:6
+    #EXT-X-DATERANGE:ID="playlist-session-1",CLASS="twitch-session",START-DATE="2026-10-22T00:00:00Z"
+    #EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad",START-DATE="2026-10-22T00:00:00Z",X-TV-TWITCH-AD-URL="https://ads"
+    #EXT-X-DATERANGE:ID="q",CLASS="twitch-ad-quartile",START-DATE="2026-10-22T00:00:00Z"
+    #EXT-X-DATERANGE:ID="source-1",CLASS="live-video-net-stream-source",START-DATE="2026-10-22T00:00:00Z",X-NET-LIVE-VIDEO-STREAM-SOURCE="0f26"
+    #EXT-X-DATERANGE:ID="source-2",CLASS="live-video-net-stream-source",START-DATE="2026-10-22T00:00:00Z",X-NET-LIVE-VIDEO-STREAM-SOURCE="live"
+    #EXT-X-MAP:URI="init.mp4"
+    #EXTINF:2.000,live
+    seg1.mp4
+    #EXT-X-TWITCH-PREFETCH:seg2.mp4
+    """
+  let filtered = LowLatencyPlaylist.filter(text, base: URL(string: "https://weaver.test/a/b.m3u8"), dropPrefetch: false)
+  check(filtered.contains("playlist-session-1") && filtered.contains("source-2"), "non-ad markers kept")
+  check(!filtered.contains("stitched") && !filtered.contains("quartile") && !filtered.contains("source-1"), "ad markers dropped: \(filtered)")
+  check(filtered.contains("URI=\"https://weaver.test/a/init.mp4\"") && filtered.contains("\nhttps://weaver.test/a/seg1.mp4\n"), "URIs absolute")
+  check(filtered.contains("#EXT-X-TWITCH-PREFETCH:https://weaver.test/a/seg2.mp4"), "prefetch absolute")
+  check(!LowLatencyPlaylist.filter(text, base: nil, dropPrefetch: true).contains("PREFETCH"), "prefetch dropped")
+
+  // Served over the local server like any other source.
+  let fake = FakeTwitch()
+  let session = LowLatencySession(login: "streamer", config: LowLatencyConfig(), http: fake, tokens: fake, log: ActivityLog())
+  runAsync { _ = try! await session.start() }
+  let proxy = StreamProxy()
+  let url = try! proxy.register(session)
+  let port = UInt16(url.port!)
+  let master = rawGET(port, url.path)
+  check(master.status == 200 && master.body.contains("v/0.m3u8"), "LL master over HTTP")
+  let media = rawGET(port, "/live/\(session.id)/v/0.m3u8")
+  check(media.status == 200 && media.body.contains("#EXT-X-TWITCH-PREFETCH"), "LL media over HTTP")
+}
+
 testDates()
 testMasterParsing()
+testFullWindowAdDetection()
+testLowLatencySession()
 testMediaParsing()
 testAdTimeline()
 testTimelineAndRender()

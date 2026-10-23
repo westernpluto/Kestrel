@@ -48,6 +48,10 @@ final class PlayerModel: ObservableObject {
   private var stopped = false
   /// Twitch `supported_codecs` for this playback; steps down to H.264 if a codec won't play.
   private var codecs = AppSettings.shared.codecs
+  /// Rendition to start the Apple player on (when it took over for a 1440p stream).
+  private var preferredQualityLabel: String?
+  /// False once the user picked a player by hand: don't switch players behind their back.
+  private(set) var mayAutoSwitchPlayer = true
 
   nonisolated init(target: PlaybackTarget) {
     self.target = target
@@ -126,7 +130,8 @@ final class PlayerModel: ObservableObject {
         + [Quality(id: nil, label: "Auto")]
       // Always the highest quality: the player is given only that one rendition, so it can't drop
       // to a lower one on its own. (Picking another in the menu applies to this stream only.)
-      selectedQuality = 0
+      selectedQuality = preferredQualityLabel.flatMap { label in info.variants.firstIndex { $0.label == label } } ?? 0
+      preferredQualityLabel = nil
       liveVariants = info.variants
       play(StreamProxy.shared.masterURL(for: session, quality: selectedQuality))
       phase = .playing
@@ -260,6 +265,7 @@ final class PlayerModel: ObservableObject {
 
   func setEngine(_ newEngine: PlayerEngine) {
     guard isLive, newEngine != engine, PlayerEngine.available.contains(newEngine) else { return }
+    mayAutoSwitchPlayer = false
     AppSettings.shared.playerEngine = newEngine
     teardownPlayback()
     engine = newEngine
@@ -406,6 +412,19 @@ final class PlayerModel: ObservableObject {
       ActivityLog.shared.add("Low-latency player failed (\(message)); switching to the Apple player")
       teardownPlayback()
       engine = .standard
+      phase = .loading
+      Task { await start() }
+    }
+
+    /// For this stream only (the setting stays): e.g. a 1440p rendition the low-latency player
+    /// can't decode.
+    func switchToApplePlayer(quality label: String?, reason: String, automatic: Bool) {
+      guard engine == .lowLatency, !stopped else { return }
+      if automatic, !mayAutoSwitchPlayer { return }
+      ActivityLog.shared.add("Switching to the Apple player: \(reason)")
+      teardownPlayback()
+      engine = .standard
+      preferredQualityLabel = label
       phase = .loading
       Task { await start() }
     }

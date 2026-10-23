@@ -7,12 +7,12 @@ enum DeviceCodecs {
   /// 'av01' (kCMVideoCodecType_AV1 isn't in the iOS 16 SDK). iPhone 15 Pro and later.
   static let av1: Bool = VTIsHardwareDecodeSupported(CMVideoCodecType(0x6176_3031))
 
-  /// Best first, e.g. "av1,h265,h264". Twitch only lists 1440p (Enhanced Broadcasting) renditions
-  /// when the request says the player can decode HEVC or AV1.
+  /// e.g. "h265,av1,h264". Twitch only lists 1440p (Enhanced Broadcasting) renditions when the
+  /// request says the player can decode HEVC or AV1. HEVC first: more players handle it.
   static var enhanced: String {
     var codecs: [String] = []
-    if av1 { codecs.append("av1") }
     if hevc { codecs.append("h265") }
+    if av1 { codecs.append("av1") }
     codecs.append("h264")
     return codecs.joined(separator: ",")
   }
