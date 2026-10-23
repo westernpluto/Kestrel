@@ -123,12 +123,6 @@ struct StreamRow: View {
         RemoteImage(url: TwitchAPI.image(stream.previewImageURL, width: 440, height: 248))
           .aspectRatio(16 / 9, contentMode: .fit)
           .frame(width: 156)
-          .overlay(alignment: .topLeading) {
-            Text("LIVE").font(.system(size: 10, weight: .heavy)).foregroundColor(.white)
-              .padding(.horizontal, 4).padding(.vertical, 1)
-              .background(Color.liveRed, in: RoundedRectangle(cornerRadius: 3))
-              .padding(5)
-          }
           .overlay(alignment: .bottomLeading) {
             HStack(spacing: 3) {
               Circle().fill(Color.liveRed).frame(width: 6, height: 6)

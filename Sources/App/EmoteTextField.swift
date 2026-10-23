@@ -65,16 +65,27 @@ struct EmoteTextField: UIViewRepresentable {
     coordinator.parent = self
     view.placeholder = placeholder
     view.isEditable = enabled
+    view.allowsFocus = enabled
+    if !enabled, view.isFirstResponder { view.resignFirstResponder() }
     // Changed from outside (an emote picked, a name completed, sent and cleared).
     if coordinator.plain(of: view).text != text {
       coordinator.render(view, text: text, cursor: (text as NSString).length)
     }
-    // Only act when the request changes: re-applying a stale "focused" brought the keyboard back
-    // right after something else (a swipe, a tap outside) had put it away.
+    // The text view changed focus by itself (a tap outside put the keyboard away) and told
+    // SwiftUI: until SwiftUI's value catches up, its old value isn't a request. (Acting on it
+    // brought the keyboard straight back up.)
+    if let told = coordinator.toldSwiftUI, Date().timeIntervalSince(told.at) < 0.6 {
+      guard isFocused == told.value else { return }
+      coordinator.toldSwiftUI = nil
+      coordinator.appliedFocus = isFocused
+      return
+    }
+    coordinator.toldSwiftUI = nil
+    // Only act when the request changes.
     if isFocused != coordinator.appliedFocus {
       coordinator.appliedFocus = isFocused
       if isFocused, enabled, !view.isFirstResponder {
-        DispatchQueue.main.async { if view.window != nil { view.becomeFirstResponder() } }
+        DispatchQueue.main.async { if view.window != nil, view.allowsFocus { view.becomeFirstResponder() } }
       } else if !isFocused, view.isFirstResponder {
         DispatchQueue.main.async { view.resignFirstResponder() }
       }
@@ -85,6 +96,8 @@ struct EmoteTextField: UIViewRepresentable {
     var parent: EmoteTextField
     /// The focus last asked for (from SwiftUI or by the text view itself).
     var appliedFocus = false
+    /// A focus change the text view reported to SwiftUI that SwiftUI hasn't caught up with yet.
+    var toldSwiftUI: (value: Bool, at: Date)?
     private var updating = false
 
     static var attributes: [NSAttributedString.Key: Any] {
@@ -230,18 +243,26 @@ struct EmoteTextField: UIViewRepresentable {
 
     func textViewDidBeginEditing(_ textView: UITextView) {
       appliedFocus = true
-      if !parent.isFocused { DispatchQueue.main.async { [weak self] in self?.parent.isFocused = true } }
+      guard !parent.isFocused else { return }
+      toldSwiftUI = (true, Date())
+      DispatchQueue.main.async { [weak self] in self?.parent.isFocused = true }
     }
 
     func textViewDidEndEditing(_ textView: UITextView) {
       appliedFocus = false
-      if parent.isFocused { DispatchQueue.main.async { [weak self] in self?.parent.isFocused = false } }
+      guard parent.isFocused else { return }
+      toldSwiftUI = (false, Date())
+      DispatchQueue.main.async { [weak self] in self?.parent.isFocused = false }
     }
   }
 }
 
 final class EmoteTextView: UITextView {
   private let placeholderLabel = UILabel()
+  /// Off while the player is shrunk (nothing can bring the keyboard up then).
+  var allowsFocus = true
+
+  override var canBecomeFirstResponder: Bool { allowsFocus && super.canBecomeFirstResponder }
 
   var placeholder: String = "" {
     didSet { placeholderLabel.text = placeholder }

@@ -131,6 +131,28 @@ final class PlayerModel: ObservableObject {
   /// Playing straight from Twitch for one of those, for this stream only (ads possible).
   private(set) var forceDirect = false
   private var checkedDirect = false
+
+  // Translation (iOS 18+) and live captions (iOS 26, experimental).
+  /// Translate chat messages in other languages.
+  @Published var translateChat = false
+  @Published private(set) var captionsOn = false
+  /// The caption (or caption status) to show over the video.
+  @Published private(set) var caption: String?
+  /// Chat's translator (also used for captions); set by the player screen.
+  weak var translator: ChatTranslator?
+  /// The live stream's audio-only playlist (for captions).
+  var audioPlaylistURL: URL? {
+    didSet { if captionsOn, audioPlaylistURL != oldValue, audioPlaylistURL != nil { startCaptions() } }
+  }
+  private let liveCaptions = LiveCaptions()
+  private var captionExpiry: Task<Void, Never>?
+  /// Reading the translation out loud (the stream is turned down while it speaks).
+  @Published private(set) var voiceOn = false
+  private lazy var voice: TranslationVoice = {
+    let voice = TranslationVoice()
+    voice.onSpeaking = { [weak self] speaking in self?.setStreamVolume(speaking ? 0.22 : 1) }
+    return voice
+  }()
   /// What the ad-free server's copy goes up to (its best rendition's height), and the renditions
   /// only Twitch itself had: to offer the way back.
   private var adFreeBestHeight = 0
@@ -191,8 +213,13 @@ final class PlayerModel: ObservableObject {
     player.automaticallyWaitsToMinimizeStalling = true
     statusObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
       let buffering = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+      let playing = player.timeControlStatus == .playing
       guard let model = self else { return }
-      Task { @MainActor in model.isBuffering = buffering }
+      Task { @MainActor in
+        model.isBuffering = buffering
+        // Back from rewinding: hand over from the VOD the moment live plays.
+        if playing, model.isLive { model.liveResumed() }
+      }
     }
   }
 
@@ -226,6 +253,7 @@ final class PlayerModel: ObservableObject {
       selectedQuality = preferredQualityLabel.flatMap { label in info.variants.firstIndex { $0.label == label } } ?? 0
       preferredQualityLabel = nil
       liveVariants = info.variants
+      audioPlaylistURL = info.variants.first { $0.isAudioOnly }.flatMap { URL(string: $0.uri) }
       play(StreamProxy.shared.masterURL(for: session, quality: selectedQuality))
       phase = .playing
       checkDirectQualities(served: info.variants)
@@ -469,6 +497,73 @@ final class PlayerModel: ObservableObject {
       model.directOnly = better
       ActivityLog.shared.add(
         "Twitch itself offers \(better.map(\.label).joined(separator: ", ")), which the ad-free server's copy doesn't: it's in the quality menu (plays without the ad-free server)")
+    }
+  }
+
+  // MARK: Live captions
+
+  func setCaptions(_ on: Bool) {
+    captionsOn = on
+    if on {
+      startCaptions()
+    } else {
+      if voiceOn { setVoice(false) }
+      liveCaptions.stop()
+      captionExpiry?.cancel()
+      caption = nil
+    }
+  }
+
+  /// Spoken translation: needs the captions running (they're what gets translated).
+  func setVoice(_ on: Bool) {
+    voiceOn = on
+    if on {
+      voice.prepare(language: LanguageGuess.mine)
+      if !captionsOn { setCaptions(true) }
+    } else {
+      voice.stop()
+      setStreamVolume(1)
+    }
+  }
+
+  /// Turns the stream down (or back up) under the spoken translation.
+  private func setStreamVolume(_ volume: Float) {
+    #if canImport(AmazonIVSPlayer)
+      lowLatency?.setVolume(volume)
+    #endif
+    player.volume = volume
+    rewindPlayer.volume = volume
+  }
+
+  private func startCaptions() {
+    guard captionsOn, isLive, !stopped else { return }
+    guard let url = audioPlaylistURL else {
+      showCaption("Waiting for the stream's audio…")
+      return
+    }
+    // What the streamer speaks: the stream's language tag, else what chat mostly writes in.
+    let language = LanguageGuess.code(fromTags: stream?.tags ?? []) ?? translator?.mainChatLanguage ?? LanguageGuess.mine
+    let translator = self.translator
+    liveCaptions.start(
+      LiveCaptions.Setup(playlistURL: url, language: language, target: LanguageGuess.mine),
+      translate: { text in await translator?.translate(text, from: language) },
+      show: { [weak self] text in self?.showCaption(text) },
+      finished: { [weak self] sentence in
+        // Read out only translations (the streamer's own words are already being heard).
+        guard let model = self, model.voiceOn, !model.isRewinding, LanguageGuess.base(language) != LanguageGuess.mine else { return }
+        model.voice.say(sentence)
+      })
+  }
+
+  private func showCaption(_ text: String?) {
+    caption = text
+    captionExpiry?.cancel()
+    guard text != nil else { return }
+    // Gone after a quiet spell, like TV captions.
+    captionExpiry = Task { [weak self] in
+      try? await Task.sleep(nanoseconds: 7_000_000_000)
+      guard !Task.isCancelled else { return }
+      self?.caption = nil
     }
   }
 
@@ -741,6 +836,8 @@ final class PlayerModel: ObservableObject {
 
   func stop() {
     guard !stopped else { return }
+    liveCaptions.stop()
+    if voiceOn { voice.stop() }
     if case .video(let video) = target, position > 0, phase == .playing {
       WatchHistory.shared.save(videoID: video.id, position: position, length: duration, syncToTwitch: true)
     }
@@ -807,7 +904,7 @@ final class PlayerModel: ObservableObject {
     }
     if rewindLinger, let since = lingerSince {
       // Live is playing again (or it's taking too long): let the VOD's picture go.
-      if (!isBuffering && phase == .playing && now.timeIntervalSince(since) > 0.3) || now.timeIntervalSince(since) > 5 {
+      if (!isBuffering && phase == .playing && now.timeIntervalSince(since) > 0.3) || now.timeIntervalSince(since) > 8 {
         withAnimation(.easeInOut(duration: 0.2)) { endRewindLinger() }
       }
     } else if rewindPlayer.currentItem != nil, !scrubSeeking, scrubTarget == nil, let idle = rewindIdleSince,
@@ -1099,12 +1196,13 @@ final class PlayerModel: ObservableObject {
   /// Back to the live stream at the live edge.
   func returnToLive() {
     guard isRewinding else { return }
-    // Keep the VOD's picture up (paused) until the live stream is playing again.
+    // The VOD keeps playing (picture and sound) until the live stream is playing again, so
+    // there's no frozen moment while live loads.
     isRewinding = false
     rewindPendingSeek = nil
     rewindSeeking = false
     rewindItemObservation = nil
-    rewindPlayer.pause()
+    if !rewindShowing { rewindPlayer.pause() }
     rewindLinger = rewindShowing
     lingerSince = Date()
     rewindIdleSince = Date()
@@ -1132,9 +1230,16 @@ final class PlayerModel: ObservableObject {
   }
 
   private func endRewindLinger() {
+    if !isRewinding { rewindPlayer.pause() }
     rewindLinger = false
     rewindShowing = false
     lingerSince = nil
+  }
+
+  /// The live stream is playing again after a rewind: hand over from the VOD at once.
+  func liveResumed() {
+    guard rewindLinger, !isRewinding else { return }
+    withAnimation(.easeInOut(duration: 0.2)) { endRewindLinger() }
   }
 
   /// The seek bar was touched: get the VOD ready before it's needed.

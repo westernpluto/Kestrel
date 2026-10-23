@@ -538,11 +538,26 @@ struct PlayerScreen: View {
     .task {
       orientation.start()
       OrientationLock.playerVisible(true)
+      model.translator = chat.translator
       chat.start()
       await model.start()
     }
+    // The translation sessions (chat and captions) live in hidden views here.
+    .background(TranslationHosts(translator: chat.translator))
+    .onChange(of: model.translateChat) { on in chat.setAutoTranslate(on) }
     .onChange(of: model.position) { position in
       if chat.isReplay { chat.replay(at: position) }
+    }
+    // Rewinding a live stream: chat follows the VOD; back to live chat on return.
+    .onChange(of: model.isRewinding) { rewinding in
+      if rewinding, let videoID = model.rewind?.videoID {
+        chat.startRewindReplay(videoID: videoID, at: model.rewindPosition)
+      } else if !rewinding {
+        chat.endRewindReplay()
+      }
+    }
+    .onChange(of: model.rewindPosition) { position in
+      if model.isRewinding { chat.replay(at: position) }
     }
     .onChange(of: app.playerMinimized) { minimized in
       // The app is portrait; only the full-screen player turns.
@@ -601,7 +616,7 @@ struct PlayerScreen: View {
   }
 
   private func sidePanel(_ layout: PlayerLayout) -> some View {
-    ChatPanel(chat: chat, bottomInset: layout.panelPadding.bottom, compact: layout.landscape)
+    ChatPanel(chat: chat, bottomInset: layout.panelPadding.bottom, compact: layout.landscape, active: !app.playerMinimized)
       .padding(.top, layout.panelPadding.top)
       .padding(.leading, layout.panelPadding.leading)
       .padding(.trailing, layout.panelPadding.trailing)

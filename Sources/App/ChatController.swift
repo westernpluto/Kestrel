@@ -43,6 +43,8 @@ final class ChatController: ObservableObject {
   private(set) var recentChatters: [String] = []
   /// Called with `true` when everything should be re-rendered (emotes/badges loaded).
   var onUpdate: ((_ fullReload: Bool) -> Void)?
+  /// On-device translation of chat (iOS 18+; also used by live captions).
+  let translator = ChatTranslator()
 
   let channel: Channel
   private var socket: URLSessionWebSocketTask?
@@ -59,6 +61,14 @@ final class ChatController: ObservableObject {
   /// Set for a VOD: chat is replayed in time with the video instead of joined live.
   let replayVideoID: String?
   private var replay = ChatReplayBuffer()
+  /// Rewinding a live stream: chat replays what was said at that point of the broadcast (from
+  /// its VOD) while live chat keeps arriving in the background, and comes back on return.
+  @Published private(set) var rewindReplay = false
+  private var rewindVideoID: String?
+  private var liveStash: [ChatMessage] = []
+  /// Bumped whenever replaying starts or stops, so late answers for the old replay are dropped.
+  private var replayEpoch = 0
+  private var replaySourceID: String? { replayVideoID ?? rewindVideoID }
 
   nonisolated init(channel: Channel, replayVideoID: String? = nil) {
     self.channel = channel
@@ -101,7 +111,7 @@ final class ChatController: ObservableObject {
 
   /// Shows what was said up to `position` (seconds into the VOD), fetching ahead as it plays.
   func replay(at position: Double) {
-    guard let videoID = replayVideoID, running, position.isFinite else { return }
+    guard let videoID = replaySourceID, running, position.isFinite else { return }
     if replay.move(to: position) {
       // A seek: start over from a little before the new position.
       pending = []
@@ -112,27 +122,83 @@ final class ChatController: ObservableObject {
     fetchReplayIfNeeded(videoID: videoID)
   }
 
+  // MARK: Translation
+
+  func setAutoTranslate(_ on: Bool) {
+    translator.setAutoTranslate(on, recent: messages.suffix(80).compactMap(translatable))
+  }
+
+  func translate(_ message: ChatMessage) {
+    guard let item = translatable(message) else { return }
+    translator.translateNow(id: item.id, text: item.text)
+  }
+
+  /// A message's words without its emotes (nil for notices, deleted and own messages).
+  func translatable(_ message: ChatMessage) -> (id: String, text: String)? {
+    guard message.kind == .message || message.kind == .action, !message.isDeleted,
+      message.login.lowercased() != signedInLogin?.lowercased()
+    else { return nil }
+    let words = message.fragments(thirdParty: thirdParty).compactMap { fragment -> String? in
+      if case .text(let text) = fragment { return text }
+      return nil
+    }
+    let text = words.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+    return text.isEmpty ? nil : (message.id, text)
+  }
+
+  /// Rewinding a live stream: show chat as it was at `position` (seconds into the broadcast).
+  func startRewindReplay(videoID: String, at position: Double) {
+    guard replayVideoID == nil, running, rewindVideoID == nil else { return }
+    rewindVideoID = videoID
+    rewindReplay = true
+    replayEpoch += 1
+    liveStash = Array((messages + pending).suffix(maxMessages))
+    pending = []
+    messages = []
+    replay = ChatReplayBuffer()
+    onUpdate?(true)
+    replay(at: position)
+  }
+
+  /// Back to live: live chat again, including what arrived meanwhile.
+  func endRewindReplay() {
+    guard rewindVideoID != nil else { return }
+    rewindVideoID = nil
+    rewindReplay = false
+    replayEpoch += 1
+    replay = ChatReplayBuffer()
+    // Pending messages are the replay's; live ones went to the stash.
+    pending = []
+    messages = Array(liveStash.suffix(maxMessages))
+    liveStash = []
+    onUpdate?(true)
+  }
+
   private func releaseReplay() {
-    for message in replay.due() { enqueue(message) }
+    for message in replay.due() { enqueue(message, live: false) }
   }
 
   private func fetchReplayIfNeeded(videoID: String) {
     guard let offset = replay.fetchNeeded() else { return }
     let generation = replay.generation
+    let epoch = replayEpoch
     Task {
       do {
         let page = try await TwitchAPI.shared.videoComments(videoID: videoID, offset: offset, cursor: nil)
+        guard epoch == replayEpoch else { return }
         replay.received(page.comments, for: offset, generation: generation)
       } catch {
+        guard epoch == replayEpoch else { return }
         replay.failed(generation: generation)
         if generation == replay.generation {
           ActivityLog.shared.add("Chat replay: \(error.localizedDescription)")
           if messages.isEmpty && pending.isEmpty {
-            enqueue(ChatMessage(notice: "Chat replay isn't available for this video right now."))
+            let text = rewindReplay ? "Chat from this part of the stream isn't available yet." : "Chat replay isn't available for this video right now."
+            enqueue(ChatMessage(notice: text), live: false)
           }
         }
       }
-      guard generation == replay.generation else { return }
+      guard epoch == replayEpoch, generation == replay.generation else { return }
       releaseReplay()
       // Keep reading until there's chat ahead of the video (or there's none yet).
       fetchReplayIfNeeded(videoID: videoID)
@@ -411,7 +477,13 @@ final class ChatController: ObservableObject {
     if changed { onUpdate?(false) }
   }
 
-  private func enqueue(_ message: ChatMessage) {
+  /// - Parameter live: from live chat (held back while rewinding), or the replay's.
+  private func enqueue(_ message: ChatMessage, live: Bool = true) {
+    if live, rewindVideoID != nil {
+      liveStash.append(message)
+      if liveStash.count > maxMessages + 50 { liveStash.removeFirst(liveStash.count - maxMessages) }
+      return
+    }
     pending.append(message)
     guard !flushScheduled else { return }
     flushScheduled = true
@@ -421,6 +493,9 @@ final class ChatController: ObservableObject {
   private func flush() {
     flushScheduled = false
     guard !pending.isEmpty else { return }
+    if ChatTranslator.isAvailable {
+      for message in pending { if let item = translatable(message) { translator.consider(id: item.id, text: item.text) } }
+    }
     messages.append(contentsOf: pending)
     pending.removeAll()
     if messages.count > maxMessages { messages.removeFirst(messages.count - maxMessages) }
@@ -503,9 +578,10 @@ enum ChatRenderer {
     text.append(NSAttributedString(attachment: attachment))
   }
 
-  static func render(_ message: ChatMessage, badges: [String: Badge], thirdParty: [String: URL], fontSize: CGFloat, me: String?)
-    -> RenderedMessage
-  {
+  static func render(
+    _ message: ChatMessage, badges: [String: Badge], thirdParty: [String: URL], fontSize: CGFloat, me: String?,
+    translation: String? = nil
+  ) -> RenderedMessage {
     let font = UIFont.systemFont(ofSize: fontSize)
     let bold = UIFont.systemFont(ofSize: fontSize, weight: .bold)
     let text = NSMutableAttributedString()
@@ -543,6 +619,21 @@ enum ChatRenderer {
       case .text(let t): text.append(NSAttributedString(string: t, attributes: body))
       case .emote(_, let url): slot(url, height: (fontSize * 1.75).rounded(), font: font, into: text, slots: &slots, waiting: &waiting)
       }
+    }
+    if let translation {
+      // The translation under the message, quieter, after a small globe.
+      let small = UIFont.systemFont(ofSize: max(11, fontSize - 1))
+      let quiet: [NSAttributedString.Key: Any] = [.font: small, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: paragraph]
+      text.append(NSAttributedString(string: "\n", attributes: quiet))
+      if let globe = UIImage(systemName: "globe")?.withTintColor(.secondaryLabel, renderingMode: .alwaysOriginal) {
+        let icon = NSTextAttachment()
+        icon.image = globe
+        let side = (small.capHeight + 3).rounded()
+        icon.bounds = CGRect(x: 0, y: (small.capHeight - side) / 2, width: side, height: side)
+        text.append(NSAttributedString(attachment: icon))
+        text.append(NSAttributedString(string: " ", attributes: quiet))
+      }
+      text.append(NSAttributedString(string: translation, attributes: quiet))
     }
     let highlighted = message.systemText != nil || (me.map { message.mentions($0) } ?? false)
     return RenderedMessage(text: text, slots: slots, highlighted: highlighted, waiting: waiting)
@@ -757,6 +848,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     ])
 
     chat.onUpdate = { [weak self] full in self?.chatUpdated(fullReload: full) }
+    chat.translator.onTranslated = { [weak self] id in self?.translationArrived(id) }
     imageObserver = NotificationCenter.default.addObserver(
       forName: ChatImageEvents.notification, object: nil, queue: .main
     ) { [weak self] _ in
@@ -789,13 +881,16 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     }
   }
 
-  private func key(_ message: ChatMessage) -> String { "\(message.id)-\(message.isDeleted)" }
+  private func key(_ message: ChatMessage) -> String {
+    "\(message.id)-\(message.isDeleted)-\(chat.translator.results[message.id] != nil)"
+  }
 
   private func render(_ message: ChatMessage) -> RenderedMessage {
     let k = key(message)
     if let cached = rendered[k] { return cached }
     let result = ChatRenderer.render(
-      message, badges: chat.badges, thirdParty: chat.thirdParty, fontSize: AppSettings.shared.chatFontSize, me: chat.ownLogin)
+      message, badges: chat.badges, thirdParty: chat.thirdParty, fontSize: AppSettings.shared.chatFontSize, me: chat.ownLogin,
+      translation: chat.translator.results[message.id])
     rendered[k] = result
     return result
   }
@@ -858,6 +953,18 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     heights = heights.filter { live.contains($0.key) }
   }
 
+  /// A message's translation came in: just its row grows to show it.
+  private func translationArrived(_ id: String) {
+    guard tableView.window != nil, let row = displayed.firstIndex(where: { $0.id == id }) else { return }
+    UIView.performWithoutAnimation {
+      tableView.performBatchUpdates {
+        tableView.reloadRows(at: [IndexPath(row: row, section: 0)], with: .none)
+      }
+    }
+    prune()
+    if following { scrollToBottom(animated: true) }
+  }
+
   /// Pictures finished loading: messages laid out before theirs arrived get their real widths.
   /// Only those rows change (a full reload made busy chats flash and jump).
   private func imagesArrived() {
@@ -872,7 +979,8 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
         old.waiting.contains(where: { ImagePipeline.shared.cached($0, maxPixels: 112) != nil })
       else { continue }
       let fresh = ChatRenderer.render(
-        message, badges: chat.badges, thirdParty: chat.thirdParty, fontSize: AppSettings.shared.chatFontSize, me: chat.ownLogin)
+        message, badges: chat.badges, thirdParty: chat.thirdParty, fontSize: AppSettings.shared.chatFontSize, me: chat.ownLogin,
+        translation: chat.translator.results[message.id])
       rendered[k] = fresh
       guard fresh.slots.map(\.size) != old.slots.map(\.size) else { continue }
       changed.append(row)
@@ -1004,6 +1112,13 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
       var actions = [
         UIAction(title: "Copy message", image: UIImage(systemName: "doc.on.doc")) { _ in UIPasteboard.general.string = message.text }
       ]
+      if ChatTranslator.isAvailable, let self, self.chat.translator.results[message.id] == nil,
+        self.chat.translatable(message) != nil
+      {
+        actions.append(UIAction(title: "Translate", image: UIImage(systemName: "character.bubble")) { [weak self] _ in
+          self?.chat.translate(message)
+        })
+      }
       if self?.onMention != nil {
         actions.append(UIAction(title: "Reply to @\(message.displayName)", image: UIImage(systemName: "arrowshape.turn.up.left")) { _ in
           self?.onMention?(message.login)
@@ -1072,6 +1187,8 @@ struct ChatPanel: View {
   var bottomInset: CGFloat = 0
   /// Landscape: a shorter emote picker.
   var compact = false
+  /// False while the player is shrunk into the mini player: the message box can't take focus.
+  var active = true
   @ObservedObject private var account = TwitchAccount.shared
   @State private var draft = ""
   @State private var showLogin = false
@@ -1111,6 +1228,11 @@ struct ChatPanel: View {
     .onChange(of: focused) { isFocused in
       if isFocused, pickerOpen { pickerOpen = false }
     }
+    .onChange(of: active) { isActive in
+      guard !isActive else { return }
+      focused = false
+      pickerOpen = false
+    }
     .onChange(of: chat.bounced) { bounced in
       guard let bounced else { return }
       draft = bounced.text
@@ -1124,7 +1246,9 @@ struct ChatPanel: View {
   @ViewBuilder
   private var statusPill: some View {
     Group {
-      if case .disconnected(let reason) = chat.status {
+      if chat.rewindReplay {
+        pill("Chat from this point of the stream", systemImage: "clock.arrow.circlepath")
+      } else if case .disconnected(let reason) = chat.status {
         pill(reason)
       } else if chat.status == .connecting {
         pill("Connecting to chat…")
@@ -1132,13 +1256,19 @@ struct ChatPanel: View {
     }
     .transition(.opacity.combined(with: .move(edge: .top)))
     .animation(.easeInOut(duration: 0.2), value: chat.status)
+    .animation(.easeInOut(duration: 0.2), value: chat.rewindReplay)
   }
 
-  private func pill(_ text: String) -> some View {
-    Text(text).font(.caption.weight(.semibold))
-      .padding(.horizontal, 10).padding(.vertical, 5)
-      .background(.ultraThinMaterial, in: Capsule())
-      .padding(.top, 8)
+  private func pill(_ text: String, systemImage: String? = nil) -> some View {
+    HStack(spacing: 5) {
+      if let systemImage { Image(systemName: systemImage) }
+      Text(text)
+    }
+    .font(.caption.weight(.semibold))
+    .padding(.horizontal, 10).padding(.vertical, 5)
+    .background(.ultraThinMaterial, in: Capsule())
+    .padding(.top, 8)
+    .allowsHitTesting(false)
   }
 
   // MARK: Autocomplete
@@ -1234,7 +1364,7 @@ struct ChatPanel: View {
             EmoteTextField(
               text: $draft, isFocused: $focused, height: $inputHeight,
               placeholder: !chat.canSend ? "Joining chat…" : chat.emoteOnly ? "Emotes only" : "Send a message",
-              enabled: chat.canSend,
+              enabled: chat.canSend && active,
               emoteURL: { chat.emoteURL(for: $0) }, onSubmit: send
             )
             .frame(height: inputHeight)

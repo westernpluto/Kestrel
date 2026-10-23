@@ -51,8 +51,12 @@ else
   echo "==> Low-latency player: AmazonIVSPlayer.xcframework not found, building without it"
 fi
 
+# Extra compiler flags, e.g. SWIFT_FLAGS="-D KESTREL_NO_CAPTIONS" to leave out a feature.
+read -r -a FLAGS <<< "${SWIFT_FLAGS:-}"
+[[ ${#FLAGS[@]} -gt 0 ]] && echo "==> Extra flags: ${FLAGS[*]}"
+
 echo "==> Compiling with $(basename "$SDK")"
-"${SWIFTC[@]}" -swift-version 5 -target "arm64-apple-ios$MIN_IOS" -sdk "$SDK" ${EXTRA[@]+"${EXTRA[@]}"} \
+"${SWIFTC[@]}" -swift-version 5 -target "arm64-apple-ios$MIN_IOS" -sdk "$SDK" ${EXTRA[@]+"${EXTRA[@]}"} ${FLAGS[@]+"${FLAGS[@]}"} \
   -O -whole-module-optimization -module-name "$APP" \
   -Xlinker -rpath -Xlinker /usr/lib/swift -Xlinker -rpath -Xlinker @executable_path/Frameworks \
   -Xlinker -dead_strip \

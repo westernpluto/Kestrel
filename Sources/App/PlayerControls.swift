@@ -56,6 +56,22 @@ struct PlayerVideoArea: View {
       PlayerControls(
         model: model, landscape: landscape, chatOpen: chatOpen, visible: controlsShown && chromeVisible && !pulling,
         insets: controlInsets, toggleChat: toggleChat, minimize: minimize, interacted: { scheduleHide(after: $0) })
+      if model.captionsOn, !model.isRewinding, chromeVisible, let caption = model.caption {
+        Text(caption)
+          .font(.system(size: landscape ? 18 : 15, weight: .semibold))
+          .foregroundColor(.white)
+          .multilineTextAlignment(.center)
+          .lineLimit(3)
+          .padding(.horizontal, 10)
+          .padding(.vertical, 6)
+          .background(.black.opacity(0.62), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+          .padding(.horizontal, landscape ? 60 : 20)
+          .padding(.bottom, controlInsets.bottom + (controlsShown ? 66 : 12))
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+          .allowsHitTesting(false)
+          .transition(.opacity)
+          .animation(.easeInOut(duration: 0.2), value: controlsShown)
+      }
       if let resumed = model.resumedAt, chromeVisible {
         resumeNotice(resumed)
           .padding(.leading, controlInsets.leading + 8)
@@ -337,9 +353,15 @@ struct PlayerControls: View {
       showLowLatency: model.isLive && model.canToggleLowLatency && !model.isRewinding,
       lowLatency: settings.lowLatency,
       showStats: settings.showVideoStats,
+      translateChat: ChatTranslator.isAvailable ? model.translateChat : nil,
+      captions: LiveCaptions.isAvailable && model.isLive && !model.isRewinding ? model.captionsOn : nil,
+      voice: LiveCaptions.isAvailable && model.isLive && !model.isRewinding ? model.voiceOn : nil,
       select: { [model] in model.selectQuality($0) },
       setLowLatency: { [model] in model.setLowLatency($0) },
       setStats: { [settings] in settings.showVideoStats = $0 },
+      setTranslateChat: { [model] in model.translateChat = $0 },
+      setCaptions: { [model] in model.setCaptions($0) },
+      setVoice: { [model] in model.setVoice($0) },
       opened: { [interacted] in interacted(12) }
     )
     .equatable()
@@ -699,14 +721,22 @@ struct PlayerSettingsMenu: View, Equatable {
   var showLowLatency: Bool
   var lowLatency: Bool
   var showStats: Bool
+  /// nil: not offered (needs iOS 18 / iOS 26 and the Liquid Glass build).
+  var translateChat: Bool?
+  var captions: Bool?
+  var voice: Bool?
   var select: (PlayerModel.Quality) -> Void
   var setLowLatency: (Bool) -> Void
   var setStats: (Bool) -> Void
+  var setTranslateChat: (Bool) -> Void
+  var setCaptions: (Bool) -> Void
+  var setVoice: (Bool) -> Void
   var opened: () -> Void
 
   static func == (a: Self, b: Self) -> Bool {
     a.qualities == b.qualities && a.selected == b.selected && a.showLowLatency == b.showLowLatency
-      && a.lowLatency == b.lowLatency && a.showStats == b.showStats
+      && a.lowLatency == b.lowLatency && a.showStats == b.showStats && a.translateChat == b.translateChat
+      && a.captions == b.captions && a.voice == b.voice
   }
 
   var body: some View {
@@ -725,6 +755,21 @@ struct PlayerSettingsMenu: View, Equatable {
       if showLowLatency {
         Toggle(isOn: Binding(get: { lowLatency }, set: setLowLatency)) {
           Label("Low latency", systemImage: "bolt")
+        }
+      }
+      if let translateChat {
+        Toggle(isOn: Binding(get: { translateChat }, set: setTranslateChat)) {
+          Label("Translate chat", systemImage: "character.bubble")
+        }
+      }
+      if let captions {
+        Toggle(isOn: Binding(get: { captions }, set: setCaptions)) {
+          Label("Live captions (translated)", systemImage: "captions.bubble")
+        }
+      }
+      if let voice {
+        Toggle(isOn: Binding(get: { voice }, set: setVoice)) {
+          Label("Speak translation", systemImage: "speaker.wave.2.bubble")
         }
       }
       Toggle(isOn: Binding(get: { showStats }, set: setStats)) {
