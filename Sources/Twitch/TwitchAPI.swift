@@ -34,6 +34,8 @@ struct LiveStream: Identifiable, Hashable, Sendable {
   var startedAt: Date?
   var category: Category?
   var channel: Channel
+  /// The streamer's tags ("English", "Chill", …).
+  var tags: [String] = []
 }
 
 struct Video: Identifiable, Hashable, Sendable {
@@ -227,7 +229,27 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
   }
 
   private func send(_ body: [String: Any], anonymous: Bool = false, via client: HTTPClient? = nil) async throws -> JSONValue {
-    let (data, response) = try await (client ?? http).data(for: try request(body: body, anonymous: anonymous))
+    var body = body
+    if !Self.tagsSupported, let text = body["query"] as? String { body["query"] = Self.withoutTags(text) }
+    do {
+      return try await perform(try request(body: body, anonymous: anonymous), via: client)
+    } catch TwitchAPIError.gql(let message) where message.contains("freeformTags") {
+      // Twitch stopped knowing the tags field: browse without tags rather than not at all.
+      Self.tagsSupported = false
+      guard let text = body["query"] as? String else { throw TwitchAPIError.gql(message) }
+      body["query"] = Self.withoutTags(text)
+      return try await perform(try request(body: body, anonymous: anonymous), via: client)
+    }
+  }
+
+  private static var tagsSupported = true
+  private static func withoutTags(_ query: String) -> String {
+    query.replacingOccurrences(of: Self.tagFields, with: "")
+  }
+  private static let tagFields = "freeformTags { name }"
+
+  private func perform(_ request: URLRequest, via client: HTTPClient? = nil) async throws -> JSONValue {
+    let (data, response) = try await (client ?? http).data(for: request)
     guard let object = try? JSONSerialization.jsonObject(with: data) else {
       throw response.statusCode == 200 ? TwitchAPIError.decoding : TwitchAPIError.http(response.statusCode)
     }
@@ -259,7 +281,8 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     return LiveStream(
       id: j["id"].string ?? channel.id, title: title, viewers: j["viewersCount"].int ?? 0,
       previewImageURL: j["previewImageURL"].string, startedAt: j["createdAt"].date,
-      category: category(j["game"]), channel: channel)
+      category: category(j["game"]), channel: channel,
+      tags: j["freeformTags"].array.compactMap { $0["name"].string })
   }
 
   static func video(_ j: JSONValue, owner: Channel? = nil) -> Video? {
@@ -281,7 +304,7 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
 
   private static let streamFields = """
     broadcaster { broadcastSettings { title } displayName id login profileImageURL(width: 300) }
-    createdAt game { displayName id slug } id previewImageURL viewersCount
+    createdAt game { displayName id slug } id previewImageURL viewersCount freeformTags { name }
     """
 
   // MARK: Browse
@@ -371,7 +394,7 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
         query null($logins: [String!]) {
           users(logins: $logins) {
             displayName id login profileImageURL(width: 300)
-            stream { broadcaster { broadcastSettings { title } } createdAt game { displayName id slug } id previewImageURL viewersCount }
+            stream { broadcaster { broadcastSettings { title } } createdAt game { displayName id slug } id previewImageURL viewersCount freeformTags { name } }
           }
         }
         """, variables: ["logins": chunk])
@@ -391,7 +414,7 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
         user(login: $login, lookupType: ALL) {
           bannerImageURL description displayName followers { totalCount } id login profileImageURL(width: 300)
           lastBroadcast { startedAt }
-          stream { createdAt game { displayName id slug } id previewImageURL title viewersCount }
+          stream { createdAt game { displayName id slug } id previewImageURL title viewersCount freeformTags { name } }
         }
       }
       """, variables: ["login": login.lowercased()])
@@ -560,6 +583,54 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     var id: String { channel.id }
   }
 
+  /// The device ID that goes with the signed-in account (the website's `unique_id`).
+  var accountDeviceID: String { TwitchAuth.shared.session?.deviceID ?? deviceID }
+
+  static let followHash = "800e7346bdf7e5278a3c1d3f21b2b56e2639928f86815677a7126b093b2fdd08"
+  static let unfollowHash = "f7dae976ebf41c755ae2d758546bfd176b4eeb856656098bb40e0a672ca0d880"
+
+  /// Follows or unfollows a channel on the signed-in account. Twitch only accepts these from its
+  /// website, with an integrity token (`headers`: Client-Integrity and the matching device ID).
+  func setFollow(_ follow: Bool, channelID: String, headers: [String: String]) async throws {
+    guard TwitchAuth.shared.session != nil else { throw TwitchAPIError.gql("Not signed in") }
+    let input: [String: Any] = follow ? ["disableNotifications": false, "targetID": channelID] : ["targetID": channelID]
+    let body: [String: Any] = [
+      "operationName": follow ? "FollowButton_FollowUser" : "FollowButton_UnfollowUser",
+      "variables": ["input": input],
+      "extensions": ["persistedQuery": ["version": 1, "sha256Hash": follow ? Self.followHash : Self.unfollowHash] as [String: Any]],
+    ]
+    func send(_ body: [String: Any]) async throws -> JSONValue {
+      var request = try request(body: body)
+      for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
+      request.setValue("https://www.twitch.tv", forHTTPHeaderField: "Origin")
+      request.setValue("https://www.twitch.tv/", forHTTPHeaderField: "Referer")
+      return try await perform(request)
+    }
+    let data: JSONValue
+    do {
+      data = try await send(body)
+    } catch TwitchAPIError.gql(let message) where message.localizedCaseInsensitiveContains("PersistedQuery") {
+      // Twitch renamed its stored mutation: send it written out instead.
+      let field = follow ? "followUser" : "unfollowUser"
+      let type = follow ? "FollowUserInput" : "UnfollowUserInput"
+      data = try await send([
+        "query": "mutation($input: \(type)!) { \(field)(input: $input) { follow { user { id } } error { code } } }",
+        "variables": ["input": input],
+      ])
+    }
+    let result = data[follow ? "followUser" : "unfollowUser"]
+    if let code = result["error"]["code"].string { throw TwitchAPIError.gql(Self.describeFollowError(code)) }
+    if follow, result["follow"].isNull { throw TwitchAPIError.gql("Twitch didn't confirm the follow") }
+  }
+
+  static func describeFollowError(_ code: String) -> String {
+    switch code {
+    case "TOO_MANY_FOLLOWS": return "You follow the most channels Twitch allows"
+    case "FORBIDDEN": return "Twitch didn't allow it"
+    default: return code.lowercased().replacingOccurrences(of: "_", with: " ")
+    }
+  }
+
   /// The signed-in account's followed channels (up to 600), with who's live.
   func followedChannels() async throws -> [FollowedChannel] {
     guard TwitchAuth.shared.session != nil else { return [] }
@@ -578,7 +649,7 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
                 node {
                   displayName id login profileImageURL(width: 300)
                   lastBroadcast { startedAt }
-                  stream { createdAt game { boxArtURL displayName id slug } id previewImageURL title viewersCount }
+                  stream { createdAt game { boxArtURL displayName id slug } id previewImageURL title viewersCount freeformTags { name } }
                 }
               }
               pageInfo { hasNextPage }

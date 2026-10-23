@@ -1,30 +1,35 @@
 import SwiftUI
 
+/// Live channels and categories, side by side: swipe between them or use the switch on top.
 struct BrowseView: View {
-  enum Mode: String, CaseIterable { case live = "Live", categories = "Categories" }
+  enum Mode: String, CaseIterable, Hashable { case live = "Live", categories = "Categories" }
   @State private var mode: Mode = .live
   @StateObject private var streams = Paginator<LiveStream> { try await TwitchAPI.shared.topStreams(after: $0) }
   @StateObject private var categories = Paginator<Category> { try await TwitchAPI.shared.topCategories(after: $0) }
 
   var body: some View {
-    RefreshableScrollView(refresh: { [mode, streams, categories] in
-      if mode == .live { await streams.refresh() } else { await categories.refresh() }
-    }) {
-      Picker("", selection: $mode) {
-        ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+    TabView(selection: $mode) {
+      FeedList(refresh: { [streams] in await streams.refresh() }) {
+        StreamRows(paginator: streams)
       }
-      .pickerStyle(.segmented)
-      .padding(.horizontal)
-      .padding(.top, 4)
-
-      switch mode {
-      case .live:
-        StreamList(paginator: streams)
-      case .categories:
-        CategoryGrid(paginator: categories)
+      .tag(Mode.live)
+      FeedList(refresh: { [categories] in await categories.refresh() }) {
+        CategoryRows(paginator: categories)
+      }
+      .tag(Mode.categories)
+    }
+    .tabViewStyle(.page(indexDisplayMode: .never))
+    .toolbar {
+      ToolbarItem(placement: .principal) {
+        Picker("Browse", selection: $mode.animation(.easeInOut(duration: 0.3))) {
+          ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .frame(width: 240)
       }
     }
     .navigationTitle("Browse")
+    .navigationBarTitleDisplayMode(.inline)
     .task {
       if streams.items.isEmpty { await streams.refresh() }
     }
@@ -34,41 +39,58 @@ struct BrowseView: View {
   }
 }
 
-struct StreamList: View {
+/// Live streams as list rows (inside a FeedList).
+struct StreamRows: View {
   @ObservedObject var paginator: Paginator<LiveStream>
   var showCategory = true
 
   var body: some View {
-    LazyVStack(spacing: 22) {
-      ForEach(paginator.items) { stream in
-        StreamCard(stream: stream, showCategory: showCategory)
-          .onAppear { paginator.loadMoreIfNeeded(current: stream) }
-      }
-      if paginator.isLoading { ProgressView().padding() }
-      if let error = paginator.error, paginator.items.isEmpty {
-        ErrorBanner(message: error) { Task { await paginator.refresh() } }
-      }
+    ForEach(paginator.items) { stream in
+      StreamRow(stream: stream, showCategory: showCategory)
+        .feedRow(top: 7, bottom: 7)
+        .onAppear { paginator.loadMoreIfNeeded(current: stream) }
     }
-    .padding()
+    if paginator.isLoading {
+      ProgressView().frame(maxWidth: .infinity).padding().feedRow()
+    }
+    if let error = paginator.error, paginator.items.isEmpty {
+      ErrorBanner(message: error) { Task { await paginator.refresh() } }.feedRow()
+    }
   }
 }
 
-struct CategoryGrid: View {
+/// Categories as rows of box art (inside a FeedList).
+struct CategoryRows: View {
   @ObservedObject var paginator: Paginator<Category>
-  private let columns = [GridItem(.adaptive(minimum: 104), spacing: 12)]
+  @EnvironmentObject private var app: AppModel
+  private let columns = 3
 
   var body: some View {
-    LazyVGrid(columns: columns, spacing: 16) {
-      ForEach(paginator.items) { category in
-        NavigationLink(value: category) { CategoryTile(category: category) }
-          .buttonStyle(.plain)
-          .onAppear { paginator.loadMoreIfNeeded(current: category) }
-      }
+    let rows = stride(from: 0, to: paginator.items.count, by: columns).map {
+      Array(paginator.items[$0..<min($0 + columns, paginator.items.count)])
     }
-    .padding()
-    if paginator.isLoading { ProgressView().padding() }
+    ForEach(rows, id: \.first?.id) { row in
+      HStack(alignment: .top, spacing: 12) {
+        ForEach(row) { category in
+          Button {
+            app.push(category)
+          } label: {
+            CategoryTile(category: category)
+          }
+          .buttonStyle(PressableStyle(scale: 0.96))
+          .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        // Keep the last row's tiles the same width as the others.
+        ForEach(0..<(columns - row.count), id: \.self) { _ in Color.clear.frame(maxWidth: .infinity) }
+      }
+      .feedRow(top: 8, bottom: 8)
+      .onAppear { if let last = row.last { paginator.loadMoreIfNeeded(current: last) } }
+    }
+    if paginator.isLoading {
+      ProgressView().frame(maxWidth: .infinity).padding().feedRow()
+    }
     if let error = paginator.error, paginator.items.isEmpty {
-      ErrorBanner(message: error) { Task { await paginator.refresh() } }
+      ErrorBanner(message: error) { Task { await paginator.refresh() } }.feedRow()
     }
   }
 }
@@ -84,7 +106,7 @@ struct CategoryView: View {
   }
 
   var body: some View {
-    RefreshableScrollView(refresh: { [streams] in await streams.refresh() }) {
+    FeedList(refresh: { [streams] in await streams.refresh() }) {
       HStack(alignment: .top, spacing: 14) {
         RemoteImage(url: TwitchAPI.image(category.boxArtURL, width: 285, height: 380))
           .frame(width: 72, height: 96)
@@ -97,8 +119,8 @@ struct CategoryView: View {
         }
         Spacer()
       }
-      .padding(.horizontal)
-      StreamList(paginator: streams, showCategory: false)
+      .feedRow(top: 8, bottom: 10)
+      StreamRows(paginator: streams, showCategory: false)
     }
     .navigationTitle(category.name)
     .navigationBarTitleDisplayMode(.inline)
@@ -109,6 +131,9 @@ struct CategoryView: View {
 @MainActor
 final class SearchModel: ObservableObject {
   @Published var text = ""
+  /// Earlier searches, newest first.
+  @Published private(set) var history: [String] = UserDefaults.standard.stringArray(forKey: SearchModel.historyKey) ?? []
+  private static let historyKey = "searchHistory.v1"
   @Published private(set) var channels: [ChannelSearchResult] = []
   @Published private(set) var categories: [Category] = []
   @Published private(set) var isLoading = false
@@ -146,6 +171,26 @@ final class SearchModel: ObservableObject {
       }
     }
   }
+
+  /// Keeps the current search in the history (when it was submitted or a result opened).
+  func remember() {
+    let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard query.count >= 2 else { return }
+    history.removeAll { $0.caseInsensitiveCompare(query) == .orderedSame }
+    history.insert(query, at: 0)
+    history = Array(history.prefix(25))
+    UserDefaults.standard.set(history, forKey: Self.historyKey)
+  }
+
+  func forget(_ entries: [String]) {
+    history.removeAll { entries.contains($0) }
+    UserDefaults.standard.set(history, forKey: Self.historyKey)
+  }
+
+  func clearHistory() {
+    history = []
+    UserDefaults.standard.removeObject(forKey: Self.historyKey)
+  }
 }
 
 struct SearchView: View {
@@ -154,6 +199,34 @@ struct SearchView: View {
 
   var body: some View {
     List {
+      if model.text.trimmingCharacters(in: .whitespaces).isEmpty, !model.history.isEmpty {
+        Section {
+          ForEach(model.history, id: \.self) { entry in
+            Button {
+              model.text = entry
+              model.remember()
+            } label: {
+              HStack(spacing: 12) {
+                Image(systemName: "clock.arrow.circlepath").foregroundColor(.secondary)
+                Text(entry).foregroundColor(.primary)
+                Spacer()
+                Image(systemName: "arrow.up.left").font(.footnote).foregroundColor(.secondary)
+              }
+              .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+          }
+          .onDelete { offsets in model.forget(offsets.map { model.history[$0] }) }
+        } header: {
+          HStack {
+            Text("Recent searches")
+            Spacer()
+            Button("Clear") { withAnimation { model.clearHistory() } }
+              .font(.footnote.weight(.semibold))
+              .textCase(nil)
+          }
+        }
+      }
       if !model.categories.isEmpty {
         Section("Categories") {
           ScrollView(.horizontal, showsIndicators: false) {
@@ -197,7 +270,12 @@ struct SearchView: View {
     .autocorrectionDisabled()
     .textInputAutocapitalization(.never)
     .onChange(of: model.text) { _ in model.search() }
-    .onSubmit(of: .search) { model.search() }
+    .onSubmit(of: .search) {
+      model.search()
+      model.remember()
+    }
+    // Opening a result keeps the search in the history.
+    .onChange(of: app.searchPath.count) { count in if count > 0 { model.remember() } }
     .navigationTitle("Search")
   }
 }
@@ -220,7 +298,11 @@ final class FollowingStore: ObservableObject {
   @Published private(set) var isLoading = false
   @Published private(set) var loaded = false
   @Published private(set) var error: String?
+  /// Something to tell the user about a follow that didn't go through.
+  @Published var notice: String?
   private var lastRefresh = Date.distantPast
+  /// Follows changed here recently: Twitch's list can take a moment to catch up.
+  private var recentChanges: [String: (follow: Bool, at: Date)] = [:]
 
   private var current: Task<Void, Never>?
 
@@ -240,6 +322,40 @@ final class FollowingStore: ObservableObject {
     current = nil
   }
 
+  /// Follows or unfollows on Twitch, showing the change at once. If Twitch won't take it, a follow
+  /// is kept in Kestrel's own list instead.
+  @MainActor
+  func setFollowed(_ channel: Channel, _ follow: Bool) async {
+    if follow { twitchFollowIDs.insert(channel.id) } else { twitchFollowIDs.remove(channel.id) }
+    recentChanges[channel.id] = (follow, Date())
+    do {
+      do {
+        let headers = try await TwitchIntegrity.shared.headers()
+        try await TwitchAPI.shared.setFollow(follow, channelID: channel.id, headers: headers)
+      } catch TwitchAPIError.gql(let message) where message.localizedCaseInsensitiveContains("integrity") {
+        // The token ran out or wasn't accepted: get a fresh one and try once more.
+        let headers = try await TwitchIntegrity.shared.headers(refresh: true)
+        try await TwitchAPI.shared.setFollow(follow, channelID: channel.id, headers: headers)
+      }
+      ActivityLog.shared.add(follow ? "Followed \(channel.name) on Twitch" : "Unfollowed \(channel.name) on Twitch")
+      if !follow, FavoritesStore.shared.contains(channel) { FavoritesStore.shared.toggle(channel) }
+      Task {
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        await refresh(force: true)
+      }
+    } catch {
+      recentChanges[channel.id] = nil
+      if follow { twitchFollowIDs.remove(channel.id) } else { twitchFollowIDs.insert(channel.id) }
+      ActivityLog.shared.add("Couldn't \(follow ? "follow" : "unfollow") \(channel.name) on Twitch: \(error.localizedDescription)")
+      if follow {
+        if !FavoritesStore.shared.contains(channel) { FavoritesStore.shared.toggle(channel) }
+        notice = "Twitch didn't accept the follow (\(error.localizedDescription)), so \(channel.name) was added to Kestrel's Following list instead."
+      } else {
+        notice = "Twitch didn't accept the unfollow (\(error.localizedDescription))."
+      }
+    }
+  }
+
   private func load() async {
     isLoading = true
     defer { isLoading = false }
@@ -251,7 +367,12 @@ final class FollowingStore: ObservableObject {
     if TwitchAccount.shared.session != nil {
       do {
         let follows = try await TwitchAPI.shared.followedChannels()
-        twitchFollowIDs = Set(follows.map(\.id))
+        var ids = Set(follows.map(\.id))
+        recentChanges = recentChanges.filter { Date().timeIntervalSince($0.value.at) < 120 }
+        for (id, change) in recentChanges {
+          if change.follow { ids.insert(id) } else { ids.remove(id) }
+        }
+        twitchFollowIDs = ids
         for follow in follows {
           if let stream = follow.stream {
             liveByID[follow.id] = stream
@@ -300,60 +421,62 @@ final class FollowingStore: ObservableObject {
 
 struct FollowingView: View {
   @EnvironmentObject private var favorites: FavoritesStore
+  @EnvironmentObject private var app: AppModel
   @ObservedObject private var store = FollowingStore.shared
   @ObservedObject private var account = TwitchAccount.shared
   @State private var showLogin = false
   @State private var showOffline = true
 
   var body: some View {
-    RefreshableScrollView(refresh: { [store] in await store.refresh(force: true) }) {
-      LazyVStack(alignment: .leading, spacing: 0) {
-        if account.session == nil { signInCard }
-        if let error = store.error {
-          ErrorBanner(message: error) { Task { await store.refresh() } }
-        }
-        if store.loaded, store.live.isEmpty, store.offline.isEmpty, store.error == nil {
-          EmptyState(
-            systemImage: "heart", title: "Nobody here yet",
-            message: account.session == nil
-              ? "Sign in to see who you follow on Twitch, or tap the heart under a stream."
-              : "Channels you follow on Twitch show up here.")
-            .padding(.top, 40)
-        }
-        if !store.live.isEmpty {
-          header("Live", count: store.live.count)
-          ForEach(store.live) { stream in
-            StreamCard(stream: stream).padding(.bottom, 22)
-          }
-        }
-        if !store.offline.isEmpty {
-          Button {
-            withAnimation(.easeInOut(duration: 0.2)) { showOffline.toggle() }
-          } label: {
-            HStack {
-              header("Offline", count: store.offline.count)
-              Spacer()
-              Image(systemName: "chevron.down").rotationEffect(.degrees(showOffline ? 0 : -90)).foregroundColor(.secondary)
-            }
-          }
-          .buttonStyle(.plain)
-          if showOffline {
-            ForEach(store.offline) { entry in
-              NavigationLink(value: entry.channel) {
-                ChannelRow(channel: entry.channel, subtitle: entry.lastLive.map { "Last live \(Format.relative($0))" })
-                  .opacity(0.85)
-              }
-              .buttonStyle(.plain)
-              .padding(.vertical, 6)
-            }
-          }
-        }
-        if store.isLoading && !store.loaded {
-          ProgressView().frame(maxWidth: .infinity).padding(40)
+    FeedList(refresh: { [store] in await store.refresh(force: true) }) {
+      if account.session == nil { signInCard.feedRow(top: 8) }
+      if let error = store.error {
+        ErrorBanner(message: error) { Task { await store.refresh() } }.feedRow()
+      }
+      if store.loaded, store.live.isEmpty, store.offline.isEmpty, store.error == nil {
+        EmptyState(
+          systemImage: "heart", title: "Nobody here yet",
+          message: account.session == nil
+            ? "Sign in to see who you follow on Twitch, or tap the heart under a stream."
+            : "Channels you follow on Twitch show up here.")
+          .padding(.top, 40)
+          .feedRow()
+      }
+      if !store.live.isEmpty {
+        header("Live", count: store.live.count).feedRow(top: 10, bottom: 4)
+        ForEach(store.live) { stream in
+          StreamRow(stream: stream).feedRow(top: 7, bottom: 7)
         }
       }
-      .padding(.horizontal)
-      .padding(.bottom)
+      if !store.offline.isEmpty {
+        Button {
+          withAnimation(.easeInOut(duration: 0.25)) { showOffline.toggle() }
+        } label: {
+          HStack {
+            header("Offline", count: store.offline.count)
+            Spacer()
+            Image(systemName: "chevron.down").rotationEffect(.degrees(showOffline ? 0 : -90)).foregroundColor(.secondary)
+          }
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .feedRow(top: 14, bottom: 4)
+        if showOffline {
+          ForEach(store.offline) { entry in
+            Button {
+              app.push(entry.channel)
+            } label: {
+              ChannelRow(channel: entry.channel, subtitle: entry.lastLive.map { "Last live \(Format.relative($0))" })
+                .opacity(0.85)
+            }
+            .buttonStyle(.plain)
+            .feedRow(top: 5, bottom: 5)
+          }
+        }
+      }
+      if store.isLoading && !store.loaded {
+        ProgressView().frame(maxWidth: .infinity).padding(40).feedRow()
+      }
     }
     .navigationTitle("Following")
     .task(id: refreshKey) { await store.refresh() }
@@ -371,8 +494,6 @@ struct FollowingView: View {
       Text(title).font(.title3.weight(.bold))
       Text("\(count)").font(.subheadline.weight(.semibold)).foregroundColor(.secondary)
     }
-    .padding(.top, 14)
-    .padding(.bottom, 10)
   }
 
   private var signInCard: some View {
@@ -392,6 +513,5 @@ struct FollowingView: View {
       .background(Color(white: 0.11), in: RoundedRectangle(cornerRadius: 12))
     }
     .buttonStyle(.plain)
-    .padding(.top, 8)
   }
 }

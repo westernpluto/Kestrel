@@ -43,11 +43,11 @@ struct EmoteTextField: UIViewRepresentable {
     view.tintColor = UIColor(red: 0.16, green: 0.78, blue: 0.72, alpha: 1)
     view.textContainerInset = UIEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
     view.textContainer.lineFragmentPadding = 0
-    view.autocorrectionType = .no
-    view.autocapitalizationType = .none
+    view.autocorrectionType = .default
+    view.autocapitalizationType = .sentences
+    view.spellCheckingType = .default
     view.smartQuotesType = .no
     view.smartDashesType = .no
-    view.spellCheckingType = .no
     view.returnKeyType = .send
     view.enablesReturnKeyAutomatically = true
     view.keyboardAppearance = .dark
@@ -69,15 +69,22 @@ struct EmoteTextField: UIViewRepresentable {
     if coordinator.plain(of: view).text != text {
       coordinator.render(view, text: text, cursor: (text as NSString).length)
     }
-    if isFocused, enabled, !view.isFirstResponder, view.window != nil {
-      DispatchQueue.main.async { view.becomeFirstResponder() }
-    } else if !isFocused, view.isFirstResponder {
-      DispatchQueue.main.async { view.resignFirstResponder() }
+    // Only act when the request changes: re-applying a stale "focused" brought the keyboard back
+    // right after something else (a swipe, a tap outside) had put it away.
+    if isFocused != coordinator.appliedFocus {
+      coordinator.appliedFocus = isFocused
+      if isFocused, enabled, !view.isFirstResponder {
+        DispatchQueue.main.async { if view.window != nil { view.becomeFirstResponder() } }
+      } else if !isFocused, view.isFirstResponder {
+        DispatchQueue.main.async { view.resignFirstResponder() }
+      }
     }
   }
 
   final class Coordinator: NSObject, UITextViewDelegate {
     var parent: EmoteTextField
+    /// The focus last asked for (from SwiftUI or by the text view itself).
+    var appliedFocus = false
     private var updating = false
 
     static var attributes: [NSAttributedString.Key: Any] {
@@ -90,17 +97,19 @@ struct EmoteTextField: UIViewRepresentable {
 
     // MARK: Plain text ↔ what's shown
 
-    /// The message as plain text, and where the cursor is in it.
-    func plain(of view: UITextView) -> (text: String, cursor: Int) {
+    /// The message as plain text, where the cursor is in it, and where emote pictures are shown.
+    func plain(of view: UITextView) -> (text: String, cursor: Int, emotes: [EmotePosition]) {
       let shown = view.attributedText ?? NSAttributedString()
       let string = shown.string as NSString
       let cursor = view.selectedRange.location
       let result = NSMutableString()
       var plainCursor: Int?
+      var emotes: [EmotePosition] = []
       shown.enumerateAttribute(.attachment, in: NSRange(location: 0, length: shown.length)) { value, range, _ in
         for index in range.location..<NSMaxRange(range) {
           if index == cursor { plainCursor = result.length }
           if let emote = value as? EmoteAttachment {
+            emotes.append(EmotePosition(offset: result.length, name: emote.name))
             result.append(emote.name)
           } else if value == nil {
             result.append(string.substring(with: NSRange(location: index, length: 1)))
@@ -108,7 +117,28 @@ struct EmoteTextField: UIViewRepresentable {
           // Any other attachment (a pasted picture) is dropped.
         }
       }
-      return (result as String, plainCursor ?? result.length)
+      return (result as String, plainCursor ?? result.length, emotes)
+    }
+
+    struct EmotePosition: Equatable {
+      var offset: Int
+      var name: String
+    }
+
+    /// Where pictures should be for `text`.
+    private func wantedEmotes(_ text: String) -> [EmotePosition] {
+      let emoteURL = parent.emoteURL
+      var offset = 0
+      var result: [EmotePosition] = []
+      for piece in EmoteText.pieces(text, cursor: 0, isEmote: { emoteURL($0) != nil }).pieces {
+        switch piece {
+        case .text(let string): offset += (string as NSString).length
+        case .emote(let name):
+          result.append(EmotePosition(offset: offset, name: name))
+          offset += (name as NSString).length
+        }
+      }
+      return result
     }
 
     /// Shows `text` with completed emote names as pictures; `cursor` is a position in `text`.
@@ -187,8 +217,9 @@ struct EmoteTextField: UIViewRepresentable {
     func textViewDidChange(_ textView: UITextView) {
       guard !updating, let view = textView as? EmoteTextView else { return }
       let current = plain(of: view)
-      // Mid-composition (e.g. a keyboard that builds characters): leave the text alone.
-      if view.markedTextRange == nil {
+      // Only redraw when a picture appears or goes (redrawing on every key stopped autocorrect and
+      // the suggestions working); never mid-composition.
+      if view.markedTextRange == nil, wantedEmotes(current.text) != current.emotes {
         render(view, text: current.text, cursor: current.cursor)
       } else {
         view.textChanged()
@@ -198,10 +229,12 @@ struct EmoteTextField: UIViewRepresentable {
     }
 
     func textViewDidBeginEditing(_ textView: UITextView) {
+      appliedFocus = true
       if !parent.isFocused { DispatchQueue.main.async { [weak self] in self?.parent.isFocused = true } }
     }
 
     func textViewDidEndEditing(_ textView: UITextView) {
+      appliedFocus = false
       if parent.isFocused { DispatchQueue.main.async { [weak self] in self?.parent.isFocused = false } }
     }
   }

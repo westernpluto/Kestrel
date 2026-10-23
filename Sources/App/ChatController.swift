@@ -408,7 +408,7 @@ final class ChatController: ObservableObject {
       messages[i].isDeleted = true
       changed = true
     }
-    if changed { onUpdate?(true) }
+    if changed { onUpdate?(false) }
   }
 
   private func enqueue(_ message: ChatMessage) {
@@ -459,6 +459,8 @@ struct RenderedMessage {
   var text: NSAttributedString
   var slots: [Slot]
   var highlighted: Bool
+  /// Pictures that weren't loaded yet when it was laid out (their width was a guess).
+  var waiting: [URL] = []
 }
 
 enum ChatRenderer {
@@ -483,9 +485,15 @@ enum ChatRenderer {
   }
 
   /// An invisible placeholder the size of the image; an image view is placed over it.
-  private static func slot(_ url: URL, height: CGFloat, font: UIFont, into text: NSMutableAttributedString, slots: inout [RenderedMessage.Slot]) {
+  private static func slot(
+    _ url: URL, height: CGFloat, font: UIFont, into text: NSMutableAttributedString, slots: inout [RenderedMessage.Slot],
+    waiting: inout [URL]
+  ) {
     let image = ImagePipeline.shared.cached(url, maxPixels: 112)
-    if image == nil { ImagePipeline.shared.load(url, maxPixels: 112) { _ in ChatImageEvents.imageArrived() } }
+    if image == nil {
+      waiting.append(url)
+      ImagePipeline.shared.load(url, maxPixels: 112) { _ in ChatImageEvents.imageArrived() }
+    }
     let ratio = image.map { $0.size.height > 0 ? min(4, $0.size.width / $0.size.height) : 1 } ?? 1
     let size = CGSize(width: (height * ratio).rounded(), height: height)
     let attachment = NSTextAttachment()
@@ -502,6 +510,7 @@ enum ChatRenderer {
     let bold = UIFont.systemFont(ofSize: fontSize, weight: .bold)
     let text = NSMutableAttributedString()
     var slots: [RenderedMessage.Slot] = []
+    var waiting: [URL] = []
     let paragraph = NSMutableParagraphStyle()
     paragraph.lineSpacing = 2
     let plain: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.label, .paragraphStyle: paragraph]
@@ -517,14 +526,14 @@ enum ChatRenderer {
     }
     for badge in message.badges {
       guard let info = badges[badge], let url = URL(string: info.imageURL) else { continue }
-      slot(url, height: (fontSize + 3).rounded(), font: font, into: text, slots: &slots)
+      slot(url, height: (fontSize + 3).rounded(), font: font, into: text, slots: &slots, waiting: &waiting)
       text.append(NSAttributedString(string: " ", attributes: plain))
     }
     let nameColor = color(message.color, fallbackSeed: message.login)
     text.append(NSAttributedString(string: message.displayName, attributes: [.font: bold, .foregroundColor: nameColor, .paragraphStyle: paragraph]))
     if message.isDeleted {
       text.append(NSAttributedString(string: ": <message deleted>", attributes: [.font: font, .foregroundColor: UIColor.tertiaryLabel, .paragraphStyle: paragraph]))
-      return RenderedMessage(text: text, slots: slots, highlighted: false)
+      return RenderedMessage(text: text, slots: slots, highlighted: false, waiting: waiting)
     }
     text.append(NSAttributedString(string: message.kind == .action ? " " : ": ", attributes: plain))
     var body = plain
@@ -532,15 +541,16 @@ enum ChatRenderer {
     for fragment in message.fragments(thirdParty: thirdParty) {
       switch fragment {
       case .text(let t): text.append(NSAttributedString(string: t, attributes: body))
-      case .emote(_, let url): slot(url, height: (fontSize * 1.75).rounded(), font: font, into: text, slots: &slots)
+      case .emote(_, let url): slot(url, height: (fontSize * 1.75).rounded(), font: font, into: text, slots: &slots, waiting: &waiting)
       }
     }
     let highlighted = message.systemText != nil || (me.map { message.mentions($0) } ?? false)
-    return RenderedMessage(text: text, slots: slots, highlighted: highlighted)
+    return RenderedMessage(text: text, slots: slots, highlighted: highlighted, waiting: waiting)
   }
 }
 
-/// Coalesces "an image finished loading" into one refresh per quarter second.
+/// Coalesces "an image finished loading" into one check per quarter second (only messages laid
+/// out before their pictures arrived are touched).
 enum ChatImageEvents {
   static let notification = Notification.Name("KestrelChatImageArrived")
   private static var scheduled = false
@@ -685,6 +695,10 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   private var lastHeight: CGFloat = 0
   private var following = true
   private var imageObserver: NSObjectProtocol?
+  /// Glides the list down to new messages frame by frame (an animated jump left blank space in
+  /// busy chats, since rows only appeared once it ended).
+  private var glide: CADisplayLink?
+  private var lastGlideFrame: CFTimeInterval = 0
   var onMention: ((String) -> Void)?
 
   init(chat: ChatController) {
@@ -703,9 +717,21 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     tableView.delegate = self
     tableView.register(ChatCell.self, forCellReuseIdentifier: "chat")
     tableView.keyboardDismissMode = .onDrag
+    // Chat lays itself out (the panel already keeps clear of the Dynamic Island): without these the
+    // list added the screen's side margin again, leaving an empty strip beside the text.
+    tableView.insetsContentViewsToSafeArea = false
+    tableView.contentInsetAdjustmentBehavior = .never
+    tableView.cellLayoutMarginsFollowReadableWidth = false
+    // Every row's height up front (they're cached), so "the bottom" is always exact.
+    tableView.estimatedRowHeight = 0
     tableView.showsVerticalScrollIndicator = false
     tableView.translatesAutoresizingMaskIntoConstraints = false
     view.addSubview(tableView)
+    // A tap anywhere in chat (between messages too) puts the keyboard away; rows and menus still
+    // get their touches.
+    let tap = UITapGestureRecognizer(target: self, action: #selector(tappedChat))
+    tap.cancelsTouchesInView = false
+    tableView.addGestureRecognizer(tap)
 
     var configuration = UIButton.Configuration.filled()
     configuration.title = "More messages"
@@ -734,13 +760,18 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     imageObserver = NotificationCenter.default.addObserver(
       forName: ChatImageEvents.notification, object: nil, queue: .main
     ) { [weak self] _ in
-      self?.chatUpdated(fullReload: true)
+      self?.imagesArrived()
     }
     chatUpdated(fullReload: true)
   }
 
   deinit {
     if let imageObserver { NotificationCenter.default.removeObserver(imageObserver) }
+  }
+
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    stopGlide()
   }
 
   override func viewDidLayoutSubviews() {
@@ -789,10 +820,13 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     // glide down instead of reloading the list (which made chat jump).
     if !fullReload, tableView.window != nil, let first = new.first, let start = old.firstIndex(where: { $0.id == first.id }),
       old.count - start <= new.count,
-      zip(old[start...], new).allSatisfy({ $0.id == $1.id && $0.isDeleted == $1.isDeleted })
+      zip(old[start...], new).allSatisfy({ $0.id == $1.id })
     {
       let added = new.count - (old.count - start)
-      guard start > 0 || added > 0 else { return }
+      // Messages removed by moderators since: just those rows are redrawn (rows as numbered
+      // before the update).
+      let deleted = zip(old[start...], new).enumerated().compactMap { $0.element.0.isDeleted != $0.element.1.isDeleted ? $0.offset + start : nil }
+      guard start > 0 || added > 0 || !deleted.isEmpty else { return }
       // Measured before the data changes: where the first remaining row sits now (UIKit's own
       // figure, estimated or not) is exactly how far everything moves up.
       let removedHeight = start > 0 ? tableView.rectForRow(at: IndexPath(row: start, section: 0)).minY : 0
@@ -800,6 +834,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
       UIView.performWithoutAnimation {
         tableView.performBatchUpdates {
           if start > 0 { tableView.deleteRows(at: (0..<start).map { IndexPath(row: $0, section: 0) }, with: .none) }
+          if !deleted.isEmpty { tableView.reloadRows(at: deleted.map { IndexPath(row: $0, section: 0) }, with: .none) }
           if added > 0 {
             tableView.insertRows(at: ((new.count - added)..<new.count).map { IndexPath(row: $0, section: 0) }, with: .none)
           }
@@ -823,19 +858,101 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     heights = heights.filter { live.contains($0.key) }
   }
 
+  /// Pictures finished loading: messages laid out before theirs arrived get their real widths.
+  /// Only those rows change (a full reload made busy chats flash and jump).
+  private func imagesArrived() {
+    var changed: [Int] = []
+    var heightChanged = false
+    var shiftAbove: CGFloat = 0
+    let firstVisible = tableView.indexPathsForVisibleRows?.first?.row ?? 0
+    let width = max(10, tableView.bounds.width - ChatCell.insets.left - ChatCell.insets.right)
+    for (row, message) in displayed.enumerated() {
+      let k = key(message)
+      guard let old = rendered[k], !old.waiting.isEmpty,
+        old.waiting.contains(where: { ImagePipeline.shared.cached($0, maxPixels: 112) != nil })
+      else { continue }
+      let fresh = ChatRenderer.render(
+        message, badges: chat.badges, thirdParty: chat.thirdParty, fontSize: AppSettings.shared.chatFontSize, me: chat.ownLogin)
+      rendered[k] = fresh
+      guard fresh.slots.map(\.size) != old.slots.map(\.size) else { continue }
+      changed.append(row)
+      if let oldHeight = heights[k] {
+        let height = ChatMessageView.height(of: fresh.text, width: width) + ChatCell.insets.top + ChatCell.insets.bottom
+        heights[k] = height
+        if abs(height - oldHeight) > 0.5 {
+          heightChanged = true
+          if row < firstVisible { shiftAbove += height - oldHeight }
+        }
+      }
+    }
+    guard !changed.isEmpty else { return }
+    for row in changed {
+      guard let cell = tableView.cellForRow(at: IndexPath(row: row, section: 0)) as? ChatCell,
+        let fresh = rendered[key(displayed[row])]
+      else { continue }
+      cell.messageView.show(fresh)
+    }
+    guard heightChanged else { return }
+    UIView.performWithoutAnimation {
+      tableView.performBatchUpdates(nil)
+      // Scrolled back through chat: what's on screen stays put while rows above it grow.
+      if !following, shiftAbove != 0 { tableView.contentOffset.y += shiftAbove }
+    }
+    if following { scrollToBottom(animated: true) }
+  }
+
+  private var bottomOffset: CGFloat {
+    max(
+      -tableView.adjustedContentInset.top,
+      tableView.contentSize.height - tableView.bounds.height + tableView.adjustedContentInset.bottom)
+  }
+
   private func scrollToBottom(animated: Bool) {
     guard !displayed.isEmpty else { return }
     tableView.layoutIfNeeded()
-    let bottom = max(
-      -tableView.adjustedContentInset.top,
-      tableView.contentSize.height - tableView.bounds.height + tableView.adjustedContentInset.bottom)
-    guard abs(tableView.contentOffset.y - bottom) > 0.5 else { return }
-    if animated {
-      UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]) {
-        self.tableView.contentOffset.y = bottom
-      }
-    } else {
+    let bottom = bottomOffset
+    let distance = bottom - tableView.contentOffset.y
+    guard abs(distance) > 0.5 else { return }
+    guard animated, tableView.window != nil else {
+      stopGlide()
       tableView.contentOffset.y = bottom
+      return
+    }
+    // A long way behind (a burst after seeking): skip most of it, glide the last stretch.
+    if distance > tableView.bounds.height * 1.5 { tableView.contentOffset.y = bottom - tableView.bounds.height * 0.5 }
+    startGlide()
+  }
+
+  private func startGlide() {
+    guard glide == nil else { return }
+    let link = CADisplayLink(target: GlideTarget(self), selector: #selector(GlideTarget.step(_:)))
+    if #available(iOS 15.0, *) { link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120) }
+    lastGlideFrame = 0
+    link.add(to: .main, forMode: .common)
+    glide = link
+  }
+
+  private func stopGlide() {
+    glide?.invalidate()
+    glide = nil
+  }
+
+  fileprivate func glideStep(_ link: CADisplayLink) {
+    guard following, !tableView.isDragging, !tableView.isDecelerating else {
+      stopGlide()
+      return
+    }
+    let dt = lastGlideFrame == 0 ? link.duration : max(0.001, link.timestamp - lastGlideFrame)
+    lastGlideFrame = link.timestamp
+    let bottom = bottomOffset
+    let remaining = bottom - tableView.contentOffset.y
+    // Eases out: most of the way in ~0.2 s, and catches up smoothly when more arrives meanwhile.
+    var step = remaining * CGFloat(1 - exp(-dt / 0.075))
+    if abs(step) < 0.35 { step = remaining }
+    tableView.contentOffset.y += step
+    if abs(bottom - tableView.contentOffset.y) < 0.5 {
+      tableView.contentOffset.y = bottom
+      stopGlide()
     }
   }
 
@@ -868,10 +985,14 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     return cell
   }
 
+  @objc private func tappedChat() {
+    view.window?.endEditing(true)
+  }
+
+  /// A tap on chat just puts the keyboard away (reply by holding a message instead).
   func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-    let message = displayed[indexPath.row]
-    guard !message.login.isEmpty, message.kind != .notice else { return }
-    onMention?(message.login)
+    tableView.deselectRow(at: indexPath, animated: false)
+    view.window?.endEditing(true)
   }
 
   func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint)
@@ -894,6 +1015,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
   func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
     following = false
+    stopGlide()
   }
 
   func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
@@ -907,6 +1029,23 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   private func checkBottom(_ scrollView: UIScrollView) {
     let bottom = scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
     if scrollView.contentOffset.y >= bottom - 30 { resume() }
+  }
+}
+
+/// Holds the chat list weakly for its display link (which keeps its target alive).
+private final class GlideTarget: NSObject {
+  weak var owner: ChatViewController?
+
+  init(_ owner: ChatViewController) {
+    self.owner = owner
+  }
+
+  @objc func step(_ link: CADisplayLink) {
+    guard let owner else {
+      link.invalidate()
+      return
+    }
+    owner.glideStep(link)
   }
 }
 

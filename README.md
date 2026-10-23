@@ -13,8 +13,11 @@ An iOS client for watching Twitch without ads, with low-latency playback, chat a
   - Tap the video for controls; they fade out on their own. The gear holds **Quality**, **Low latency** and **Video stats**.
   - **Gestures:** double-tap for full screen (in landscape: zoom to fill / fit); pinch to fill or fit; swipe up for full screen; pull the video down to shrink it into the **mini player** (it follows your finger); in landscape, swipe down to leave full screen and left/right to show or hide chat.
   - **Mini player:** keeps playing in the corner above the tab bar while you browse. Tap or drag it up to open, pause or close it with its buttons, or throw it aside to close.
+  - Tap the streamer's picture or name under the video to open their channel (the player shrinks into the mini player). The heart follows them.
+  - **Lock screen and Control Center:** title, channel and picture, play/pause, and for VODs the progress bar and 10-second skips, while it plays in the background.
+  - Tap anywhere outside the message box (the video, chat, the bar under the video) to put the keyboard away; shrinking the player puts it away too.
   - **Landscape:** the video only keeps clear of the Dynamic Island, and chat sits on the side away from it, so chat text runs to the screen edge (toggle with the chat button or a swipe, drag the line between them to resize). The player turns with the phone; the full-screen button holds landscape until you turn the phone.
-  - **Rewind live streams:** when the channel records a VOD of the broadcast (and it plays for you), a seek bar runs from the start of the stream to now. Drag back to watch from any point; tap LIVE or drag to the end to return. Channels without that VOD don't get the bar.
+  - **Rewind live streams:** when the channel records a VOD of the broadcast (and it plays for you), a seek bar runs from the start of the stream to now. Drag back to watch from any point; tap LIVE or drag to the end to return. Channels without that VOD don't get the bar. The live picture stays up until the VOD has a picture (and the other way round), and the VOD's playlist is fetched as soon as you touch the bar, so switching is quick and never flashes black.
   - **VOD seek previews:** dragging the seek bar shows a thumbnail of where you'll land (Twitch's storyboards), on VODs and live rewinds; the other controls step aside while you drag.
 - **VODs:**
   - Start at the beginning, or where you left off: positions are saved on the iPhone and, signed in, to your Twitch account the way Twitch's player does, so the website and apps resume at the same point. Channel video lists show how far you got.
@@ -25,23 +28,34 @@ An iOS client for watching Twitch without ads, with low-latency playback, chat a
   - Picture in Picture, AirPlay, background audio, tap LIVE to jump back to the live edge.
 - **Low latency:** the [Amazon IVS Player SDK](https://docs.aws.amazon.com/ivs/latest/LowLatencyUserGuide/player-ios.html) (the engine Twitch's own apps use) in Twitch's low-latency mode, usually a few seconds behind. Falls back to the Apple player (AVPlayer, ~8–12 s behind) if it can't play a stream. Only in builds made with the SDK (the GitHub Actions build downloads it). VODs use the Apple player.
 - **Highest quality, always:** the top rendition is picked and kept. Kestrel asks Twitch for every codec the iPhone decodes in hardware, so channels using Enhanced Broadcasting list their HEVC/AV1 1440p renditions; renditions the low-latency player can't decode appear as "· Apple player". Twitch only offers 1440p to some signed-in viewers in some regions.
+  - Through an ad-free server, Kestrel also checks what Twitch itself offers. If that's more (e.g. 1440p the server's anonymous copy doesn't have), it's listed in the quality menu as "· no ad-free server": picking it plays this stream straight from Twitch (Basic ad blocking, so ads are possible).
 - **Sign in with Twitch** (optional) on Twitch's own login page inside the app:
-  - **Chat as yourself**, with room-mode notices (slow, followers-only, sub-only); tap a name to mention it.
+  - **Chat as yourself**, with room-mode notices (slow, followers-only, sub-only); hold a message to reply to its sender. Autocorrect and spell check work in the message box.
   - **Emote picker** (smiley button): every emote you can use in this channel — the channel's sub and follower emotes you have, your other subs, Twitch's, and the channel's 7TV/BTTV/FFZ emotes — with Recent first.
   - **Autocomplete:** type `:` and a few letters for emotes, `@` for people in chat. Emotes show as pictures in the message box once typed (delete the picture to remove the emote).
-  - **Following** shows your Twitch follows, live channels first (sorted by viewers) and offline ones with when they were last live. Channels you heart in the player are added too.
-- **Chat:** Twitch, 7TV, BTTV and FFZ emotes (animated), badges, and recent messages when you join.
+  - **Following** shows your Twitch follows, live channels first (sorted by viewers) and offline ones with when they were last live.
+  - **Follow and unfollow on Twitch** with the heart (under the video and on channel pages). Twitch only accepts follows from its own website, so, like Xtra on Android, Kestrel opens twitch.tv invisibly once in a while to get the website's token. If Twitch still refuses, the channel goes in Kestrel's own Following list instead and you're told. Signed out, the heart only uses Kestrel's list.
+- **Chat:** Twitch, 7TV, BTTV and FFZ emotes (animated), badges, and recent messages when you join. New messages glide in frame by frame (busy chats and VOD replays included); only messages whose pictures arrive late are redrawn.
+- **Lists:** live channels as compact rows like Twitch's (small picture on the left; streamer, title, category and tags on the right), with the system's pull to refresh. Browse switches between Live and Categories with a swipe. Search keeps your recent searches (swipe one away, or Clear).
+- **iOS 26 look:** the main build uses the iOS 26 SDK, so the tab bar is the floating Liquid Glass bar (slide a finger along it to switch sections), with glass navigation bars and menus.
 - **Video stats:** a Twitch-style overlay with player, quality, codecs, resolution, frame rate, bitrate, bandwidth, buffer, latency, dropped frames, ad state and ad-blocking route.
 
 **Settings → Activity log** shows which ad-free server delivered each stream (and where Twitch thinks you are), ad breaks, player fallbacks, and image hosts that fail to load.
 
 ## Install
 
-Download `Kestrel.ipa` from the latest GitHub Actions run (**Actions → Build IPA → Artifacts**) and sideload it with your usual tool (SideStore, AltStore, Feather, TrollStore…). Requires iOS 16+.
+Download the IPA from the latest GitHub Actions run (**Actions → Build IPA → Artifacts**) and sideload it with your usual tool (SideStore, AltStore, Feather, TrollStore…). Requires iOS 16+.
+
+- **Kestrel-ipa**: the main build (Xcode, iOS 26 SDK: Liquid Glass on iOS 26).
+- **Kestrel-ipa-classic**: the same app built on Linux with the iOS 16.5 SDK (classic tab bar). Use it if the main build failed.
 
 ## Build
 
-**GitHub Actions** (no Mac needed): push to your repo. The `Build IPA` workflow installs a Linux iOS toolchain and the iOS 16.5 SDK, downloads the Amazon IVS Player SDK (pinned version, SHA-256 checked), runs `./build.sh`, and uploads the IPA. If the SDK can't be downloaded or linked, it builds without the low-latency player and flags a warning on the run.
+**GitHub Actions** (no Mac needed): push to your repo. The `Build IPA` workflow runs two builds side by side, each downloading the Amazon IVS Player SDK (pinned version, SHA-256 checked) and running `./build.sh`:
+- on a macOS runner with the newest Xcode (iOS 26 SDK) → `Kestrel-ipa`;
+- on Linux with a Swift 5.8 iOS toolchain and the iOS 16.5 SDK → `Kestrel-ipa-classic`.
+
+If the IVS SDK can't be downloaded or linked, a build goes ahead without the low-latency player and flags a warning on the run.
 
 **Locally:**
 - Linux: install the Theos iOS toolchain at `~/theos` (the same layout the workflow creates), then run `./build.sh`.
@@ -64,8 +78,8 @@ Download `Kestrel.ipa` from the latest GitHub Actions run (**Actions → Build I
 ## Limitations
 
 - The ad-free servers are run by third parties (PerfProd, Luminous). They see which channel you open, not your Twitch login; if none answers, Kestrel falls back to Basic ad blocking.
-- Streams fetched through an ad-free server are requested anonymously, so 1440p that Twitch reserves for signed-in viewers may not be listed there (channels you're subscribed to play straight from Twitch and keep it). Switch Ad blocking to Basic if you'd rather have it everywhere.
-- Following and unfollowing on Twitch itself isn't possible from Kestrel (Twitch requires its own app for that); the heart adds a channel to Kestrel's list.
+- Streams fetched through an ad-free server are requested anonymously, so 1440p that Twitch reserves for signed-in viewers may not be listed there (channels you're subscribed to play straight from Twitch and keep it). When Twitch offers more, the quality menu says so; or switch Ad blocking to Basic to always play straight from Twitch.
+- Following on Twitch depends on Twitch's website handing out its token to Kestrel's invisible page; Twitch can change that at any time (then the heart falls back to Kestrel's own list).
 - The Amazon IVS Player SDK isn't open source; it's distributed by AWS under its own terms and isn't included in this repository.
 
 ## Credits

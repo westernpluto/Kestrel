@@ -25,6 +25,9 @@ final class VODPlaylists: PlaylistSource, @unchecked Sendable {
   private let lock = NSLock()
   private var _isRecording = false
   private var _recordedSeconds: Double = 0
+  /// The last playlist served per rendition, reused for a little while (so a prefetch makes the
+  /// player's own request instant).
+  private var cache: [Int: (body: String, at: Date)] = [:]
 
   /// The upstream playlist had no end yet (the broadcast is still being recorded).
   var isRecording: Bool {
@@ -61,6 +64,7 @@ final class VODPlaylists: PlaylistSource, @unchecked Sendable {
 
   func mediaPlaylist(_ index: Int) async -> (status: Int, body: String) {
     guard index >= 0, index < variants.count, let url = URL(string: variants[index].uri) else { return (404, "") }
+    if let cached = cached(index, maxAge: 15) { return (200, cached) }
     var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
     request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
     guard let (data, response) = try? await http.data(for: request) else { return (502, "") }
@@ -70,7 +74,26 @@ final class VODPlaylists: PlaylistSource, @unchecked Sendable {
     let growing = Self.isGrowing(text)
     let rewritten = Self.rewrite(text, base: response.url ?? url, finish: true)
     note(recording: growing, seconds: Self.totalDuration(rewritten))
+    store(index, rewritten)
     return (200, rewritten)
+  }
+
+  /// Fetches a rendition's playlist ahead of time.
+  func prefetch(_ index: Int) async {
+    _ = await mediaPlaylist(index)
+  }
+
+  private func cached(_ index: Int, maxAge: TimeInterval) -> String? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let entry = cache[index], Date().timeIntervalSince(entry.at) < maxAge else { return nil }
+    return entry.body
+  }
+
+  private func store(_ index: Int, _ body: String) {
+    lock.lock()
+    cache[index] = (body, Date())
+    lock.unlock()
   }
 
   private func note(recording: Bool, seconds: Double) {

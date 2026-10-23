@@ -992,17 +992,27 @@ func testVODPlaylists() {
   // Served through the local server.
   final class Upstream: HTTPClient, @unchecked Sendable {
     let body: String
+    private let lock = NSLock()
+    private var _requests = 0
+    var requests: Int { lock.lock(); defer { lock.unlock() }; return _requests }
     init(_ body: String) { self.body = body }
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-      (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: [:])!)
+      lock.lock()
+      _requests += 1
+      lock.unlock()
+      return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: [:])!)
     }
   }
   let variant = HLSVariant(
     uri: base.absoluteString, bandwidth: 6_000_000, width: 1920, height: 1080, frameRate: 60, codecs: "avc1.64002A,mp4a.40.2",
     name: "1080p60", isAudioOnly: false, isPortrait: false)
-  let source = VODPlaylists(variants: [variant], http: Upstream(upstream))
+  let counter = Upstream(upstream)
+  let source = VODPlaylists(variants: [variant], http: counter)
   runAsync {
+    // Fetched ahead (when the seek bar is touched): the player's own request is then instant.
+    await source.prefetch(0)
     let media = await source.mediaPlaylist(0)
+    check(counter.requests == 1, "prefetched playlist reused: \(counter.requests) requests")
     check(media.status == 200 && media.body.contains("0-muted.ts"), "served media playlist")
     // Still recording: served as a finished VOD of what's there so far.
     check(media.body.contains("#EXT-X-PLAYLIST-TYPE:VOD") && !media.body.contains("EVENT"), "VOD type: \(media.body)")
@@ -1011,6 +1021,19 @@ func testVODPlaylists() {
     let master = await source.masterPlaylist(only: nil)
     check(master.contains("RESOLUTION=1920x1080") && master.contains("v/0.m3u8"), master)
   }
+}
+
+func testStreamTags() {
+  let json = """
+    {"id":"s1","viewersCount":1234,"previewImageURL":"https://x/{width}x{height}.jpg","createdAt":"2026-10-22T01:02:03Z",
+     "game":{"id":"g","displayName":"Just Chatting"},
+     "broadcaster":{"id":"1","login":"someone","displayName":"Someone","broadcastSettings":{"title":"Hello"}},
+     "freeformTags":[{"name":"English"},{"name":"Chill"}]}
+    """
+  let stream = TwitchAPI.stream(JSONValue(try! JSONSerialization.jsonObject(with: Data(json.utf8))))
+  check(stream?.tags == ["English", "Chill"] && stream?.title == "Hello" && stream?.category?.name == "Just Chatting", "tags parsed")
+  let untagged = TwitchAPI.stream(JSONValue(try! JSONSerialization.jsonObject(with: Data(#"{"broadcaster":{"id":"1","login":"a"}}"#.utf8))))
+  check(untagged?.tags == [], "no tags")
 }
 
 func testVODComments() {
@@ -1060,6 +1083,7 @@ func testAdFreeProxy() {
 testAdFreeProxy()
 testVODPlaylists()
 testVODComments()
+testStreamTags()
 testAccountRoute()
 testStoryboard()
 testTokenInfo()

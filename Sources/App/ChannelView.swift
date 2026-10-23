@@ -41,29 +41,28 @@ struct ChannelView: View {
   private var current: Channel { model.page?.channel ?? channel }
 
   var body: some View {
-    RefreshableScrollView(refresh: { [model] in await model.load() }) {
-      VStack(alignment: .leading, spacing: 16) {
-        header
-        if let stream = model.page?.stream {
-          VStack(alignment: .leading, spacing: 6) {
-            Text("Live now").font(.headline)
-            StreamCard(stream: stream)
-          }
-        } else if model.page != nil {
-          HStack {
-            Image(systemName: "moon.zzz").foregroundColor(.secondary)
-            Text(model.page?.lastBroadcast.map { "Offline · last live \(Format.relative($0))" } ?? "Offline")
-              .foregroundColor(.secondary)
-          }
-          .font(.subheadline)
+    FeedList(refresh: { [model] in await model.load() }) {
+      header.feedRow(top: 12, bottom: 8)
+      if let stream = model.page?.stream {
+        VStack(alignment: .leading, spacing: 6) {
+          Text("Live now").font(.headline)
+          StreamCard(stream: stream)
         }
-        if let description = model.page?.description, !description.isEmpty {
-          Text(description).font(.footnote).foregroundColor(.secondary)
+        .feedRow(top: 6, bottom: 10)
+      } else if model.page != nil {
+        HStack {
+          Image(systemName: "moon.zzz").foregroundColor(.secondary)
+          Text(model.page?.lastBroadcast.map { "Offline · last live \(Format.relative($0))" } ?? "Offline")
+            .foregroundColor(.secondary)
         }
-        if let error = model.error { ErrorBanner(message: error) { Task { await model.load() } } }
-        VideosSection(paginator: model.videos)
+        .font(.subheadline)
+        .feedRow()
       }
-      .padding()
+      if let description = model.page?.description, !description.isEmpty {
+        Text(description).font(.footnote).foregroundColor(.secondary).feedRow()
+      }
+      if let error = model.error { ErrorBanner(message: error) { Task { await model.load() } }.feedRow() }
+      VideoRows(paginator: model.videos)
     }
     .navigationTitle(current.name)
     .navigationBarTitleDisplayMode(.inline)
@@ -80,59 +79,52 @@ struct ChannelView: View {
         }
       }
       Spacer()
-      Button {
-        favorites.toggle(current)
-      } label: {
-        Image(systemName: favorites.contains(current) ? "heart.fill" : "heart")
-          .font(.title2)
-          .foregroundColor(favorites.contains(current) ? .liveRed : .primary)
-      }
-      .accessibilityLabel(favorites.contains(current) ? "Unfollow" : "Follow")
+      FollowButton(channel: current, font: .title2, tint: .primary)
     }
   }
 }
 
-struct VideosSection: View {
+/// A channel's videos as list rows (inside a FeedList).
+struct VideoRows: View {
   @ObservedObject var paginator: Paginator<Video>
   @EnvironmentObject private var app: AppModel
   @ObservedObject private var history = WatchHistory.shared
 
   var body: some View {
     if !paginator.items.isEmpty {
-      Text("Videos").font(.headline).padding(.top, 6)
+      Text("Videos").font(.headline).feedRow(top: 10, bottom: 2)
     }
-    LazyVStack(alignment: .leading, spacing: 14) {
-      ForEach(paginator.items) { video in
-        Button {
-          app.playing = .video(video)
-        } label: {
-          HStack(alignment: .top, spacing: 12) {
-            RemoteImage(url: TwitchAPI.image(video.previewURL, width: 320, height: 180))
-              .frame(width: 144, height: 81)
-              .overlay(alignment: .bottomTrailing) {
-                Text(Format.duration(video.lengthSeconds)).font(.caption2.monospacedDigit())
-                  .padding(.horizontal, 4).padding(.vertical, 1)
-                  .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 3)).foregroundColor(.white)
-                  .padding(.horizontal, 4).padding(.bottom, 7)
-              }
-              .overlay(alignment: .bottom) {
-                if let progress = history.progress(for: video) { WatchProgressBar(progress: progress) }
-              }
-              .clipShape(RoundedRectangle(cornerRadius: 8))
-            VStack(alignment: .leading, spacing: 3) {
-              Text(video.title).font(.subheadline.weight(.semibold)).lineLimit(2)
-              Text([video.categoryName, Format.relative(video.createdAt)].compactMap { $0 }.joined(separator: " · "))
-                .font(.caption).foregroundColor(.secondary).lineLimit(1)
-              Text("\(Format.viewers(video.viewCount)) views").font(.caption).foregroundColor(.secondary)
+    ForEach(paginator.items) { video in
+      Button {
+        app.playing = .video(video)
+      } label: {
+        HStack(alignment: .top, spacing: 12) {
+          RemoteImage(url: TwitchAPI.image(video.previewURL, width: 320, height: 180))
+            .frame(width: 156, height: 88)
+            .overlay(alignment: .bottomTrailing) {
+              Text(Format.duration(video.lengthSeconds)).font(.caption2.monospacedDigit())
+                .padding(.horizontal, 4).padding(.vertical, 1)
+                .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 3)).foregroundColor(.white)
+                .padding(.horizontal, 4).padding(.bottom, 7)
             }
-            Spacer(minLength: 0)
+            .overlay(alignment: .bottom) {
+              if let progress = history.progress(for: video) { WatchProgressBar(progress: progress) }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+          VStack(alignment: .leading, spacing: 3) {
+            Text(video.title).font(.subheadline.weight(.semibold)).lineLimit(2).multilineTextAlignment(.leading)
+            Text([video.categoryName, Format.relative(video.createdAt)].compactMap { $0 }.joined(separator: " · "))
+              .font(.caption).foregroundColor(.secondary).lineLimit(1)
+            Text("\(Format.viewers(video.viewCount)) views").font(.caption).foregroundColor(.secondary)
           }
-          .contentShape(Rectangle())
+          Spacer(minLength: 0)
         }
-        .buttonStyle(.plain)
-        .onAppear { paginator.loadMoreIfNeeded(current: video) }
+        .contentShape(Rectangle())
       }
-      if paginator.isLoading { ProgressView().frame(maxWidth: .infinity).padding() }
+      .buttonStyle(PressableStyle(scale: 0.98))
+      .feedRow(top: 7, bottom: 7)
+      .onAppear { paginator.loadMoreIfNeeded(current: video) }
     }
+    if paginator.isLoading { ProgressView().frame(maxWidth: .infinity).padding().feedRow() }
   }
 }

@@ -57,6 +57,15 @@ final class PlayerModel: ObservableObject {
   /// Seconds since the broadcast started (the live edge on the seek bar).
   @Published private(set) var broadcastElapsed: Double = 0
   let rewindPlayer = AVPlayer()
+  /// The VOD is on screen (until then the paused live picture stays up, so going back in time
+  /// doesn't flash black).
+  @Published private(set) var rewindShowing = false
+  /// Back to live: the VOD's last picture stays up until the live stream plays again.
+  @Published private(set) var rewindLinger = false
+  private var lingerSince: Date?
+  private var rewindSeeking = false
+  /// A seek in a VOD is under way (playback state isn't read from the player meanwhile).
+  private var seeking = false
   weak var rewindPictureInPicture: AVPictureInPictureController? {
     didSet { observeRewindPictureInPicture() }
   }
@@ -108,8 +117,16 @@ final class PlayerModel: ObservableObject {
   private var stopped = false
   /// Twitch `supported_codecs` for this playback; steps down to H.264 if a codec won't play.
   private var codecs = AppSettings.shared.codecs
-  /// Rendition to start the Apple player on (when it took over for a 1440p stream).
-  private var preferredQualityLabel: String?
+  /// Rendition to start on (the Apple player taking over for a 1440p stream, or a quality picked
+  /// that only plays without the ad-free server).
+  private(set) var preferredQualityLabel: String?
+  /// Better renditions Twitch offers straight away than the ad-free server's copy has (it asks
+  /// anonymously, so e.g. 1440p for signed-in viewers can be missing).
+  @Published private(set) var directOnly: [HLSVariant] = []
+  /// Playing straight from Twitch for one of those, for this stream only (ads possible).
+  private(set) var forceDirect = false
+  private var checkedDirect = false
+  static let directQualityBase = 2000
   /// False once the user picked a player by hand: don't switch players behind their back.
   private(set) var mayAutoSwitchPlayer = true
 
@@ -136,6 +153,7 @@ final class PlayerModel: ObservableObject {
     #endif
     try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
     try? AVAudioSession.sharedInstance().setActive(true)
+    NowPlaying.shared.attach(self)
     switch target {
     case .live(let channel):
       self.channel = channel
@@ -173,7 +191,7 @@ final class PlayerModel: ObservableObject {
   private func startLive(_ channel: Channel) async {
     var config = AppSettings.shared.sessionConfig
     config.codecs = codecs
-    config.adFreeProxies = AppSettings.shared.adFreeProxyHosts
+    config.adFreeProxies = adFreeProxies
     config.checkAccountFirst = TwitchAuth.shared.session != nil
     let session = StreamSession(
       login: channel.login, config: config, http: AppSettings.shared.playbackClient(timeout: 8),
@@ -200,6 +218,7 @@ final class PlayerModel: ObservableObject {
       liveVariants = info.variants
       play(StreamProxy.shared.masterURL(for: session, quality: selectedQuality))
       phase = .playing
+      checkDirectQualities(served: info.variants)
     } catch StreamSession.StartError.offline {
       phase = .offline
     } catch {
@@ -337,10 +356,13 @@ final class PlayerModel: ObservableObject {
       if !isPaused { player.play() }
       return
     }
+    seeking = true
     player.seek(to: CMTime(seconds: start, preferredTimescale: 600), toleranceBefore: Self.seekTolerance, toleranceAfter: Self.seekTolerance) {
       [weak self] _ in
       Task { @MainActor in
-        guard let model = self, !model.stopped, !model.isPaused else { return }
+        guard let model = self else { return }
+        model.seeking = false
+        guard !model.stopped, !model.isPaused else { return }
         model.player.play()
       }
     }
@@ -388,7 +410,57 @@ final class PlayerModel: ObservableObject {
 
   /// The quality menu: the live stream's, or the VOD's while rewinding.
   var menuQualities: [Quality] {
-    isRewinding ? rewindVariants.enumerated().map { Quality(id: $0.offset, label: $0.element.label) } : qualities
+    if isRewinding { return rewindVariants.enumerated().map { Quality(id: $0.offset, label: $0.element.label) } }
+    guard !directOnly.isEmpty else { return qualities }
+    var list = qualities
+    let extra = directOnly.enumerated().map {
+      Quality(id: Self.directQualityBase + $0.offset, label: "\($0.element.label) · no ad-free server")
+    }
+    list.insert(contentsOf: extra, at: list.firstIndex { $0.id == nil } ?? list.count)
+    return list
+  }
+
+  /// The ad-free servers to use (none once a quality only Twitch itself offers was picked).
+  var adFreeProxies: [String] { forceDirect ? [] : AppSettings.shared.adFreeProxyHosts }
+
+  /// Hands over the quality to start on (once).
+  func takePreferredQualityLabel() -> String? {
+    defer { preferredQualityLabel = nil }
+    return preferredQualityLabel
+  }
+
+  /// Played through an ad-free server: does Twitch itself offer a better quality? Then it's
+  /// listed in the quality menu, to play straight from Twitch at the viewer's choice.
+  func checkDirectQualities(served: [HLSVariant]) {
+    guard case .live(let channel) = target, !forceDirect, !checkedDirect, case .adFreeServer? = route else { return }
+    checkedDirect = true
+    let codecs = self.codecs
+    Task { [weak self] in
+      guard let token = try? await TwitchAPI.shared.streamToken(login: channel.login, playerType: "site", platform: "web")
+      else { return }
+      let url = Usher.live(login: channel.login, token: token, codecs: codecs, lowLatency: false)
+      guard let (data, response) = try? await URLSessionHTTPClient(timeout: 8).data(for: Usher.playlistRequest(url)),
+        response.statusCode == 200, let text = String(data: data, encoding: .utf8)
+      else { return }
+      let best = served.filter { !$0.isAudioOnly }.map(\.height).max() ?? 0
+      let better = HLSMaster.parse(text, base: response.url ?? url).videoVariants.filter { $0.height > best }
+      guard let model = self, !model.stopped, !better.isEmpty else { return }
+      model.directOnly = better
+      ActivityLog.shared.add(
+        "Twitch itself offers \(better.map(\.label).joined(separator: ", ")), which the ad-free server's copy doesn't: it's in the quality menu (plays without the ad-free server)")
+    }
+  }
+
+  /// Restarts this stream straight from Twitch on a rendition the ad-free server didn't have.
+  private func playDirect(_ variant: HLSVariant) {
+    guard case .live = target, !stopped else { return }
+    ActivityLog.shared.add("Playing \(variant.label) straight from Twitch for this stream (no ad-free server; ads possible)")
+    forceDirect = true
+    directOnly = []
+    preferredQualityLabel = variant.label
+    teardownPlayback()
+    phase = .loading
+    Task { await start() }
   }
 
   var menuSelectedQuality: Int? { isRewinding ? rewindQuality : selectedQuality }
@@ -398,6 +470,11 @@ final class PlayerModel: ObservableObject {
       guard let index = quality.id, index != rewindQuality, index < rewindVariants.count else { return }
       rewindQuality = index
       startRewindItem(at: rewindPosition)
+      return
+    }
+    if let id = quality.id, id >= Self.directQualityBase {
+      let offset = id - Self.directQualityBase
+      if offset < directOnly.count { playDirect(directOnly[offset]) }
       return
     }
     guard quality.id != selectedQuality else { return }
@@ -440,24 +517,25 @@ final class PlayerModel: ObservableObject {
   // MARK: - Controls (both players)
 
   func togglePause() {
+    setPaused(!isPaused)
+  }
+
+  /// Play or pause (the button, the lock screen, headphones).
+  func setPaused(_ paused: Bool) {
+    defer { NowPlaying.shared.update(self) }
     if isRewinding {
-      if rewindPlayer.timeControlStatus == .paused {
-        rewindPlayer.play()
-        isPaused = false
-      } else {
-        rewindPlayer.pause()
-        isPaused = true
-      }
+      if paused { rewindPlayer.pause() } else { rewindPlayer.play() }
+      isPaused = paused
       return
     }
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
-        lowLatency.togglePause()
+        if lowLatency.isPaused != paused { lowLatency.togglePause() }
         isPaused = lowLatency.isPaused
         return
       }
     #endif
-    if player.timeControlStatus == .paused {
+    if !paused {
       if isLive { goLive() } else { player.play() }
       isPaused = false
     } else {
@@ -466,6 +544,26 @@ final class PlayerModel: ObservableObject {
       if case .video(let video) = target {
         WatchHistory.shared.save(videoID: video.id, position: position, length: duration, syncToTwitch: true)
       }
+    }
+  }
+
+  /// The lock screen's progress bar.
+  func seekFromRemote(to seconds: Double) {
+    if isLive {
+      if rewind != nil { seekBroadcast(to: seconds) }
+    } else {
+      seek(to: min(max(0, seconds), max(0, duration - 1)))
+    }
+  }
+
+  /// The lock screen's skip buttons.
+  func skip(by seconds: Double) {
+    if isRewinding {
+      seekBroadcast(to: rewindPosition + seconds)
+    } else if isLive {
+      if seconds < 0, rewind != nil { seekBroadcast(to: broadcastElapsed - 30 + seconds) }
+    } else {
+      seek(to: min(max(0, position + seconds), max(0, duration - 1)))
     }
   }
 
@@ -529,7 +627,15 @@ final class PlayerModel: ObservableObject {
   func seek(to seconds: Double) {
     position = seconds
     resumedAt = nil
-    player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    seeking = true
+    player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: Self.seekTolerance, toleranceAfter: Self.seekTolerance) {
+      [weak self] _ in
+      Task { @MainActor in
+        guard let model = self else { return }
+        model.seeking = false
+        if !model.isPaused { model.player.play() }
+      }
+    }
     if case .video(let video) = target { WatchHistory.shared.save(videoID: video.id, position: seconds, length: duration, syncToTwitch: false) }
   }
 
@@ -587,6 +693,7 @@ final class PlayerModel: ObservableObject {
       WatchHistory.shared.save(videoID: video.id, position: position, length: duration, syncToTwitch: true)
     }
     if let rewindSource { StreamProxy.shared.remove(rewindSource.id) }
+    NowPlaying.shared.detach(self)
     stopped = true
     timer?.invalidate()
     timer = nil
@@ -635,6 +742,7 @@ final class PlayerModel: ObservableObject {
 
   private func tick() {
     let now = Date()
+    NowPlaying.shared.update(self)
     if isLive, now.timeIntervalSince(lastInfoRefresh) > 60 {
       lastInfoRefresh = now
       Task { await refreshInfo() }
@@ -644,6 +752,12 @@ final class PlayerModel: ObservableObject {
     if isRewinding {
       tickRewind()
       return
+    }
+    if rewindLinger, let since = lingerSince {
+      // Live is playing again (or it's taking too long): let the VOD's picture go.
+      if (!isBuffering && phase == .playing && now.timeIntervalSince(since) > 0.4) || now.timeIntervalSince(since) > 5 {
+        withAnimation(.easeInOut(duration: 0.25)) { endRewindLinger() }
+      }
     }
     let wantsStats = AppSettings.shared.showVideoStats
     if !wantsStats, !stats.isEmpty { stats = [] }
@@ -657,8 +771,12 @@ final class PlayerModel: ObservableObject {
       }
     #endif
     if wantsStats { stats = appleStats() }
-    let paused = player.timeControlStatus == .paused && phase == .playing
-    if paused != isPaused { isPaused = paused }
+    // Only once the item is ready and not mid-start or mid-seek: before that the player reports
+    // "paused" while it loads, which used to stop VODs from ever starting.
+    if pendingStart == nil, !seeking, player.currentItem?.status == .readyToPlay, phase == .playing {
+      let paused = player.timeControlStatus == .paused
+      if paused != isPaused { isPaused = paused }
+    }
     if !isLive, let item = player.currentItem {
       let seconds = item.duration.seconds
       if seconds.isFinite, seconds > 0, abs(seconds - duration) > 0.5 { duration = seconds }
@@ -763,6 +881,7 @@ final class PlayerModel: ObservableObject {
       let source = VODPlaylists(variants: rewindVariants, http: URLSessionHTTPClient(timeout: 10))
       _ = try? StreamProxy.shared.register(source)
       rewindSource = source
+      Task.detached { await source.prefetch(0) }
       broadcastElapsed = max(0, Date().timeIntervalSince(archive.startedAt))
       rewind = archive
       ActivityLog.shared.add("Rewind available: the VOD of this broadcast is being recorded")
@@ -783,13 +902,22 @@ final class PlayerModel: ObservableObject {
     if isRewinding, let item = rewindPlayer.currentItem, item.status == .readyToPlay,
       item.duration.seconds.isFinite, target < item.duration.seconds - 10
     {
-      rewindPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: Self.seekTolerance, toleranceAfter: Self.seekTolerance)
-      if !isPaused { rewindPlayer.play() }
+      rewindSeeking = true
+      rewindPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: Self.seekTolerance, toleranceAfter: Self.seekTolerance) {
+        [weak self] _ in
+        Task { @MainActor in
+          guard let model = self, model.isRewinding else { return }
+          model.rewindSeeking = false
+          if !model.isPaused { model.rewindPlayer.play() }
+        }
+      }
       return
     }
     if !isRewinding {
+      if rewindLinger { endRewindLinger(release: false) }
       isRewinding = true
       isPaused = false
+      rewindShowing = false
       suspendLive()
       ActivityLog.shared.add("Rewinding: playing this broadcast's VOD")
     }
@@ -824,11 +952,13 @@ final class PlayerModel: ObservableObject {
         if !isPaused { rewindPlayer.play() }
         return
       }
+      rewindSeeking = true
       rewindPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: Self.seekTolerance, toleranceAfter: Self.seekTolerance) {
         [weak self] _ in
         Task { @MainActor in
-          guard let model = self, model.isRewinding, !model.isPaused else { return }
-          model.rewindPlayer.play()
+          guard let model = self, model.isRewinding else { return }
+          model.rewindSeeking = false
+          if !model.isPaused { model.rewindPlayer.play() }
         }
       }
     case .failed:
@@ -842,7 +972,15 @@ final class PlayerModel: ObservableObject {
   /// Back to the live stream at the live edge.
   func returnToLive() {
     guard isRewinding else { return }
-    stopRewindPlayback()
+    // Keep the VOD's picture up (paused) until the live stream is playing again.
+    isRewinding = false
+    rewindPendingSeek = nil
+    rewindSeeking = false
+    rewindItemObservation = nil
+    rewindPlayer.pause()
+    rewindLinger = rewindShowing
+    lingerSince = Date()
+    isBuffering = true
     isPaused = false
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
@@ -856,9 +994,26 @@ final class PlayerModel: ObservableObject {
   private func stopRewindPlayback() {
     isRewinding = false
     rewindPendingSeek = nil
+    rewindSeeking = false
     rewindItemObservation = nil
     rewindPlayer.pause()
     rewindPlayer.replaceCurrentItem(with: nil)
+    rewindShowing = false
+    rewindLinger = false
+  }
+
+  private func endRewindLinger(release: Bool = true) {
+    rewindLinger = false
+    rewindShowing = false
+    lingerSince = nil
+    if release, !isRewinding { rewindPlayer.replaceCurrentItem(with: nil) }
+  }
+
+  /// Gets the VOD's playlist ready before it's needed (the switch into rewinding is quicker).
+  func prepareRewind() {
+    guard let rewindSource else { return }
+    let index = rewindQuality
+    Task.detached { await rewindSource.prefetch(index) }
   }
 
   private func suspendLive() {
@@ -875,9 +1030,12 @@ final class PlayerModel: ObservableObject {
     let current = rewindPlayer.currentTime().seconds
     if current.isFinite, rewindPendingSeek == nil { rewindPosition = current }
     let status = rewindPlayer.timeControlStatus
-    let buffering = status == .waitingToPlayAtSpecifiedRate || rewindPendingSeek != nil
+    let buffering = status == .waitingToPlayAtSpecifiedRate || rewindPendingSeek != nil || rewindSeeking
     if buffering != isBuffering { isBuffering = buffering }
-    if !buffering, isPaused != (status == .paused) { isPaused = status == .paused }
+    if status == .playing, !rewindShowing { rewindShowing = true }
+    if !buffering, rewindPlayer.currentItem?.status == .readyToPlay, isPaused != (status == .paused) {
+      isPaused = status == .paused
+    }
     if pictureInPictureActive != (rewindPictureInPicture?.isPictureInPictureActive ?? false) {
       pictureInPictureActive = rewindPictureInPicture?.isPictureInPictureActive ?? false
     }

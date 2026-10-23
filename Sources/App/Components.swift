@@ -62,34 +62,33 @@ extension Error {
 func detachedRefresh(_ work: @escaping @MainActor () async -> Void) async {
   let started = Date()
   await Task { @MainActor in await work() }.value
-  // Let the new content lay out while the spinner is still there (ending the refresh while the
-  // list changes left a gap at the top), and don't snap back instantly on a quick refresh.
+  // A quick refresh still shows the spinner for a moment (snapping straight back looks broken).
   let elapsed = Date().timeIntervalSince(started)
-  try? await Task.sleep(nanoseconds: UInt64(max(0.2, 0.6 - elapsed) * 1_000_000_000))
+  if elapsed < 0.45 { try? await Task.sleep(nanoseconds: UInt64((0.45 - elapsed) * 1_000_000_000)) }
 }
 
-/// A scroll view with pull to refresh that always settles back at the top afterwards.
-struct RefreshableScrollView<Content: View>: View {
+/// A list of rows with the system's pull to refresh (the same spinner and spring-back as other
+/// apps; a SwiftUI scroll view's version stuttered and left gaps).
+struct FeedList<Content: View>: View {
   var refresh: @MainActor () async -> Void
   @ViewBuilder var content: () -> Content
-  private static var top: String { "refreshable-top" }
 
   var body: some View {
-    ScrollViewReader { proxy in
-      ScrollView {
-        VStack(spacing: 0) {
-          Color.clear.frame(height: 0).id(Self.top)
-          content()
-        }
-      }
-      .refreshable {
-        await detachedRefresh(refresh)
-        // If the list was left pulled down after the spinner went away, put it back.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-          withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(Self.top, anchor: .top) }
-        }
-      }
+    List {
+      content()
     }
+    .listStyle(.plain)
+    .environment(\.defaultMinListRowHeight, 1)
+    .refreshable { await detachedRefresh(refresh) }
+  }
+}
+
+extension View {
+  /// A row in a FeedList: no separator or highlight, with the usual margins.
+  func feedRow(top: CGFloat = 6, bottom: CGFloat = 6, horizontal: CGFloat = 16) -> some View {
+    listRowInsets(EdgeInsets(top: top, leading: horizontal, bottom: bottom, trailing: horizontal))
+      .listRowSeparator(.hidden)
+      .listRowBackground(Color.clear)
   }
 }
 
@@ -104,6 +103,130 @@ struct LiveBadge: View {
     .padding(.vertical, 3)
     .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 4))
     .foregroundColor(.white)
+  }
+}
+
+/// A live stream as a compact row, like Twitch's lists: the picture on the left, who and what on
+/// the right, with the stream's tags.
+struct StreamRow: View {
+  let stream: LiveStream
+  var showCategory = true
+  @EnvironmentObject private var app: AppModel
+
+  var body: some View {
+    HStack(alignment: .top, spacing: 12) {
+      Button {
+        app.playing = .live(stream.channel)
+      } label: {
+        RemoteImage(url: TwitchAPI.image(stream.previewImageURL, width: 440, height: 248))
+          .aspectRatio(16 / 9, contentMode: .fit)
+          .frame(width: 156)
+          .overlay(alignment: .topLeading) {
+            Text("LIVE").font(.system(size: 10, weight: .heavy)).foregroundColor(.white)
+              .padding(.horizontal, 4).padding(.vertical, 1)
+              .background(Color.liveRed, in: RoundedRectangle(cornerRadius: 3))
+              .padding(5)
+          }
+          .overlay(alignment: .bottomLeading) {
+            HStack(spacing: 3) {
+              Circle().fill(Color.liveRed).frame(width: 6, height: 6)
+              Text(Format.viewers(stream.viewers)).font(.caption2.weight(.semibold)).monospacedDigit()
+            }
+            .foregroundColor(.white)
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 3))
+            .padding(5)
+          }
+          .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+      }
+      .buttonStyle(PressableStyle(scale: 0.97))
+
+      VStack(alignment: .leading, spacing: 3) {
+        Button {
+          app.push(stream.channel)
+        } label: {
+          HStack(spacing: 6) {
+            Avatar(url: stream.channel.profileImageURL, size: 20)
+            Text(stream.channel.name).font(.subheadline.weight(.semibold)).lineLimit(1)
+          }
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        Button {
+          app.playing = .live(stream.channel)
+        } label: {
+          Text(stream.title.isEmpty ? stream.channel.name : stream.title)
+            .font(.footnote).foregroundColor(.secondary).lineLimit(2)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        if showCategory, let category = stream.category {
+          Button {
+            app.push(category)
+          } label: {
+            Text(category.name).font(.footnote).foregroundColor(.accentTeal).lineLimit(1)
+          }
+          .buttonStyle(.plain)
+        }
+        if !stream.tags.isEmpty {
+          ChipRow(spacing: 4) {
+            ForEach(stream.tags, id: \.self) { TagChip(text: $0) }
+          }
+          .padding(.top, 2)
+        }
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    .contextMenu {
+      Button { app.playing = .live(stream.channel) } label: { Label("Watch", systemImage: "play.fill") }
+      Button { app.push(stream.channel) } label: { Label("Open channel", systemImage: "person.crop.circle") }
+      if let category = stream.category {
+        Button { app.push(category) } label: { Label(category.name, systemImage: "square.grid.2x2") }
+      }
+    }
+  }
+}
+
+struct TagChip: View {
+  let text: String
+
+  var body: some View {
+    Text(text)
+      .font(.caption2.weight(.semibold))
+      .lineLimit(1)
+      .fixedSize()
+      .padding(.horizontal, 7)
+      .padding(.vertical, 3)
+      .background(Color(white: 0.17), in: Capsule())
+      .foregroundColor(Color(white: 0.82))
+  }
+}
+
+/// One line of chips: as many as fit, the rest left out (never a chip cut in half).
+struct ChipRow: Layout {
+  var spacing: CGFloat = 4
+
+  func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+    let natural = sizes.map(\.width).reduce(0, +) + spacing * CGFloat(max(0, sizes.count - 1))
+    return CGSize(width: min(proposal.width ?? natural, natural), height: sizes.map(\.height).max() ?? 0)
+  }
+
+  func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    var x = bounds.minX
+    var full = false
+    for subview in subviews {
+      let size = subview.sizeThatFits(.unspecified)
+      if !full, x + size.width <= bounds.maxX + 0.5 {
+        subview.place(at: CGPoint(x: x, y: bounds.minY), proposal: ProposedViewSize(size))
+        x += size.width + spacing
+      } else {
+        full = true
+        subview.place(at: CGPoint(x: bounds.minX - 10_000, y: bounds.minY), proposal: .zero)
+      }
+    }
   }
 }
 
@@ -130,26 +253,22 @@ struct StreamCard: View {
       }
       .buttonStyle(.plain)
 
-      HStack(alignment: .top, spacing: 10) {
-        NavigationLink(value: stream.channel) {
-          Avatar(url: stream.channel.profileImageURL, size: 36)
-        }
-        .buttonStyle(.plain)
-        VStack(alignment: .leading, spacing: 2) {
-          Text(stream.title.isEmpty ? stream.channel.name : stream.title)
-            .font(.subheadline.weight(.semibold)).lineLimit(2)
-          NavigationLink(value: stream.channel) {
-            Text(stream.channel.name).font(.footnote).foregroundColor(.secondary)
+      VStack(alignment: .leading, spacing: 4) {
+        Text(stream.title.isEmpty ? stream.channel.name : stream.title)
+          .font(.subheadline.weight(.semibold)).lineLimit(2)
+        if showCategory, let category = stream.category {
+          Button {
+            app.push(category)
+          } label: {
+            Text(category.name).font(.footnote).foregroundColor(.accentTeal)
           }
           .buttonStyle(.plain)
-          if showCategory, let category = stream.category {
-            NavigationLink(value: category) {
-              Text(category.name).font(.footnote).foregroundColor(.accentTeal)
-            }
-            .buttonStyle(.plain)
+        }
+        if !stream.tags.isEmpty {
+          ChipRow(spacing: 4) {
+            ForEach(stream.tags, id: \.self) { TagChip(text: $0) }
           }
         }
-        Spacer(minLength: 0)
       }
     }
   }
@@ -235,4 +354,50 @@ struct AppDestinations: ViewModifier {
 
 extension View {
   func appDestinations() -> some View { modifier(AppDestinations()) }
+}
+
+/// The heart: follows on Twitch when signed in (kept in sync with the account), otherwise adds the
+/// channel to Kestrel's own Following list.
+struct FollowButton: View {
+  let channel: Channel
+  var font: Font = .title3
+  var tint: Color = .white
+  @EnvironmentObject private var favorites: FavoritesStore
+  @ObservedObject private var following = FollowingStore.shared
+  @ObservedObject private var account = TwitchAccount.shared
+  @State private var confirming = false
+
+  private var onTwitch: Bool { following.twitchFollowIDs.contains(channel.id) }
+  private var hearted: Bool { onTwitch || favorites.contains(channel) }
+
+  var body: some View {
+    Button {
+      if account.session == nil {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { favorites.toggle(channel) }
+      } else if hearted {
+        confirming = true
+      } else {
+        Task { await following.setFollowed(channel, true) }
+      }
+    } label: {
+      Image(systemName: hearted ? "heart.fill" : "heart")
+        .font(font)
+        .foregroundColor(hearted ? .liveRed : tint)
+        .scaleEffect(hearted ? 1.1 : 1)
+        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: hearted)
+        .frame(minWidth: 36, minHeight: 36)
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(PressableStyle(scale: 0.8))
+    .accessibilityLabel(hearted ? "Unfollow" : "Follow")
+    .confirmationDialog("Unfollow \(channel.name)?", isPresented: $confirming, titleVisibility: .visible) {
+      Button("Unfollow", role: .destructive) {
+        if onTwitch {
+          Task { await following.setFollowed(channel, false) }
+        } else if favorites.contains(channel) {
+          favorites.toggle(channel)
+        }
+      }
+    }
+  }
 }

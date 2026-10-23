@@ -364,11 +364,13 @@ struct PlayerLayout: Equatable {
     }
   }
 
-  /// The mini player: a small floating video above the tab bar, bottom right.
-  static func mini(safe: CGSize) -> CGRect {
+  /// The mini player: a small floating video just above the tab bar, bottom right.
+  /// - Parameter tabBar: how much of the screen's bottom the tab bar covers.
+  static func mini(safe: CGSize, bottomInset: CGFloat, tabBar: CGFloat) -> CGRect {
     let width = (min(safe.width, 520) * 0.5).rounded()
     let height = (width * 9 / 16).rounded()
-    return CGRect(x: safe.width - width - 10, y: safe.height - 49 - height - 10, width: width, height: height)
+    let bottom = safe.height + bottomInset - max(tabBar, 49 + bottomInset) - 10
+    return CGRect(x: safe.width - width - 10, y: bottom - height, width: width, height: height)
   }
 
   /// Room to leave under scrolling content for the mini player.
@@ -430,7 +432,8 @@ struct PlayerScreen: View {
         safe: geometry.size, insets: insets, keyboard: keyboard.overlap, chatOpen: chatOpen,
         chatWidth: resizedWidth ?? screenWidth * chatShare,
         cameraOnLeft: landscape ? (InterfaceOrientationObserver.cameraOnLeftNow ?? orientation.cameraOnLeft) : nil)
-      let mini = PlayerLayout.mini(safe: geometry.size).offsetBy(dx: miniOffset.width, dy: miniOffset.height)
+      let mini = PlayerLayout.mini(safe: geometry.size, bottomInset: insets.bottom, tabBar: app.tabBarHeight)
+        .offsetBy(dx: miniOffset.width, dy: miniOffset.height)
       let video = lerp(layout.video, mini, progress)
       let pullDistance = max(240, mini.minY - layout.video.minY)
       let expandedOpacity = Double(max(0, 1 - progress * 2.2))

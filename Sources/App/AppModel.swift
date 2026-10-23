@@ -207,6 +207,11 @@ enum PlaybackTarget: Identifiable, Hashable {
   }
 }
 
+/// The app's sections (not `Tab`: that's a SwiftUI type in newer SDKs).
+enum AppTab: Hashable {
+  case following, browse, search, settings
+}
+
 final class AppModel: ObservableObject {
   static let shared = AppModel()
   /// What's playing. Setting it (even to what's already in the mini player) opens the player.
@@ -215,6 +220,30 @@ final class AppModel: ObservableObject {
   }
   /// The player is shrunk into the mini player above the tab bar.
   @Published var playerMinimized = false
+  @Published var tab: AppTab = .following
+  // Each section's pages (so the player can open a channel page in the one you're in).
+  @Published var followingPath = NavigationPath()
+  @Published var browsePath = NavigationPath()
+  @Published var searchPath = NavigationPath()
+  /// Height the tab bar takes up from the bottom of the screen (measured: it differs between
+  /// iOS versions; the floating glass bar of iOS 26 is taller).
+  @Published var tabBarHeight: CGFloat = 49
+
+  /// Shrinks the player and opens the channel's page in the current section.
+  func openChannel(_ channel: Channel) {
+    playerMinimized = true
+    if tab == .settings { tab = .following }
+    push(channel)
+  }
+
+  /// Opens a page (a channel, a category) in the current section.
+  func push<Value: Hashable>(_ value: Value) {
+    switch tab {
+    case .following: followingPath.append(value)
+    case .browse: browsePath.append(value)
+    case .search, .settings: searchPath.append(value)
+    }
+  }
 }
 
 // MARK: - Formatting

@@ -130,7 +130,7 @@
         config.codecs = codecs
         config.backupStreams = settings.backupStreams
         config.allowLowQualityBackup = settings.allowLowQualityBackup
-        config.adFreeProxies = settings.adFreeProxyHosts
+        config.adFreeProxies = model?.adFreeProxies ?? settings.adFreeProxyHosts
         config.checkAccountFirst = TwitchAuth.shared.session != nil
         let session = LowLatencySession(
           login: login, config: config, http: settings.playbackClient(timeout: 8), tokens: TwitchAPI.shared
@@ -149,6 +149,7 @@
         self.session = session
         route = await session.route
         model?.route = route
+        model?.checkDirectQualities(served: variants)
         upstream = variants.filter { !$0.isAudioOnly }.sorted {
           ($0.height, $0.frameRate, $0.codecRank, $0.bandwidth) > ($1.height, $1.frameRate, $1.codecRank, $1.bandwidth)
         }
@@ -272,6 +273,15 @@
         }
         + [PlayerModel.Quality(id: nil, label: "Auto")]
       if let chosen, chosen >= menuQualities.count { self.chosen = 0 }
+      // Restarted for a particular quality (one only Twitch itself offered).
+      if let label = model?.takePreferredQualityLabel() {
+        if let index = menuQualities.firstIndex(where: { Self.label($0) == label }) {
+          chosen = index
+        } else if applePlayerOnly.contains(where: { $0.label == label }) {
+          model?.switchToApplePlayer(quality: label, reason: "picked \(label)", automatic: false)
+          return
+        }
+      }
       model?.selectedQuality = chosen
       if !audioOnlyForBackground { applyChosen() }
     }

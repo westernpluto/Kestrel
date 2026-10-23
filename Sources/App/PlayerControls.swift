@@ -112,11 +112,12 @@ struct PlayerVideoArea: View {
       #else
         ApplePlayerSurface(model: model, fill: model.fillsScreen)
       #endif
-      // Rewinding: the broadcast's VOD plays on top; the live player stays underneath, paused.
+      // Rewinding: the broadcast's VOD plays on top once it has a picture; the live player stays
+      // underneath, paused on its last frame, so the switch never flashes black.
       if model.rewind != nil {
         ApplePlayerSurface(model: model, role: .rewind, fill: model.fillsScreen)
-          .opacity(model.isRewinding ? 1 : 0)
-          .animation(.easeInOut(duration: 0.2), value: model.isRewinding)
+          .opacity((model.isRewinding || model.rewindLinger) && model.rewindShowing ? 1 : 0)
+          .animation(.easeInOut(duration: 0.25), value: model.rewindShowing)
       }
     }
     .opacity(model.phase == .playing ? 1 : 0)
@@ -226,6 +227,8 @@ struct PlayerVideoArea: View {
   }
 
   private func toggleControls() {
+    // A tap on the video also puts the keyboard away.
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     if controlsVisible {
       hideTask?.cancel()
       controlsVisible = false
@@ -390,6 +393,7 @@ struct PlayerControls: View {
         onStart: {
           scrubbing = true
           model.refreshStoryboardIfStale()
+          model.prepareRewind()
         },
         onScrub: { _ in interacted(4) },
         onCommit: {
@@ -622,12 +626,37 @@ struct StoryboardThumbnail: UIViewRepresentable {
 struct StreamInfoBar: View {
   @ObservedObject var model: PlayerModel
   let target: PlaybackTarget
-  @EnvironmentObject private var favorites: FavoritesStore
-  @ObservedObject private var following = FollowingStore.shared
+  @EnvironmentObject private var app: AppModel
 
   var body: some View {
     HStack(alignment: .center, spacing: 10) {
-      Avatar(url: model.channel?.profileImageURL, size: 40)
+      // The streamer's picture and name open their channel page (the player shrinks).
+      Button {
+        if let channel = model.channel, !channel.login.isEmpty { app.openChannel(channel) }
+      } label: {
+        HStack(alignment: .center, spacing: 10) {
+          Avatar(url: model.channel?.profileImageURL, size: 40)
+          details
+        }
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(PressableStyle(scale: 0.97))
+      .accessibilityHint("Opens the channel")
+      Spacer(minLength: 4)
+      if let channel = model.channel, !channel.id.isEmpty {
+        FollowButton(channel: channel)
+      }
+    }
+    .padding(.horizontal, 12)
+    .frame(maxHeight: .infinity)
+    .contentShape(Rectangle())
+    // Tapping the bar's empty space puts the keyboard away, like anywhere outside the message box.
+    .onTapGesture {
+      UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+  }
+
+  private var details: some View {
       VStack(alignment: .leading, spacing: 2) {
         Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
         HStack(spacing: 4) {
@@ -650,27 +679,7 @@ struct StreamInfoBar: View {
         }
         .lineLimit(1)
       }
-      Spacer(minLength: 4)
-      if let channel = model.channel, !channel.id.isEmpty {
-        if following.twitchFollowIDs.contains(channel.id) {
-          Image(systemName: "heart.fill").font(.title3).foregroundColor(.accentTeal)
-            .accessibilityLabel("Following on Twitch")
-        } else {
-          Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { favorites.toggle(channel) }
-          } label: {
-            Image(systemName: favorites.contains(channel) ? "heart.fill" : "heart")
-              .font(.title3)
-              .foregroundColor(favorites.contains(channel) ? .liveRed : .white)
-              .scaleEffect(favorites.contains(channel) ? 1.1 : 1)
-          }
-          .buttonStyle(PressableStyle(scale: 0.8))
-          .accessibilityLabel(favorites.contains(channel) ? "Remove from Following" : "Add to Following")
-        }
-      }
-    }
-    .padding(.horizontal, 12)
-    .frame(maxHeight: .infinity)
+      .foregroundColor(.white)
   }
 
   private var title: String {
