@@ -669,7 +669,7 @@ func testLowLatencySession() {
   // tags, minus ad markers.
   runAsync {
     let fake = FakeTwitch()
-    fake.mainMarkers = 22..<30
+    fake.mainMarkers = 26..<34
     let box = UpdateBox()
     let session = LowLatencySession(login: "streamer", config: LowLatencyConfig(), http: fake, tokens: fake, log: ActivityLog()) {
       box.add($0)
@@ -679,12 +679,19 @@ func testLowLatencySession() {
     let master = await session.masterPlaylist(only: nil)
     check(master.contains("v/0.m3u8") && master.contains("v/3.m3u8") && !master.contains("v/4.m3u8"), "local master \(master)")
     check(master.contains("IVS-NAME=\"1080p60\"") && !master.contains("portrait"), "attributes kept, portrait gone")
-    let clean = await session.mediaPlaylist(0)
-    check(clean.status == 200 && clean.body.contains("#EXT-X-TWITCH-PREFETCH:https://edge.test/"), "prefetch kept: \(clean.body)")
-    check(!clean.body.contains("DATERANGE:ID=\"stitched"), "ad marker removed")
-    check(clean.body.contains("#EXTINF:2.000,live") && clean.body.contains("https://edge.test/"), "segments kept")
+    let normal = await session.mediaPlaylist(0)
+    check(normal.status == 200 && normal.body.contains("#EXT-X-TWITCH-PREFETCH:https://edge.test/"), "prefetch kept: \(normal.body)")
+    fake.advance(4)  // the announced break reaches the live edge
+    let announced = await session.mediaPlaylist(0)
+    check(!announced.body.contains("DATERANGE:ID=\"stitched"), "ad marker removed")
+    check(!announced.body.contains("TWITCH-PREFETCH"), "prefetch held back while an ad is announced")
+    check(announced.body.contains("#EXTINF:2.000,live") && announced.body.contains("https://edge.test/"), "segments kept")
     check(box.last?.state == .skipped, "client-side break shown as skipped: \(String(describing: box.last?.state))")
-    check(fake.tokenRequests == ["popout"], "no backup search for client-side ads")
+    let main = fake.mainToken!
+    check(!announced.body.contains("edge.test/tok") || announced.body.components(separatedBy: "\n").filter { $0.hasPrefix("https://edge.test/") }.allSatisfy { $0.hasPrefix("https://edge.test/\(main)-") }, "only the main stream served")
+    fake.advance(12)  // break over
+    let after = await session.mediaPlaylist(0)
+    check(after.body.contains("TWITCH-PREFETCH"), "prefetch back after the break")
   }
 
   // Stitched ad with an ad-free copy available: the copy's playlist is served.
@@ -703,7 +710,9 @@ func testLowLatencySession() {
       let result = await session.mediaPlaylist(0)
       check(result.status == 200, "status \(result.status) at \(step)")
       adSegments += result.body.components(separatedBy: "/ad-").count - 1
-      if let token = fake.token(for: "mobile_web"), result.body.contains("edge.test/\(token)-") {
+      let main = fake.mainToken ?? "?"
+      let segments = result.body.components(separatedBy: "\n").filter { $0.hasPrefix("https://edge.test/") }
+      if segments.contains(where: { !$0.hasPrefix("https://edge.test/\(main)-") }) {
         usedBackup = true
         check(result.body.contains("#EXT-X-TWITCH-PREFETCH:"), "copy keeps low latency")
       }
@@ -799,6 +808,54 @@ func testTokenInfo() {
   check(client.proxy?.description == "proxy.example:8080", "proxy client")
 }
 
+final class ProxyFake: HTTPClient, @unchecked Sendable {
+  let twitch: FakeTwitch
+  var requested: [String] = []
+  init(_ twitch: FakeTwitch) { self.twitch = twitch }
+  func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    let url = request.url!
+    requested.append(url.host ?? "")
+    if url.host == "down.test" { throw URLError(.timedOut) }
+    if url.host == "proxy.test" {
+      check(url.path == "/live/streamer" && url.query?.contains("allow_source=true") == true, "proxy URL \(url)")
+      // The proxy answers with an ad-free session's master playlist.
+      let token = try await twitch.streamToken(login: "streamer", playerType: "proxy", platform: "web")
+      let master = Usher.live(login: "streamer", token: token, codecs: "h264", lowLatency: true)
+      var (data, response) = try await twitch.data(for: URLRequest(url: master))
+      data = Data(("#EXTM3U\n#EXT-X-TWITCH-INFO:NODE=\"x\",USER-COUNTRY=\"RU\"\n" + String(decoding: data, as: UTF8.self).dropFirst(8)).utf8)
+      return (data, HTTPURLResponse(url: url, statusCode: response.statusCode, httpVersion: nil, headerFields: [:])!)
+    }
+    return try await twitch.data(for: request)
+  }
+}
+
+func testAdFreeProxy() {
+  let url = AdFreeProxy.masterURL(host: "eu.luminous.dev", login: "SomeOne", codecs: "h265,h264", lowLatency: true)!
+  check(url.absoluteString.hasPrefix("https://eu.luminous.dev/live/someone?") && url.query!.contains("fast_bread=true"), "\(url)")
+  check(AdFreeProxy.userCountry("#EXTM3U\n#EXT-X-TWITCH-INFO:NODE=\"a\",USER-COUNTRY=\"RU\",X=1\n") == "RU", "country")
+  check(AdFreeProxy.all.count == 12 && Set(AdFreeProxy.all.map(\.host)).count == 12, "presets")
+  // A dead proxy is skipped, the next one delivers, and the stream plays from that session.
+  runAsync {
+    let twitch = FakeTwitch()
+    twitch.mainAds = 0..<100  // the regular session would have ads
+    _ = try? await twitch.streamToken(login: "streamer", playerType: "popout", platform: "web")  // that session
+    let http = ProxyFake(twitch)
+    let log = ActivityLog()
+    var config = LowLatencyConfig()
+    config.adFreeProxies = ["down.test", "proxy.test"]
+    let session = LowLatencySession(login: "streamer", config: config, http: http, tokens: twitch, log: log)
+    _ = try! await session.start()
+    let host = await session.proxyHost
+    check(host == "proxy.test", "proxy used")
+    let media = await session.mediaPlaylist(0)
+    check(!media.body.contains("/ad-") && media.body.contains("edge.test/"), "proxied session has no ads")
+    check(log.messages.contains { $0.contains("proxy.test delivered the stream, Twitch sees RU") }, "\(log.messages)")
+    check(log.messages.contains { $0.contains("down.test didn't answer") }, "\(log.messages)")
+    check(twitch.tokenRequests == ["popout", "proxy"], "no regular token needed: \(twitch.tokenRequests)")
+  }
+}
+
+testAdFreeProxy()
 testTokenInfo()
 testDates()
 testMasterParsing()

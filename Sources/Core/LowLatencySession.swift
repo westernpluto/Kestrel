@@ -21,6 +21,8 @@ struct LowLatencyConfig: Sendable {
   var firstPollWait: TimeInterval = 1.5
   var searchDeadline: TimeInterval = 4
   var backupTokenLifetime: TimeInterval = 8 * 60
+  /// Ad-free playlist proxies to try first (see AdFreeProxy).
+  var adFreeProxies: [String] = []
 }
 
 struct LowLatencyUpdate: Sendable {
@@ -39,6 +41,8 @@ actor LowLatencySession: PlaylistSource {
   private let onUpdate: @Sendable (LowLatencyUpdate) -> Void
 
   private var masterText = ""
+  /// The ad-free proxy that delivered this stream, if any.
+  private(set) var proxyHost: String?
   /// Index i is served as `v/i.m3u8` (portrait renditions removed).
   private(set) var variants: [HLSVariant] = []
   private var lastServed: [Int: String] = [:]
@@ -76,14 +80,26 @@ actor LowLatencySession: PlaylistSource {
 
   /// Fetches the master playlist. Returns Twitch's renditions (landscape and audio only).
   func start() async throws -> [HLSVariant] {
-    let token = try await tokens.streamToken(login: login, playerType: config.mainPlayerType, platform: "web")
-    log.add(token.summary)
-    let url = Usher.live(login: login, token: token, codecs: config.codecs, lowLatency: true)
-    let (data, response) = try await http.data(for: Usher.playlistRequest(url))
-    guard response.statusCode == 200, HLS.looksLikePlaylist(data), let text = String(data: data, encoding: .utf8) else {
-      throw response.statusCode == 404 ? StreamSession.StartError.offline : StreamSession.StartError.usher(response.statusCode)
+    let text: String
+    let base: URL
+    if !config.adFreeProxies.isEmpty,
+      let proxied = await AdFreeProxy.fetchMaster(
+        login: login, codecs: config.codecs, lowLatency: true, hosts: config.adFreeProxies, http: http, log: log)
+    {
+      text = proxied.text
+      base = proxied.url
+      proxyHost = proxied.host
+    } else {
+      let token = try await tokens.streamToken(login: login, playerType: config.mainPlayerType, platform: "web")
+      log.add(token.summary)
+      let url = Usher.live(login: login, token: token, codecs: config.codecs, lowLatency: true)
+      let (data, response) = try await http.data(for: Usher.playlistRequest(url))
+      guard response.statusCode == 200, HLS.looksLikePlaylist(data), let body = String(data: data, encoding: .utf8) else {
+        throw response.statusCode == 404 ? StreamSession.StartError.offline : StreamSession.StartError.usher(response.statusCode)
+      }
+      text = body
+      base = response.url ?? url
     }
-    let base = response.url ?? url
     var lines: [String] = []
     var pending: HLSVariant?
     var pendingLine = ""
@@ -133,8 +149,13 @@ actor LowLatencySession: PlaylistSource {
 
     if main.playlist.isClean {
       if inBreak { endBreak() }
-      noteMarkers(main.playlist.adMarkerActive)
-      return serve(index, LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: false))
+      let marker = main.playlist.adMarkerActive
+      noteMarkers(marker)
+      if marker, config.backupStreams { prewarm(target: target) }
+      // While Twitch announces an ad break, hold back the segment it's still producing: if the ad
+      // gets stitched in, that segment would be ad video the player shows before Kestrel can
+      // tell (costs ~2 s of latency during the break, saves the ad flash).
+      return serve(index, LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: marker))
     }
 
     // Ad video stitched into the stream.
@@ -228,6 +249,27 @@ actor LowLatencySession: PlaylistSource {
     if config.allowLowQualityBackup { types.append("autoplay") }
     let usable = types.filter { !contaminated.contains($0) }
     return usable.isEmpty ? types : usable
+  }
+
+  private var prewarmTask: Task<Void, Never>?
+
+  /// Fetches ad-free-copy candidates ahead of a possible stitched ad, so the switch is instant.
+  private func prewarm(target: HLSVariant) {
+    guard prewarmTask == nil, backupMasters.isEmpty || backupMasters.values.allSatisfy({
+      Date().timeIntervalSince($0.fetchedAt) > config.backupTokenLifetime
+    })
+    else { return }
+    let types = playerTypes()
+    prewarmTask = Task { [weak self] in
+      guard let self else { return }
+      let results = await self.probeAll(types: types, target: target, cached: [:])
+      await self.storePrewarmed(results.values.compactMap(\.master))
+    }
+  }
+
+  private func storePrewarmed(_ masters: [StreamSession.BackupMaster]) {
+    prewarmTask = nil
+    for master in masters { backupMasters[master.type] = master }
   }
 
   private func startSearchIfNeeded(target: HLSVariant) {

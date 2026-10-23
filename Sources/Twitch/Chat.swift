@@ -136,6 +136,46 @@ struct ChatMessage: Identifiable, Equatable {
     }
   }
 
+  /// A message you sent: Twitch doesn't echo your own messages, so it's shown from your
+  /// USERSTATE (name, color, badges).
+  init(sent text: String, userState: [String: String], login: String) {
+    var body = text
+    var kind: Kind = .message
+    if body.hasPrefix("/me ") {
+      body = String(body.dropFirst(4))
+      kind = .action
+    }
+    id = "local-\(UUID().uuidString)"
+    self.kind = kind
+    self.login = login
+    displayName = userState["display-name"].flatMap { $0.isEmpty ? nil : $0 } ?? login
+    color = userState["color"].flatMap { $0.isEmpty ? nil : $0 }
+    badges = (userState["badges"] ?? "").split(separator: ",").map(String.init)
+    self.text = body
+    systemText = nil
+    emotes = []
+    timestamp = Date()
+  }
+
+  /// A line from Kestrel itself (connection state, chat rules).
+  init(notice text: String) {
+    id = "notice-\(UUID().uuidString)"
+    kind = .notice
+    login = ""
+    displayName = ""
+    color = nil
+    badges = []
+    self.text = text
+    systemText = nil
+    emotes = []
+    timestamp = Date()
+  }
+
+  /// Whether the message mentions `login` (for highlighting).
+  func mentions(_ login: String) -> Bool {
+    !login.isEmpty && text.range(of: "@\(login)", options: .caseInsensitive) != nil
+  }
+
   static func parseEmotes(_ tag: String) -> [(id: String, range: ClosedRange<Int>)] {
     var result: [(String, ClosedRange<Int>)] = []
     for entry in tag.split(separator: "/") {

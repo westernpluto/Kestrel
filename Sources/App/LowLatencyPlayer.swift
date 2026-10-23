@@ -46,6 +46,7 @@
     private var pausedForBackground = false
     private var notificationTokens: [NSObjectProtocol] = []
     private var localURL: URL?
+    private var proxyHost: String?
     private var lastReload = Date.distantPast
     private var bufferingSince: Date?
     private var framesDecoded = (count: 0, at: Date())
@@ -127,6 +128,7 @@
         config.codecs = codecs
         config.backupStreams = settings.backupStreams
         config.allowLowQualityBackup = settings.allowLowQualityBackup
+        config.adFreeProxies = TwitchAccount.shared.hasTurbo == true ? [] : settings.adFreeProxyHosts
         let session = LowLatencySession(
           login: login, config: config, http: settings.playbackClient(timeout: 8), tokens: TwitchAPI.shared
         ) { [weak self] update in
@@ -142,6 +144,7 @@
         guard !stopped, !Task.isCancelled else { return }
         if let old = self.session { StreamProxy.shared.remove(old.id) }
         self.session = session
+        proxyHost = await session.proxyHost
         upstream = variants.filter { !$0.isAudioOnly }.sorted {
           ($0.height, $0.frameRate, $0.codecRank, $0.bandwidth) > ($1.height, $1.frameRate, $1.codecRank, $1.bandwidth)
         }
@@ -257,10 +260,6 @@
         }
         ActivityLog.shared.add(message)
       }
-      if let best = applePlayerOnly.first, AppSettings.shared.highestQualityOverLatency, model?.mayAutoSwitchPlayer == true {
-        model?.switchToApplePlayer(quality: best.label, reason: "\(best.label) only plays in the Apple player", automatic: true)
-        return
-      }
 
       model?.qualities =
         menuQualities.enumerated().map { PlayerModel.Quality(id: $0.offset, label: Self.label($0.element)) }
@@ -372,7 +371,7 @@
       lines.append(StatLine(label: "Frames", value: "\(player.videoFramesDecoded) decoded · \(player.videoFramesDropped) dropped"))
       lines.append(StatLine(label: "Ads", value: adState.statsText))
       lines.append(StatLine(label: "Playlists", value: localURL == nil ? "Twitch direct (no ad filtering)" : "Kestrel filter"))
-      lines.append(StatLine(label: "Proxy", value: StatFormat.proxy()))
+      lines.append(StatLine(label: "Ad blocking", value: proxyHost.map { "ad-free server \($0)" } ?? AppSettings.shared.adBlockingSummary))
       lines.append(StatLine(label: "Account", value: TwitchAuth.shared.session?.login ?? "not signed in"))
       return lines
     }
@@ -394,6 +393,17 @@
     /// Reloads at the live edge.
     func goLive() {
       load()
+    }
+
+    /// Twitch's low-latency mode on or off (takes a quick reload).
+    func setLowLatency(_ enabled: Bool) {
+      player.setLiveLowLatencyEnabled(enabled)
+      lastReload = .distantPast
+      reload(reason: enabled ? "low latency on" : "low latency off")
+    }
+
+    func setFill(_ fill: Bool) {
+      view?.videoGravity = fill ? .resizeAspectFill : .resizeAspect
     }
 
     func togglePictureInPicture() {
@@ -503,69 +513,21 @@
 
   struct LowLatencyVideoView: UIViewRepresentable {
     let controller: LowLatencyController
+    var fill: Bool
 
     func makeUIView(context: Context) -> IVSPlayerView {
       let view = IVSPlayerView()
       view.backgroundColor = .black
-      view.videoGravity = .resizeAspect
+      view.videoGravity = fill ? .resizeAspectFill : .resizeAspect
       controller.attach(view)
       return view
     }
 
     func updateUIView(_ view: IVSPlayerView, context: Context) {
       controller.attach(view)
+      let gravity: AVLayerVideoGravity = fill ? .resizeAspectFill : .resizeAspect
+      if view.videoGravity != gravity { view.videoGravity = gravity }
     }
   }
 
-  /// The video plus minimal controls (the SDK's view has none): tap to show pause and PiP.
-  struct LowLatencySurface: View {
-    @ObservedObject var controller: LowLatencyController
-    @State private var controlsVisible = false
-    @State private var hideTask: Task<Void, Never>?
-
-    var body: some View {
-      ZStack {
-        LowLatencyVideoView(controller: controller)
-        Color.black.opacity(controlsVisible ? 0.35 : 0.001)
-          .contentShape(Rectangle())
-          .onTapGesture { toggleControls() }
-        if controlsVisible || controller.isPaused {
-          HStack(spacing: 36) {
-            Button {
-              controller.togglePause()
-              scheduleHide()
-            } label: {
-              Image(systemName: controller.isPaused ? "play.fill" : "pause.fill").font(.system(size: 30))
-            }
-            .accessibilityLabel(controller.isPaused ? "Play" : "Pause")
-            if AVPictureInPictureController.isPictureInPictureSupported() {
-              Button {
-                controller.togglePictureInPicture()
-                scheduleHide()
-              } label: {
-                Image(systemName: controller.pictureInPictureActive ? "pip.exit" : "pip.enter").font(.system(size: 24))
-              }
-              .accessibilityLabel("Picture in Picture")
-            }
-          }
-          .foregroundColor(.white)
-          .transition(.opacity)
-        }
-      }
-    }
-
-    private func toggleControls() {
-      withAnimation(.easeInOut(duration: 0.15)) { controlsVisible.toggle() }
-      if controlsVisible { scheduleHide() }
-    }
-
-    private func scheduleHide() {
-      hideTask?.cancel()
-      hideTask = Task {
-        try? await Task.sleep(nanoseconds: 3_000_000_000)
-        guard !Task.isCancelled else { return }
-        withAnimation(.easeInOut(duration: 0.2)) { controlsVisible = false }
-      }
-    }
-  }
 #endif

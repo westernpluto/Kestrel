@@ -3,25 +3,65 @@ import SwiftUI
 
 // MARK: - Settings
 
+/// How Kestrel keeps ads out.
+enum AdBlocking: Hashable {
+  /// Ad-free proxy servers, the best available one picked automatically.
+  case automatic
+  /// One specific ad-free proxy server.
+  case server(String)
+  /// The user's own HTTP proxy (in a country without Twitch ads).
+  case customProxy
+  /// No proxy: switch to an ad-free copy of the stream, else hide the ad.
+  case basic
+
+  init(stored: String?) {
+    switch stored {
+    case nil, "auto": self = .automatic
+    case "custom": self = .customProxy
+    case "off": self = .basic
+    case let value? where value.hasPrefix("server:"): self = .server(String(value.dropFirst(7)))
+    default: self = .automatic
+    }
+  }
+
+  var stored: String {
+    switch self {
+    case .automatic: return "auto"
+    case .server(let host): return "server:\(host)"
+    case .customProxy: return "custom"
+    case .basic: return "off"
+    }
+  }
+
+  var shortTitle: String {
+    switch self {
+    case .automatic: return "Automatic"
+    case .server: return "Ad-free server"
+    case .customProxy: return "Own proxy"
+    case .basic: return "Basic"
+    }
+  }
+
+  var title: String {
+    switch self {
+    case .automatic: return "Ad-free server (automatic)"
+    case .server(let host): return host
+    case .customProxy: return "My own proxy"
+    case .basic: return "Basic"
+    }
+  }
+}
+
 final class AppSettings: ObservableObject {
   static let shared = AppSettings()
   private let defaults = UserDefaults.standard
 
-  @Published var backupStreams: Bool { didSet { defaults.set(backupStreams, forKey: "backupStreams") } }
-  @Published var allowLowQualityBackup: Bool { didSet { defaults.set(allowLowQualityBackup, forKey: "allowLowQualityBackup") } }
-  @Published var adFallback: AdFallback { didSet { defaults.set(adFallback.rawValue, forKey: "adFallback") } }
   @Published var lowLatency: Bool { didSet { defaults.set(lowLatency, forKey: "lowLatency") } }
-  /// Ask for HEVC/AV1 renditions (1440p on Enhanced Broadcasting channels) when the device decodes them.
-  @Published var enhancedCodecs: Bool { didSet { defaults.set(enhancedCodecs, forKey: "enhancedCodecs") } }
+  @Published var adBlocking: AdBlocking { didSet { defaults.set(adBlocking.stored, forKey: "adBlocking"); applyProxy() } }
   @Published var backgroundAudio: Bool { didSet { defaults.set(backgroundAudio, forKey: "backgroundAudio") } }
-  /// Use the Apple player when a stream's best rendition (e.g. 1440p HEVC/AV1) is one the
-  /// low-latency player can't decode.
-  @Published var highestQualityOverLatency: Bool {
-    didSet { defaults.set(highestQualityOverLatency, forKey: "highestQualityOverLatency") }
-  }
-  @Published var playerEngine: PlayerEngine { didSet { defaults.set(playerEngine.rawValue, forKey: "playerEngine") } }
-  // Proxy for Twitch playback requests (tokens and playlists, not video).
-  @Published var proxyEnabled: Bool { didSet { defaults.set(proxyEnabled, forKey: "proxyEnabled"); applyProxy() } }
+  @Published var showVideoStats: Bool { didSet { defaults.set(showVideoStats, forKey: "showVideoStats") } }
+  @Published var chatFontSize: Double { didSet { defaults.set(chatFontSize, forKey: "chatFontSize") } }
+  // The user's own HTTP proxy (AdBlocking.customProxy).
   @Published var proxyHost: String { didSet { defaults.set(proxyHost, forKey: "proxyHost"); applyProxy() } }
   @Published var proxyPort: String { didSet { defaults.set(proxyPort, forKey: "proxyPort"); applyProxy() } }
   @Published var proxyUsername: String { didSet { defaults.set(proxyUsername, forKey: "proxyUsername"); applyProxy() } }
@@ -31,73 +71,82 @@ final class AppSettings: ObservableObject {
       applyProxy()
     }
   }
-  @Published var showVideoStats: Bool { didSet { defaults.set(showVideoStats, forKey: "showVideoStats") } }
-  @Published var chatEnabled: Bool { didSet { defaults.set(chatEnabled, forKey: "chatEnabled") } }
-  @Published var thirdPartyEmotes: Bool { didSet { defaults.set(thirdPartyEmotes, forKey: "thirdPartyEmotes") } }
-  @Published var chatTimestamps: Bool { didSet { defaults.set(chatTimestamps, forKey: "chatTimestamps") } }
-  @Published var chatFontSize: Double { didSet { defaults.set(chatFontSize, forKey: "chatFontSize") } }
+
+  // Fixed choices (no longer settings): always try an ad-free copy, 360p if that's all there is;
+  // ask for HEVC/AV1 when the device decodes them; 7TV/BTTV/FFZ emotes on.
+  let backupStreams = true
+  let allowLowQualityBackup = true
+  let thirdPartyEmotes = true
+  let chatTimestamps = false
+
+  private var initialized = false
 
   private init() {
     defaults.register(defaults: [
-      "backupStreams": true, "allowLowQualityBackup": true, "adFallback": AdFallback.muteAndCover.rawValue,
-      "lowLatency": true, "enhancedCodecs": true, "highestQualityOverLatency": false, "proxyEnabled": false,
-      "showVideoStats": false, "backgroundAudio": true, "chatEnabled": true,
-      "thirdPartyEmotes": true, "chatTimestamps": false, "chatFontSize": 15.0,
+      "lowLatency": true, "adBlocking": "auto", "backgroundAudio": true, "showVideoStats": false, "chatFontSize": 15.0,
     ])
-    backupStreams = defaults.bool(forKey: "backupStreams")
-    allowLowQualityBackup = defaults.bool(forKey: "allowLowQualityBackup")
-    adFallback = AdFallback(rawValue: defaults.string(forKey: "adFallback") ?? "") ?? .muteAndCover
     lowLatency = defaults.bool(forKey: "lowLatency")
-    enhancedCodecs = defaults.bool(forKey: "enhancedCodecs")
+    adBlocking = AdBlocking(stored: defaults.string(forKey: "adBlocking"))
     backgroundAudio = defaults.bool(forKey: "backgroundAudio")
-    highestQualityOverLatency = defaults.bool(forKey: "highestQualityOverLatency")
-    playerEngine = PlayerEngine.resolve(defaults.string(forKey: "playerEngine"))
-    proxyEnabled = defaults.bool(forKey: "proxyEnabled")
+    showVideoStats = defaults.bool(forKey: "showVideoStats")
+    chatFontSize = defaults.double(forKey: "chatFontSize")
     proxyHost = defaults.string(forKey: "proxyHost") ?? ""
     proxyPort = defaults.string(forKey: "proxyPort") ?? ""
     proxyUsername = defaults.string(forKey: "proxyUsername") ?? ""
     proxyPassword = SecretStore.get("proxy").flatMap { String(data: $0, encoding: .utf8) } ?? ""
-    showVideoStats = defaults.bool(forKey: "showVideoStats")
-    chatEnabled = defaults.bool(forKey: "chatEnabled")
-    thirdPartyEmotes = defaults.bool(forKey: "thirdPartyEmotes")
-    chatTimestamps = defaults.bool(forKey: "chatTimestamps")
-    chatFontSize = defaults.double(forKey: "chatFontSize")
     initialized = true
     applyProxy()
   }
 
-  /// The proxy for playback requests, when it's switched on and filled in.
+  /// Ad-free proxy servers to try for a stream, in order (none when they're off).
+  var adFreeProxyHosts: [String] {
+    switch adBlocking {
+    case .automatic: return AdFreeProxy.automaticHosts
+    case .server(let host): return [host] + AdFreeProxy.automaticHosts.filter { $0 != host }
+    case .customProxy, .basic: return []
+    }
+  }
+
+  /// The user's own proxy for playback requests, when chosen and filled in.
   var playbackProxy: HTTPProxy? {
     let host = proxyHost.trimmingCharacters(in: .whitespaces)
-    guard proxyEnabled, !host.isEmpty, let port = Int(proxyPort.trimmingCharacters(in: .whitespaces)), port > 0 else { return nil }
+    guard adBlocking == .customProxy, !host.isEmpty, let port = Int(proxyPort.trimmingCharacters(in: .whitespaces)), port > 0
+    else { return nil }
     return HTTPProxy(
       host: host, port: port, username: proxyUsername.isEmpty ? nil : proxyUsername,
       password: proxyPassword.isEmpty ? nil : proxyPassword)
   }
 
-  /// HTTP client for Twitch tokens and playlists (through the proxy when one is set).
+  /// HTTP client for Twitch tokens and playlists (through the user's proxy when one is set).
   func playbackClient(timeout: TimeInterval = 8) -> HTTPClient {
     URLSessionHTTPClient(timeout: timeout, proxy: playbackProxy)
   }
 
-  private var initialized = false
-
-  /// Playback tokens go through the proxy too: Twitch decides about ads by where the token
-  /// request comes from.
+  /// Playback tokens go through the user's proxy too: Twitch decides about ads by where the
+  /// token request comes from.
   func applyProxy() {
     guard initialized else { return }
     TwitchAPI.shared.playbackHTTP = playbackProxy.map { URLSessionHTTPClient(timeout: 12, proxy: $0) }
   }
 
-  /// Twitch's `supported_codecs` for new playbacks.
-  var codecs: String { enhancedCodecs ? DeviceCodecs.enhanced : "h264" }
+  /// Twitch's `supported_codecs`: everything this device decodes in hardware.
+  var codecs: String { DeviceCodecs.enhanced }
+
+  /// What the stats overlay shows as the ad route.
+  var adBlockingSummary: String {
+    switch adBlocking {
+    case .automatic, .server: return "ad-free server"
+    case .customProxy: return playbackProxy.map { "own proxy \($0.description)" } ?? "own proxy (not set up)"
+    case .basic: return "basic"
+    }
+  }
 
   /// Settings for the Apple player's stream session.
   var sessionConfig: StreamSessionConfig {
     var config = StreamSessionConfig()
     config.backupStreams = backupStreams
     config.allowLowQualityBackup = allowLowQualityBackup
-    config.fallback = adFallback
+    config.fallback = .muteAndCover
     config.codecs = codecs
     return config
   }

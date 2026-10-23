@@ -194,8 +194,9 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
   }
 
   /// Sends a raw query. Like Xtra, the operation is named `null`.
-  func query(_ text: String, variables: [String: Any] = [:]) async throws -> JSONValue {
-    try await send(["query": text, "variables": variables])
+  /// Browsing queries go out anonymously; only account features send the sign-in token.
+  func query(_ text: String, variables: [String: Any] = [:], authenticated: Bool = false) async throws -> JSONValue {
+    try await send(["query": text, "variables": variables], anonymous: !authenticated)
   }
 
   private func send(_ body: [String: Any], anonymous: Bool = false, via client: HTTPClient? = nil) async throws -> JSONValue {
@@ -506,10 +507,59 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
 
   /// Whether the signed-in account has Turbo (nil if unknown).
   func currentUserHasTurbo() async -> Bool? {
-    guard TwitchAuth.shared.session != nil, let data = try? await query("query null { currentUser { login hasTurbo } }") else {
+    guard TwitchAuth.shared.session != nil,
+      let data = try? await query("query null { currentUser { login hasTurbo } }", authenticated: true)
+    else {
       return nil
     }
     return data["currentUser"]["hasTurbo"].bool
+  }
+
+  struct FollowedChannel: Identifiable, Sendable {
+    var channel: Channel
+    var stream: LiveStream?
+    var lastLive: Date?
+    var id: String { channel.id }
+  }
+
+  /// The signed-in account's followed channels (up to 600), with who's live.
+  func followedChannels() async throws -> [FollowedChannel] {
+    guard TwitchAuth.shared.session != nil else { return [] }
+    var result: [FollowedChannel] = []
+    var cursor: String?
+    for _ in 0..<6 {
+      var variables: [String: Any] = [:]
+      if let cursor { variables["after"] = cursor }
+      let data = try await query(
+        """
+        query null($after: Cursor) {
+          currentUser {
+            follows(first: 100, after: $after) {
+              edges {
+                cursor
+                node {
+                  displayName id login profileImageURL(width: 300)
+                  lastBroadcast { startedAt }
+                  stream { createdAt game { boxArtURL displayName id slug } id previewImageURL title viewersCount }
+                }
+              }
+              pageInfo { hasNextPage }
+            }
+          }
+        }
+        """, variables: variables, authenticated: true)
+      let follows = data["currentUser"]["follows"]
+      let edges = follows["edges"].array
+      for edge in edges {
+        let node = edge["node"]
+        guard let channel = Self.channel(node) else { continue }
+        let stream = node["stream"].isNull ? nil : Self.stream(node["stream"], channel: channel)
+        result.append(FollowedChannel(channel: channel, stream: stream, lastLive: node["lastBroadcast"]["startedAt"].date))
+      }
+      guard follows["pageInfo"]["hasNextPage"].bool == true, let last = edges.last?["cursor"].string else { break }
+      cursor = last
+    }
+    return result
   }
 
   // MARK: Image URL helpers

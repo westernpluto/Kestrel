@@ -3,6 +3,7 @@ import SwiftUI
 
 @main
 struct KestrelApp: App {
+  @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
   @StateObject private var app = AppModel.shared
   @StateObject private var favorites = FavoritesStore.shared
   @StateObject private var settings = AppSettings.shared
@@ -47,5 +48,11 @@ struct RootView: View {
         .environmentObject(favorites)
         .environmentObject(settings)
     }
+  }
+}
+
+final class AppDelegate: NSObject, UIApplicationDelegate {
+  func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+    OrientationLock.mask
   }
 }

@@ -11,8 +11,13 @@ struct SettingsView: View {
     Form {
       Section {
         if let session = account.session {
-          LabeledContent("Signed in as", value: session.login)
-          LabeledContent("Twitch Turbo", value: account.hasTurbo.map { $0 ? "Yes: no ads" : "No" } ?? "…")
+          HStack(spacing: 12) {
+            Image(systemName: "person.crop.circle.fill").font(.system(size: 34)).foregroundColor(.accentTeal)
+            VStack(alignment: .leading, spacing: 2) {
+              Text(session.login).font(.body.weight(.semibold))
+              Text(turboText).font(.footnote).foregroundColor(.secondary)
+            }
+          }
           Button("Sign out", role: .destructive) { confirmSignOut = true }
         } else {
           Button {
@@ -24,94 +29,143 @@ struct SettingsView: View {
       } header: {
         Text("Twitch account")
       } footer: {
-        Text("Optional. With Turbo, or a sub to the channel you're watching, Twitch sends no ads at all. Some channels only offer 1440p to signed-in viewers. Your token stays on this iPhone and only goes to Twitch.")
-      }
-
-      Section {
-        Toggle("Switch to ad-free copy", isOn: $settings.backupStreams)
-        Toggle("Allow 360p during ads", isOn: $settings.allowLowQualityBackup)
-          .disabled(!settings.backupStreams)
-        Picker("If no ad-free copy", selection: $settings.adFallback) {
-          Text("Hide & mute the ad").tag(AdFallback.muteAndCover)
-          Text("Pause until it's over").tag(AdFallback.wait)
+        if account.session == nil {
+          Text("Sign in to chat as yourself and see who you follow. Your login stays on this iPhone and only goes to Twitch.")
         }
-      } header: {
-        Text("Ad blocking")
-      } footer: {
-        Text("When Twitch puts an ad into the stream, Kestrel switches to a copy of the stream without it. These days Twitch puts ads into every full-quality copy, so during the break that's usually the 360p copy (with 360p off, the ad is hidden instead). For no ads at all: Turbo or a sub (sign in above), or an ad-free region proxy (below). Changes apply to the next stream you open.")
       }
 
       Section {
-        if PlayerEngine.available.count > 1 {
-          Picker("Live player", selection: $settings.playerEngine) {
-            ForEach(PlayerEngine.available) { Text($0.title).tag($0) }
-          }
-          Toggle("Twitch low-latency mode", isOn: $settings.lowLatency)
-            .disabled(settings.playerEngine != .lowLatency)
-          Toggle("1440p over low latency", isOn: $settings.highestQualityOverLatency)
-            .disabled(settings.playerEngine != .lowLatency)
-        } else {
-          LabeledContent("Live player", value: PlayerEngine.standard.title)
+        if PlayerEngine.isLowLatencyBuilt {
+          Toggle("Low latency", isOn: $settings.lowLatency)
         }
-      } header: {
-        Text("Live player")
-      } footer: {
-        Text(
-          PlayerEngine.isLowLatencyBuilt
-            ? "Low-latency player: Amazon IVS, the engine Twitch's own apps are built on, in Twitch's low-latency mode (usually a few seconds behind). If it can't play a stream, Kestrel switches to the Apple player. Some 1440p streams use a format it can't decode: they're listed in the quality menu as “· Apple player”, and with “1440p over low latency” on, Kestrel switches to the Apple player for them by itself. Apple player: AVPlayer with Picture in Picture and AirPlay, roughly 8–12 s behind, and swaps in an ad-free copy if an ad is stitched into the stream. Client-side ads (how Twitch serves most ads now) never play in either. You can also switch from the player screen."
-            : "This build doesn't include the low-latency player (the GitHub Actions build adds the Amazon IVS SDK it needs). The Apple player stays roughly 8–12 s behind live.")
-      }
-
-      Section {
-        Toggle("Enhanced quality (HEVC/AV1)", isOn: $settings.enhancedCodecs)
-        Toggle("Keep audio in background", isOn: $settings.backgroundAudio)
-        Toggle("Video stats", isOn: $settings.showVideoStats)
+        NavigationLink {
+          AdBlockingView()
+        } label: {
+          LabeledContent("Ad blocking", value: settings.adBlocking.shortTitle)
+        }
+        Toggle("Background audio", isOn: $settings.backgroundAudio)
       } header: {
         Text("Playback")
       } footer: {
-        Text("Streams always start at the highest quality and stay there; pick another in the player's menu for just that stream. Enhanced quality asks Twitch for HEVC/AV1 renditions (this device decodes \(DeviceCodecs.summary)), which is how 1440p is delivered on channels using Enhanced Broadcasting. Most channels top out at 1080p60. Applies to the next stream you open.")
-      }
-
-      Section {
-        Toggle("Use a proxy", isOn: $settings.proxyEnabled)
-        if settings.proxyEnabled {
-          TextField("Host", text: $settings.proxyHost)
-            .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-          TextField("Port", text: $settings.proxyPort).keyboardType(.numberPad)
-          TextField("Username (optional)", text: $settings.proxyUsername)
-            .textInputAutocapitalization(.never).autocorrectionDisabled()
-          SecureField("Password (optional)", text: $settings.proxyPassword)
-        }
-      } header: {
-        Text("Ad-free region proxy")
-      } footer: {
-        Text("Twitch decides about ads by where you watch from. With an HTTP proxy in a country where Twitch doesn't run ads (how TTV LOL PRO works), streams come without ads at full quality. Only Twitch's playback requests use it; video still comes straight from Twitch. Applies to the next stream you open.")
+        Text("Streams always start at the highest quality. Quality and video stats are in the player's gear menu.")
       }
 
       Section("Chat") {
-        Toggle("Show chat", isOn: $settings.chatEnabled)
-        Toggle("7TV, BTTV & FFZ emotes", isOn: $settings.thirdPartyEmotes)
-        Toggle("Timestamps", isOn: $settings.chatTimestamps)
         Stepper(value: $settings.chatFontSize, in: 12...22, step: 1) {
-          Text("Text size \(Int(settings.chatFontSize))")
+          LabeledContent("Text size", value: "\(Int(settings.chatFontSize)) pt")
         }
       }
 
       Section {
         NavigationLink("Activity log") { ActivityLogView() }
         Button(imageCacheCleared ? "Image cache cleared" : "Clear image cache") {
-          ImageCache.shared.clear()
+          ImagePipeline.shared.clear()
           imageCacheCleared = true
         }
         .disabled(imageCacheCleared)
       } footer: {
-        Text("Kestrel \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · watching anonymously. Follows are stored on this device.")
+        Text("Kestrel \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
       }
     }
     .navigationTitle("Settings")
     .sheet(isPresented: $showLogin) { TwitchLoginView() }
     .confirmationDialog("Sign out of Twitch?", isPresented: $confirmSignOut, titleVisibility: .visible) {
       Button("Sign out", role: .destructive) { account.signOut() }
+    }
+  }
+
+  private var turboText: String {
+    switch account.hasTurbo {
+    case true?: return "Turbo: Twitch sends you no ads"
+    case false?: return "Signed in"
+    case nil: return "Checking…"
+    }
+  }
+}
+
+struct AdBlockingView: View {
+  @EnvironmentObject private var settings: AppSettings
+  @ObservedObject private var account = TwitchAccount.shared
+
+  var body: some View {
+    Form {
+      if account.hasTurbo == true {
+        Section {
+          Label("You have Turbo, so Twitch doesn't send you ads. Kestrel skips the ad-free servers and plays straight from Twitch.", systemImage: "checkmark.seal.fill")
+            .font(.footnote)
+        }
+      }
+
+      Section {
+        choice(.automatic, title: "Automatic", detail: "The ad-free server that answers first (recommended)")
+        choice(.customProxy, title: "My own proxy", detail: "An HTTP proxy in a country without Twitch ads")
+        choice(.basic, title: "Basic", detail: "No server: skip ad breaks Kestrel can see, hide the rest")
+      } footer: {
+        Text("Ad-free servers ask Twitch for the stream from a country where Twitch doesn't run ads (the TTV LOL PRO v1 servers). Only the playlist request goes through them; the video comes straight from Twitch at full quality. Applies to the next stream you open.")
+      }
+
+      Section {
+        ForEach(AdFreeProxy.all, id: \.host) { server in
+          Button {
+            settings.adBlocking = .server(server.host)
+          } label: {
+            HStack {
+              VStack(alignment: .leading, spacing: 2) {
+                Text(server.host).foregroundColor(.primary)
+                Text(serverDetail(server)).font(.caption).foregroundColor(.secondary)
+              }
+              Spacer()
+              if settings.adBlocking == .server(server.host) {
+                Image(systemName: "checkmark").foregroundColor(.accentTeal)
+              }
+            }
+          }
+        }
+      } header: {
+        Text("Or pick a server")
+      } footer: {
+        Text("If the chosen server is down, Kestrel tries the others.")
+      }
+
+      if settings.adBlocking == .customProxy {
+        Section {
+          TextField("Host", text: $settings.proxyHost)
+            .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+          TextField("Port", text: $settings.proxyPort).keyboardType(.numberPad)
+          TextField("Username (optional)", text: $settings.proxyUsername)
+            .textInputAutocapitalization(.never).autocorrectionDisabled()
+          SecureField("Password (optional)", text: $settings.proxyPassword)
+        } header: {
+          Text("Your proxy")
+        } footer: {
+          Text("Twitch's playback requests go through it; video still comes straight from Twitch.")
+        }
+      }
+    }
+    .navigationTitle("Ad blocking")
+    .navigationBarTitleDisplayMode(.inline)
+  }
+
+  private func serverDetail(_ server: AdFreeProxy) -> String {
+    var parts = ["Twitch sees: \(server.country)"]
+    if server.host == AdFreeProxy.lastWorkingHost { parts.append("last used") }
+    return parts.joined(separator: " · ")
+  }
+
+  private func choice(_ value: AdBlocking, title: String, detail: String) -> some View {
+    Button {
+      settings.adBlocking = value
+    } label: {
+      HStack {
+        VStack(alignment: .leading, spacing: 2) {
+          Text(title).foregroundColor(.primary)
+          Text(detail).font(.caption).foregroundColor(.secondary)
+        }
+        Spacer()
+        if settings.adBlocking == value {
+          Image(systemName: "checkmark").foregroundColor(.accentTeal)
+        }
+      }
     }
   }
 }

@@ -32,6 +32,18 @@ final class PlayerModel: ObservableObject {
   @Published var stats: [StatLine] = []
   /// The live player in use (VODs always use the Apple player).
   @Published private(set) var engine: PlayerEngine
+  @Published var isPaused = false
+  /// Zoomed to fill the screen (crops the sides) instead of fitting.
+  @Published var fillsScreen = false
+  @Published private(set) var pictureInPictureActive = false
+  // VOD position, for the seek bar.
+  @Published var position: Double = 0
+  @Published private(set) var duration: Double = 0
+  /// Set by the Apple player's view.
+  weak var applePictureInPicture: AVPictureInPictureController? {
+    didSet { observeApplePictureInPicture() }
+  }
+  private var pipObservation: NSKeyValueObservation?
 
   #if canImport(AmazonIVSPlayer)
     /// Set while the low-latency player is in use.
@@ -58,7 +70,9 @@ final class PlayerModel: ObservableObject {
   nonisolated init(target: PlaybackTarget) {
     self.target = target
     if case .live = target {
-      _engine = Published(initialValue: AppSettings.shared.playerEngine)
+      // The low-latency (IVS) player when the build has it; the Apple player otherwise and as a
+      // fallback.
+      _engine = Published(initialValue: PlayerEngine.preferredDefault)
     } else {
       _engine = Published(initialValue: .standard)
     }
@@ -113,6 +127,7 @@ final class PlayerModel: ObservableObject {
   private func startLive(_ channel: Channel) async {
     var config = AppSettings.shared.sessionConfig
     config.codecs = codecs
+    config.adFreeProxies = TwitchAccount.shared.hasTurbo == true ? [] : AppSettings.shared.adFreeProxyHosts
     let session = StreamSession(
       login: channel.login, config: config, http: AppSettings.shared.playbackClient(timeout: 8),
       tokens: TwitchAPI.shared
@@ -265,10 +280,74 @@ final class PlayerModel: ObservableObject {
     player.play()
   }
 
+  // MARK: - Controls (both players)
+
+  func togglePause() {
+    #if canImport(AmazonIVSPlayer)
+      if let lowLatency {
+        lowLatency.togglePause()
+        isPaused = lowLatency.isPaused
+        return
+      }
+    #endif
+    if player.timeControlStatus == .paused {
+      if isLive { goLive() } else { player.play() }
+      isPaused = false
+    } else {
+      player.pause()
+      isPaused = true
+    }
+  }
+
+  func togglePictureInPicture() {
+    #if canImport(AmazonIVSPlayer)
+      if let lowLatency {
+        lowLatency.togglePictureInPicture()
+        return
+      }
+    #endif
+    guard let pip = applePictureInPicture else { return }
+    if pip.isPictureInPictureActive { pip.stopPictureInPicture() } else { pip.startPictureInPicture() }
+  }
+
+  private func observeApplePictureInPicture() {
+    pipObservation = applePictureInPicture?.observe(\.isPictureInPictureActive, options: [.initial, .new]) { [weak self] pip, _ in
+      let active = pip.isPictureInPictureActive
+      guard let model = self else { return }
+      Task { @MainActor in model.pictureInPictureActive = active }
+    }
+  }
+
+  /// Twitch's low-latency mode (the low-latency player only).
+  func setLowLatency(_ enabled: Bool) {
+    AppSettings.shared.lowLatency = enabled
+    #if canImport(AmazonIVSPlayer)
+      lowLatency?.setLowLatency(enabled)
+    #endif
+  }
+
+  var canToggleLowLatency: Bool {
+    #if canImport(AmazonIVSPlayer)
+      return lowLatency != nil
+    #else
+      return false
+    #endif
+  }
+
+  func setFill(_ fill: Bool) {
+    fillsScreen = fill
+    #if canImport(AmazonIVSPlayer)
+      lowLatency?.setFill(fill)
+    #endif
+  }
+
+  func seek(to seconds: Double) {
+    player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+  }
+
   func setEngine(_ newEngine: PlayerEngine) {
     guard isLive, newEngine != engine, PlayerEngine.available.contains(newEngine) else { return }
     mayAutoSwitchPlayer = false
-    AppSettings.shared.playerEngine = newEngine
     teardownPlayback()
     engine = newEngine
     recentFailures = []
@@ -371,10 +450,20 @@ final class PlayerModel: ObservableObject {
       if let lowLatency {
         lowLatency.tick()
         if wantsStats { stats = lowLatency.stats() }
+        if isPaused != lowLatency.isPaused { isPaused = lowLatency.isPaused }
+        if pictureInPictureActive != lowLatency.pictureInPictureActive { pictureInPictureActive = lowLatency.pictureInPictureActive }
         return
       }
     #endif
     if wantsStats { stats = appleStats() }
+    let paused = player.timeControlStatus == .paused && phase == .playing
+    if paused != isPaused { isPaused = paused }
+    if !isLive, let item = player.currentItem {
+      let seconds = item.duration.seconds
+      if seconds.isFinite, seconds > 0, seconds != duration { duration = seconds }
+      let current = player.currentTime().seconds
+      if current.isFinite { position = current }
+    }
     guard isLive, let item = player.currentItem else { return }
     let currentDate = item.currentDate()
     if let currentDate { latency = max(0, now.timeIntervalSince(currentDate)) }
@@ -428,7 +517,7 @@ final class PlayerModel: ObservableObject {
     if isLive {
       lines.append(StatLine(label: "Ads", value: adState.statsText))
       lines.append(StatLine(label: "Playlists", value: "Kestrel filter"))
-      lines.append(StatLine(label: "Proxy", value: StatFormat.proxy()))
+      lines.append(StatLine(label: "Ad blocking", value: AppSettings.shared.adBlockingSummary))
       lines.append(StatLine(label: "Account", value: TwitchAuth.shared.session?.login ?? "not signed in"))
     }
     return lines

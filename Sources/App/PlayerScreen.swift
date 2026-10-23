@@ -1,36 +1,54 @@
+// The watch screen, laid out like Twitch's app: video on top with controls that fade in on a
+// tap (settings behind a gear: quality, low latency, video stats), chat below in portrait and
+// beside the video in landscape.
+
 import AVKit
 import SwiftUI
 
-struct VideoPlayerView: UIViewControllerRepresentable {
-  let player: AVPlayer
+// MARK: - Apple player surface
 
-  func makeUIViewController(context: Context) -> AVPlayerViewController {
-    let controller = AVPlayerViewController()
-    controller.player = player
-    controller.allowsPictureInPicturePlayback = true
-    controller.canStartPictureInPictureAutomaticallyFromInline = true
-    controller.updatesNowPlayingInfoCenter = true
-    controller.entersFullScreenWhenPlaybackBegins = false
-    controller.exitsFullScreenWhenPlaybackEnds = false
-    controller.videoGravity = .resizeAspect
-    controller.view.backgroundColor = .black
-    controller.delegate = context.coordinator
-    context.coordinator.controller = controller
-    context.coordinator.player = player
-    return controller
-  }
+final class PlayerLayerView: UIView {
+  override class var layerClass: AnyClass { AVPlayerLayer.self }
+  var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+}
 
-  func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
-    if controller.player !== player, !context.coordinator.detached { controller.player = player }
-  }
+/// AVPlayer on a plain layer (Kestrel draws its own controls), with Picture in Picture and
+/// audio that keeps playing in the background.
+struct ApplePlayerSurface: UIViewRepresentable {
+  let model: PlayerModel
+  var fill: Bool
 
   func makeCoordinator() -> Coordinator { Coordinator() }
 
-  final class Coordinator: NSObject, AVPlayerViewControllerDelegate {
-    weak var controller: AVPlayerViewController?
+  func makeUIView(context: Context) -> PlayerLayerView {
+    let view = PlayerLayerView()
+    view.backgroundColor = .black
+    view.playerLayer.player = model.player
+    view.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+    context.coordinator.view = view
+    context.coordinator.player = model.player
+    if AVPictureInPictureController.isPictureInPictureSupported(),
+      let pip = AVPictureInPictureController(playerLayer: view.playerLayer)
+    {
+      pip.canStartPictureInPictureAutomaticallyFromInline = true
+      pip.delegate = context.coordinator
+      context.coordinator.pip = pip
+      model.applePictureInPicture = pip
+    }
+    return view
+  }
+
+  func updateUIView(_ view: PlayerLayerView, context: Context) {
+    let gravity: AVLayerVideoGravity = fill ? .resizeAspectFill : .resizeAspect
+    if view.playerLayer.videoGravity != gravity { view.playerLayer.videoGravity = gravity }
+  }
+
+  final class Coordinator: NSObject, AVPictureInPictureControllerDelegate {
+    weak var view: PlayerLayerView?
     weak var player: AVPlayer?
-    var pictureInPicture = false
-    var detached = false
+    var pip: AVPictureInPictureController?
+    private var pictureInPicture = false
+    private var detached = false
     private var tokens: [NSObjectProtocol] = []
 
     override init() {
@@ -46,44 +64,119 @@ struct VideoPlayerView: UIViewControllerRepresentable {
 
     deinit { tokens.forEach(NotificationCenter.default.removeObserver) }
 
-    /// Detaching the player from the view keeps the audio going in the background.
+    /// Taking the player off the layer keeps the sound going in the background.
     private func enteredBackground() {
-      guard !pictureInPicture, AppSettings.shared.backgroundAudio, let controller else { return }
-      detached = true
-      controller.player = nil
+      guard !pictureInPicture else { return }
+      if AppSettings.shared.backgroundAudio {
+        detached = true
+        view?.playerLayer.player = nil
+      } else {
+        player?.pause()
+      }
     }
 
     private func enteringForeground() {
       guard detached else { return }
       detached = false
-      controller?.player = player
+      view?.playerLayer.player = player
     }
 
-    func playerViewControllerWillStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
-      pictureInPicture = true
-    }
-
-    func playerViewControllerDidStopPictureInPicture(_ playerViewController: AVPlayerViewController) {
-      pictureInPicture = false
-    }
-
-    func playerViewController(
-      _ playerViewController: AVPlayerViewController,
+    func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) { pictureInPicture = true }
+    func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) { pictureInPicture = false }
+    func pictureInPictureController(
+      _ controller: AVPictureInPictureController,
       restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
-    ) {
-      completionHandler(true)
-    }
+    ) { completionHandler(true) }
   }
 }
+
+struct AirPlayButton: UIViewRepresentable {
+  func makeUIView(context: Context) -> AVRoutePickerView {
+    let view = AVRoutePickerView()
+    view.tintColor = .white
+    view.activeTintColor = UIColor(red: 0.16, green: 0.78, blue: 0.72, alpha: 1)
+    view.prioritizesVideoDevices = true
+    return view
+  }
+  func updateUIView(_ view: AVRoutePickerView, context: Context) {}
+}
+
+/// Browsing stays portrait; the player turns with the phone. The full-screen button and swipes
+/// force an orientation, which then holds until the phone is physically turned that way (so
+/// tapping full screen while holding the phone upright doesn't flip straight back).
+enum OrientationLock {
+  /// Read by `AppDelegate`.
+  static private(set) var mask: UIInterfaceOrientationMask = .portrait
+  private static var playerActive = false
+  private static var forced: UIInterfaceOrientationMask?
+  private static var observer: NSObjectProtocol?
+
+  static func playerVisible(_ visible: Bool) {
+    playerActive = visible
+    forced = nil
+    if visible {
+      startObserving()
+      apply(.allButUpsideDown, rotateTo: nil)
+    } else {
+      apply(.portrait, rotateTo: .portrait)
+    }
+  }
+
+  /// `.portrait` or `.landscape`.
+  static func force(_ orientation: UIInterfaceOrientationMask) {
+    forced = orientation
+    if orientation == .portrait {
+      apply(.portrait, rotateTo: .portrait)
+    } else {
+      // Turn toward the side the phone is already tipped to, if any.
+      let side: UIInterfaceOrientationMask = UIDevice.current.orientation == .landscapeRight ? .landscapeLeft : .landscapeRight
+      apply(.landscape, rotateTo: side)
+    }
+  }
+
+  private static func startObserving() {
+    guard observer == nil else { return }
+    UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+    observer = NotificationCenter.default.addObserver(
+      forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main
+    ) { _ in releaseIfTurned() }
+  }
+
+  private static func releaseIfTurned() {
+    guard playerActive, let forced else { return }
+    let matches: Bool
+    switch UIDevice.current.orientation {
+    case .portrait: matches = forced == .portrait
+    case .landscapeLeft, .landscapeRight: matches = forced == .landscape
+    default: return
+    }
+    guard matches else { return }
+    self.forced = nil
+    apply(.allButUpsideDown, rotateTo: nil)
+  }
+
+  private static func apply(_ newMask: UIInterfaceOrientationMask, rotateTo target: UIInterfaceOrientationMask?) {
+    mask = newMask
+    guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else { return }
+    for window in scene.windows {
+      var controller = window.rootViewController
+      while let current = controller {
+        current.setNeedsUpdateOfSupportedInterfaceOrientations()
+        controller = current.presentedViewController
+      }
+    }
+    if let target { scene.requestGeometryUpdate(.iOS(interfaceOrientations: target)) { _ in } }
+  }
+}
+
+// MARK: - Screen
 
 struct PlayerScreen: View {
   let target: PlaybackTarget
   @StateObject private var model: PlayerModel
   @StateObject private var chat: ChatController
-  @EnvironmentObject private var favorites: FavoritesStore
-  @EnvironmentObject private var settings: AppSettings
   @Environment(\.dismiss) private var dismiss
-  @State private var showLandscapeChat = false
+  @AppStorage("landscapeChat") private var landscapeChat = true
 
   init(target: PlaybackTarget) {
     self.target = target
@@ -96,166 +189,155 @@ struct PlayerScreen: View {
     _chat = StateObject(wrappedValue: ChatController(channel: channel))
   }
 
-  private var showsChat: Bool { model.isLive && settings.chatEnabled }
-  private var showsEngineMenu: Bool { model.isLive && PlayerEngine.available.count > 1 }
-
   var body: some View {
+    // The reader sits inside the safe area, so in landscape the video never reaches under the
+    // Dynamic Island; only the black background runs edge to edge.
     GeometryReader { geometry in
       let landscape = geometry.size.width > geometry.size.height
-      ZStack {
-        Color.black.ignoresSafeArea()
+      Group {
         if landscape {
-          // Our buttons live beside the video so they never cover the player's own controls.
-          HStack(spacing: 0) {
-            video.ignoresSafeArea(edges: [.vertical, .leading])
-            VStack(spacing: 0) {
-              if showLandscapeChat && showsChat {
-                HStack(spacing: 4) {
-                  closeButton
-                  chatToggle
-                  Spacer()
-                  if showsEngineMenu { engineMenu }
-                }
-                .padding(.vertical, 4)
-                ChatView(chat: chat)
-              } else {
-                closeButton.padding(.top, 6)
-                if showsChat { chatToggle }
-                if showsEngineMenu { engineMenu }
-                Spacer()
-              }
-            }
-            .frame(width: showLandscapeChat && showsChat ? min(340, geometry.size.width * 0.36) : 52)
-            .background(Color(white: 0.06))
-          }
+          landscapeLayout(width: geometry.size.width)
         } else {
-          VStack(spacing: 0) {
-            HStack {
-              closeButton
-              Spacer()
-              Text(model.isLive ? (model.engine == .lowLatency ? "Live · Low latency" : "Live") : "Video")
-                .font(.footnote.weight(.semibold)).foregroundColor(.secondary)
-              Spacer()
-              if showsEngineMenu { engineMenu } else { Color.clear.frame(width: 40, height: 40) }
-            }
-            .padding(.horizontal, 6)
-            video.aspectRatio(16 / 9, contentMode: .fit)
-            infoBar
-            Divider().background(Color.white.opacity(0.1))
-            if showsChat {
-              ChatView(chat: chat).background(Color(white: 0.06))
-            } else {
-              vodDetails
-            }
-          }
+          portraitLayout
         }
       }
+      .statusBarHidden(landscape)
+      .persistentSystemOverlays(landscape ? .hidden : .automatic)
     }
+    .background(Color.black.ignoresSafeArea())
     .preferredColorScheme(.dark)
     .task {
-      if showsChat { chat.start() }
+      OrientationLock.playerVisible(true)
+      if model.isLive { chat.start() }
       await model.start()
     }
     .onDisappear {
       model.stop()
       chat.stop()
+      OrientationLock.playerVisible(false)
     }
   }
 
-  // MARK: Video area
+  private var chatOpen: Bool { model.isLive && landscapeChat }
 
-  private var video: some View {
+  private func landscapeLayout(width: CGFloat) -> some View {
+    HStack(spacing: 0) {
+      PlayerVideoArea(
+        model: model, landscape: true, chatOpen: chatOpen,
+        toggleChat: { withAnimation(.easeInOut(duration: 0.22)) { landscapeChat.toggle() } }, close: close)
+        // Full height (into the home-indicator strip); the width stays inside the safe area.
+        .ignoresSafeArea(.container, edges: .vertical)
+        .ignoresSafeArea(.keyboard)
+      if chatOpen {
+        ChatPanel(chat: chat)
+          .frame(width: min(340, width * 0.36))
+          .background(Color(white: 0.07).ignoresSafeArea())
+          .transition(.move(edge: .trailing))
+      }
+    }
+  }
+
+  private var portraitLayout: some View {
+    VStack(spacing: 0) {
+      PlayerVideoArea(model: model, landscape: false, chatOpen: false, toggleChat: {}, close: close)
+        .aspectRatio(16 / 9, contentMode: .fit)
+      StreamInfoBar(model: model, target: target)
+      Divider().overlay(Color.white.opacity(0.08))
+      if model.isLive {
+        ChatPanel(chat: chat)
+      } else {
+        VideoDetails(target: target)
+      }
+    }
+  }
+
+  private func close() { dismiss() }
+}
+
+// MARK: - Video with controls and gestures
+
+struct PlayerVideoArea: View {
+  @ObservedObject var model: PlayerModel
+  var landscape: Bool
+  var chatOpen: Bool
+  var toggleChat: () -> Void
+  var close: () -> Void
+  @EnvironmentObject private var settings: AppSettings
+  @State private var controlsVisible = true
+  @State private var hideTask: Task<Void, Never>?
+  /// A pinch also moves the fingers; don't read it as a swipe.
+  @State private var lastPinch = Date.distantPast
+
+  var body: some View {
     ZStack {
-      #if canImport(AmazonIVSPlayer)
-        if let controller = model.lowLatency {
-          LowLatencySurface(controller: controller)
-        } else {
-          VideoPlayerView(player: model.player)
-        }
-      #else
-        VideoPlayerView(player: model.player)
-      #endif
-      overlays
+      Color.black
+      surface
+      // Gestures live on this layer, under everything that can be tapped.
+      Color.black.opacity(0.001)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { doubleTap() }
+        .onTapGesture { toggleControls() }
+        .gesture(swipe)
+        .simultaneousGesture(zoom)
+      statusOverlay
       if settings.showVideoStats && !model.stats.isEmpty {
-        StatsOverlay(lines: model.stats)
+        StatsOverlay(lines: model.stats).padding(.top, controlsShown ? 44 : 0)
       }
+      PlayerControls(
+        model: model, landscape: landscape, chatOpen: chatOpen, visible: controlsShown,
+        toggleChat: toggleChat, close: close, interacted: { scheduleHide(after: $0) })
     }
+    .clipped()
+    .onAppear { scheduleHide(after: 3.5) }
   }
 
-  private var engineMenu: some View {
-    Menu {
-      ForEach(PlayerEngine.available) { option in
-        Button {
-          model.setEngine(option)
-        } label: {
-          if option == model.engine { Label(option.title, systemImage: "checkmark") } else { Text(option.title) }
-        }
+  private var controlsShown: Bool { controlsVisible || model.isPaused || model.phase != .playing }
+
+  @ViewBuilder
+  private var surface: some View {
+    #if canImport(AmazonIVSPlayer)
+      if let controller = model.lowLatency {
+        LowLatencyVideoView(controller: controller, fill: model.fillsScreen)
+      } else {
+        ApplePlayerSurface(model: model, fill: model.fillsScreen)
       }
-    } label: {
-      Image(systemName: "rectangle.on.rectangle")
-        .font(.system(size: 16, weight: .semibold))
-        .frame(width: 40, height: 40)
-        .foregroundColor(.white)
-    }
-    .accessibilityLabel("Choose player")
-  }
-
-  private var closeButton: some View {
-    Button {
-      dismiss()
-    } label: {
-      Image(systemName: "chevron.down")
-        .font(.system(size: 17, weight: .bold))
-        .frame(width: 40, height: 40)
-        .foregroundColor(.white)
-    }
-    .accessibilityLabel("Close player")
-  }
-
-  private var chatToggle: some View {
-    Button {
-      withAnimation(.easeInOut(duration: 0.2)) { showLandscapeChat.toggle() }
-    } label: {
-      Image(systemName: showLandscapeChat ? "bubble.left.fill" : "bubble.left")
-        .font(.system(size: 16, weight: .semibold))
-        .frame(width: 40, height: 40)
-        .foregroundColor(.white)
-    }
-    .accessibilityLabel(showLandscapeChat ? "Hide chat" : "Show chat")
+    #else
+      ApplePlayerSurface(model: model, fill: model.fillsScreen)
+    #endif
   }
 
   @ViewBuilder
-  private var overlays: some View {
+  private var statusOverlay: some View {
     switch model.phase {
     case .loading:
-      ProgressView().tint(.white)
+      ProgressView().tint(.white).scaleEffect(1.2).allowsHitTesting(false)
     case .offline:
-      statusCard(icon: "moon.zzz.fill", title: "Offline", message: "\(model.channel?.name ?? "This channel") isn't live right now.")
+      card(icon: "moon.zzz.fill", title: "Offline", message: "\(model.channel?.name ?? "This channel") isn't live right now.")
+        .allowsHitTesting(false)
     case .failed(let message):
       VStack(spacing: 12) {
-        statusCard(icon: "exclamationmark.triangle.fill", title: "Couldn't play", message: message)
-        Button("Retry") { model.retry() }.buttonStyle(.borderedProminent).tint(.accentTeal)
+        card(icon: "exclamationmark.triangle.fill", title: "Couldn't play", message: message).allowsHitTesting(false)
+        Button("Try again") { model.retry() }.buttonStyle(.borderedProminent).tint(.accentTeal)
       }
     case .playing:
-      if model.engine == .lowLatency, model.isBuffering, !model.coveringAd {
-        ProgressView().tint(.white).allowsHitTesting(false)
-      }
       if model.coveringAd {
         ZStack {
-          Color.black
-          VStack(spacing: 8) {
-            Image(systemName: "eye.slash.fill").font(.title2)
-            Text("Ad break").font(.headline)
-            Text("No ad-free copy was available, so the ad is hidden and muted. The stream resumes on its own.")
-              .font(.caption).multilineTextAlignment(.center).foregroundColor(.secondary).padding(.horizontal, 30)
+          Color.black.opacity(0.92)
+          VStack(spacing: 6) {
+            ProgressView().tint(.white)
+            Text("Skipping an ad…").font(.subheadline.weight(.semibold))
+            Text("The stream continues as soon as it's over.").font(.caption).foregroundColor(.secondary)
           }
           .foregroundColor(.white)
         }
+        .allowsHitTesting(false)
+      } else if model.isBuffering && !model.isPaused {
+        ProgressView().tint(.white).scaleEffect(1.2).allowsHitTesting(false)
       }
     }
   }
 
-  private func statusCard(icon: String, title: String, message: String) -> some View {
+  private func card(icon: String, title: String, message: String) -> some View {
     VStack(spacing: 8) {
       Image(systemName: icon).font(.title)
       Text(title).font(.headline)
@@ -265,23 +347,281 @@ struct PlayerScreen: View {
     .padding(24)
   }
 
-  // MARK: Info bar
+  // MARK: Gestures
 
-  private var infoBar: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      HStack(alignment: .top, spacing: 10) {
-        Avatar(url: model.channel?.profileImageURL, size: 40)
-        VStack(alignment: .leading, spacing: 2) {
-          Text(title).font(.subheadline.weight(.semibold)).lineLimit(2)
-          HStack(spacing: 6) {
-            Text(model.channel?.name ?? "").font(.footnote).foregroundColor(.secondary)
-            if let category = model.stream?.category?.name {
-              Text("· \(category)").font(.footnote).foregroundColor(.accentTeal).lineLimit(1)
-            }
+  /// Swipe down: close (portrait) or leave full screen. Swipe up: full screen. Sideways in
+  /// landscape: show or hide chat.
+  private var swipe: some Gesture {
+    DragGesture(minimumDistance: 24).onEnded { value in
+      guard Date().timeIntervalSince(lastPinch) > 0.5 else { return }
+      let dx = value.translation.width, dy = value.translation.height
+      if abs(dy) > abs(dx) {
+        if dy > 70 {
+          landscape ? OrientationLock.force(.portrait) : close()
+        } else if dy < -70, !landscape {
+          OrientationLock.force(.landscape)
+        }
+      } else if landscape, model.isLive {
+        if dx < -60, !chatOpen { toggleChat() }
+        if dx > 60, chatOpen { toggleChat() }
+      }
+    }
+  }
+
+  /// Pinch out to fill the screen (crops the sides), in to fit.
+  private var zoom: some Gesture {
+    MagnificationGesture()
+      .onChanged { _ in lastPinch = Date() }
+      .onEnded { scale in
+        lastPinch = Date()
+        if scale > 1.08 { withAnimation { model.setFill(true) } }
+        if scale < 0.92 { withAnimation { model.setFill(false) } }
+      }
+  }
+
+  private func doubleTap() {
+    if landscape {
+      withAnimation { model.setFill(!model.fillsScreen) }
+    } else {
+      OrientationLock.force(.landscape)
+    }
+  }
+
+  private func toggleControls() {
+    if controlsVisible {
+      hideTask?.cancel()
+      withAnimation(.easeInOut(duration: 0.18)) { controlsVisible = false }
+    } else {
+      withAnimation(.easeInOut(duration: 0.18)) { controlsVisible = true }
+      scheduleHide(after: 3.5)
+    }
+  }
+
+  /// Controls fade out after a few seconds without a touch (longer after opening the menu).
+  private func scheduleHide(after seconds: Double) {
+    hideTask?.cancel()
+    controlsVisible = true
+    hideTask = Task {
+      try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+      guard !Task.isCancelled else { return }
+      withAnimation(.easeInOut(duration: 0.25)) { controlsVisible = false }
+    }
+  }
+}
+
+// MARK: - Controls
+
+struct PlayerControls: View {
+  @ObservedObject var model: PlayerModel
+  var landscape: Bool
+  var chatOpen: Bool
+  var visible: Bool
+  var toggleChat: () -> Void
+  var close: () -> Void
+  /// Keeps the controls up for this many more seconds.
+  var interacted: (Double) -> Void
+  @EnvironmentObject private var settings: AppSettings
+  @State private var scrubbing: Double?
+
+  var body: some View {
+    ZStack {
+      LinearGradient(colors: [.black.opacity(0.65), .clear, .clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
+        .allowsHitTesting(false)
+      VStack(spacing: 0) {
+        topBar
+        Spacer()
+        bottomBar
+      }
+      .padding(.horizontal, landscape ? 12 : 6)
+      .padding(.top, landscape ? 8 : 2)
+      .padding(.bottom, landscape ? 16 : 2)
+      if model.phase == .playing && !model.coveringAd {
+        Button {
+          model.togglePause()
+          interacted(3.5)
+        } label: {
+          Image(systemName: model.isPaused ? "play.fill" : "pause.fill")
+            .font(.system(size: landscape ? 34 : 28, weight: .semibold))
+            .frame(width: 64, height: 64)
+            .background(.black.opacity(0.35), in: Circle())
+        }
+        .accessibilityLabel(model.isPaused ? "Play" : "Pause")
+      }
+    }
+    .foregroundColor(.white)
+    .opacity(visible ? 1 : 0)
+    .allowsHitTesting(visible)
+  }
+
+  private var topBar: some View {
+    HStack(spacing: 2) {
+      button("chevron.down", label: landscape ? "Exit full screen" : "Close") {
+        landscape ? OrientationLock.force(.portrait) : close()
+      }
+      if landscape {
+        VStack(alignment: .leading, spacing: 1) {
+          Text(model.channel?.name ?? "").font(.subheadline.weight(.bold))
+          if let title = model.stream?.title, !title.isEmpty {
+            Text(title).font(.caption).foregroundColor(.white.opacity(0.75))
           }
         }
-        Spacer(minLength: 4)
-        if let channel = model.channel, !channel.id.isEmpty {
+        .lineLimit(1)
+        .padding(.leading, 4)
+      }
+      Spacer(minLength: 8)
+      AirPlayButton().frame(width: 40, height: 40)
+      if AVPictureInPictureController.isPictureInPictureSupported() {
+        button(model.pictureInPictureActive ? "pip.exit" : "pip.enter", label: "Picture in Picture") {
+          model.togglePictureInPicture()
+        }
+      }
+      settingsMenu
+    }
+  }
+
+  private var settingsMenu: some View {
+    Menu {
+      if model.qualities.count > 1 {
+        Menu {
+          Picker("Quality", selection: Binding(get: { model.selectedQuality }, set: { id in
+            if let quality = model.qualities.first(where: { $0.id == id }) { model.selectQuality(quality) }
+          })) {
+            ForEach(model.qualities) { Text($0.label).tag($0.id) }
+          }
+        } label: {
+          Label("Quality · \(model.qualities.first { $0.id == model.selectedQuality }?.label ?? "Auto")", systemImage: "slider.horizontal.3")
+        }
+      }
+      if model.isLive && model.canToggleLowLatency {
+        Toggle(isOn: Binding(get: { settings.lowLatency }, set: { model.setLowLatency($0) })) {
+          Label("Low latency", systemImage: "bolt")
+        }
+      }
+      Toggle(isOn: $settings.showVideoStats) {
+        Label("Video stats", systemImage: "chart.bar.xaxis")
+      }
+    } label: {
+      Image(systemName: "gearshape.fill")
+        .font(.system(size: 18, weight: .semibold))
+        .frame(width: 40, height: 40)
+        .contentShape(Rectangle())
+    }
+    .accessibilityLabel("Settings")
+    .simultaneousGesture(TapGesture().onEnded { interacted(12) })
+  }
+
+  @ViewBuilder
+  private var bottomBar: some View {
+    VStack(spacing: 4) {
+      if !model.isLive, model.duration > 0 {
+        Slider(
+          value: Binding(get: { scrubbing ?? model.position }, set: { scrubbing = $0; interacted(3.5) }),
+          in: 0...model.duration
+        ) { editing in
+          if !editing, let target = scrubbing {
+            model.seek(to: target)
+            scrubbing = nil
+          }
+        }
+        .tint(.accentTeal)
+      }
+      HStack(spacing: 10) {
+        if model.isLive {
+          Button {
+            model.goLive()
+            interacted(3.5)
+          } label: {
+            HStack(spacing: 6) {
+              Text("LIVE").font(.caption.weight(.heavy))
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(atLiveEdge ? Color.liveRed : Color.gray, in: RoundedRectangle(cornerRadius: 4))
+              if let latency = model.latency {
+                Text(String(format: "%.1fs", latency)).font(.caption.monospacedDigit()).foregroundColor(.white.opacity(0.85))
+              }
+            }
+          }
+          .accessibilityLabel("Jump to live")
+          if let viewers = model.stream?.viewers {
+            Label(Format.viewers(viewers), systemImage: "person.fill").font(.caption.monospacedDigit())
+              .labelStyle(.titleAndIcon).foregroundColor(.white.opacity(0.85))
+          }
+          adBadge
+        } else {
+          Text("\(Format.duration(Int(scrubbing ?? model.position))) / \(Format.duration(Int(model.duration)))")
+            .font(.caption.monospacedDigit())
+        }
+        Spacer()
+        if landscape && model.isLive {
+          button(chatOpen ? "bubble.left.fill" : "bubble.left", label: chatOpen ? "Hide chat" : "Show chat", action: toggleChat)
+        }
+        button(
+          landscape ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+          label: landscape ? "Exit full screen" : "Full screen"
+        ) {
+          OrientationLock.force(landscape ? .portrait : .landscape)
+        }
+      }
+    }
+  }
+
+  private var atLiveEdge: Bool { (model.latency ?? 0) < (settings.lowLatency ? 6 : 15) }
+
+  @ViewBuilder
+  private var adBadge: some View {
+    switch model.adState {
+    case .skipped, .replaced:
+      Label("Ad blocked", systemImage: "checkmark.shield.fill").font(.caption2.weight(.semibold)).foregroundColor(.accentTeal)
+    case .searching, .covering:
+      Label("Ad", systemImage: "shield.lefthalf.filled").font(.caption2.weight(.semibold)).foregroundColor(.orange)
+    case .none:
+      EmptyView()
+    }
+  }
+
+  private func button(_ icon: String, label: String, action: @escaping () -> Void) -> some View {
+    Button {
+      action()
+      interacted(3.5)
+    } label: {
+      Image(systemName: icon)
+        .font(.system(size: 18, weight: .semibold))
+        .frame(width: 40, height: 40)
+        .contentShape(Rectangle())
+    }
+    .accessibilityLabel(label)
+  }
+}
+
+// MARK: - Below the video (portrait)
+
+struct StreamInfoBar: View {
+  @ObservedObject var model: PlayerModel
+  let target: PlaybackTarget
+  @EnvironmentObject private var favorites: FavoritesStore
+  @ObservedObject private var following = FollowingStore.shared
+
+  var body: some View {
+    HStack(alignment: .center, spacing: 10) {
+      Avatar(url: model.channel?.profileImageURL, size: 40)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
+        HStack(spacing: 4) {
+          Text(model.channel?.name ?? "").font(.footnote.weight(.semibold)).foregroundColor(.white.opacity(0.85))
+          if let category = model.stream?.category?.name {
+            Text("· \(category)").font(.footnote).foregroundColor(.accentTeal)
+          }
+          if model.isLive, let uptime = Format.uptime(since: model.stream?.startedAt) {
+            Text("· \(uptime)").font(.footnote.monospacedDigit()).foregroundColor(.secondary)
+          }
+        }
+        .lineLimit(1)
+      }
+      Spacer(minLength: 4)
+      if let channel = model.channel, !channel.id.isEmpty {
+        if following.twitchFollowIDs.contains(channel.id) {
+          Image(systemName: "heart.fill").font(.title3).foregroundColor(.accentTeal)
+            .accessibilityLabel("Following on Twitch")
+        } else {
           Button {
             favorites.toggle(channel)
           } label: {
@@ -289,70 +629,12 @@ struct PlayerScreen: View {
               .font(.title3)
               .foregroundColor(favorites.contains(channel) ? .liveRed : .white)
           }
-        }
-      }
-      HStack(spacing: 10) {
-        if model.isLive, let viewers = model.stream?.viewers { LiveBadge(viewers: viewers) }
-        if let uptime = Format.uptime(since: model.stream?.startedAt) {
-          Label(uptime, systemImage: "clock").font(.caption.monospacedDigit()).foregroundColor(.secondary)
-        }
-        if model.isLive, let latency = model.latency {
-          Button {
-            model.goLive()
-          } label: {
-            Label(String(format: "%.1fs", latency), systemImage: "bolt.fill")
-              .font(.caption.monospacedDigit())
-              .foregroundColor(latency < 6 ? .accentTeal : .secondary)
-          }
-          .accessibilityLabel(String(format: "%.1f seconds behind live. Jump to live", latency))
-        }
-        adPill
-        Spacer()
-        if model.qualities.count > 1 {
-          Menu {
-            ForEach(model.qualities) { quality in
-              Button {
-                model.selectQuality(quality)
-              } label: {
-                if quality.id == model.selectedQuality { Label(quality.label, systemImage: "checkmark") } else { Text(quality.label) }
-              }
-            }
-            Divider()
-            Toggle(isOn: $settings.showVideoStats) {
-              Label("Video stats", systemImage: "chart.bar.xaxis")
-            }
-          } label: {
-            Label(currentQualityLabel, systemImage: "slider.horizontal.3")
-              .font(.caption.weight(.semibold))
-              .padding(.horizontal, 8)
-              .padding(.vertical, 5)
-              .background(Color.white.opacity(0.12), in: Capsule())
-          }
+          .accessibilityLabel(favorites.contains(channel) ? "Remove from Following" : "Add to Following")
         }
       }
     }
-    .padding(12)
-    .foregroundColor(.white)
-  }
-
-  @ViewBuilder
-  private var adPill: some View {
-    switch model.adState {
-    case .none:
-      EmptyView()
-    case .skipped:
-      Label("Ad skipped", systemImage: "checkmark.shield.fill").font(.caption2.weight(.semibold)).foregroundColor(.accentTeal)
-    case .searching:
-      Label("Ad · skipping", systemImage: "shield.lefthalf.filled").font(.caption2.weight(.semibold)).foregroundColor(.orange)
-    case .replaced:
-      Label("Ad blocked", systemImage: "checkmark.shield.fill").font(.caption2.weight(.semibold)).foregroundColor(.accentTeal)
-    case .covering:
-      Label("Ad hidden", systemImage: "eye.slash.fill").font(.caption2.weight(.semibold)).foregroundColor(.orange)
-    }
-  }
-
-  private var currentQualityLabel: String {
-    model.qualities.first { $0.id == model.selectedQuality }?.label ?? "Auto"
+    .padding(.horizontal, 12)
+    .padding(.vertical, 10)
   }
 
   private var title: String {
@@ -361,21 +643,22 @@ struct PlayerScreen: View {
     case .video(let video): return video.title
     }
   }
+}
 
-  @ViewBuilder
-  private var vodDetails: some View {
-    if case .video(let video) = target {
-      ScrollView {
+struct VideoDetails: View {
+  let target: PlaybackTarget
+
+  var body: some View {
+    ScrollView {
+      if case .video(let video) = target {
         VStack(alignment: .leading, spacing: 6) {
           Text(video.title).font(.headline)
-          Text([video.categoryName, Format.relative(video.createdAt), "\(Format.viewers(video.viewCount)) views"].compactMap { $0 }.joined(separator: " · "))
+          Text([video.categoryName, Format.relative(video.createdAt), "\(Format.viewers(video.viewCount)) views"].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
             .font(.footnote).foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
       }
-    } else {
-      Spacer()
     }
   }
 }

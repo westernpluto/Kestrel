@@ -17,9 +17,6 @@ enum StatFormat {
     return String(format: "%.2f s", value)
   }
 
-  static func proxy() -> String {
-    AppSettings.shared.playbackProxy.map { "on (\($0.description))" } ?? "off"
-  }
 }
 
 extension AdState {

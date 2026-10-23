@@ -204,69 +204,182 @@ struct SearchView: View {
   }
 }
 
+/// Who you follow: your Twitch follows when signed in, plus channels hearted in Kestrel.
 @MainActor
-final class FollowingModel: ObservableObject {
-  @Published private(set) var live: [LiveStream] = []
-  @Published private(set) var offline: [Channel] = []
-  @Published private(set) var isLoading = false
-  @Published private(set) var error: String?
+final class FollowingStore: ObservableObject {
+  static let shared = FollowingStore()
 
-  func refresh(_ channels: [Channel]) async {
-    guard !channels.isEmpty else {
-      live = []
-      offline = []
-      return
-    }
+  struct OfflineChannel: Identifiable {
+    var channel: Channel
+    var lastLive: Date?
+    var id: String { channel.id }
+  }
+
+  @Published private(set) var live: [LiveStream] = []
+  @Published private(set) var offline: [OfflineChannel] = []
+  /// Channels followed on Twitch (the player shows these hearts filled).
+  @Published private(set) var twitchFollowIDs: Set<String> = []
+  @Published private(set) var isLoading = false
+  @Published private(set) var loaded = false
+  @Published private(set) var error: String?
+  private var lastRefresh = Date.distantPast
+
+  func refreshIfStale() async {
+    if Date().timeIntervalSince(lastRefresh) > 60 { await refresh() }
+  }
+
+  func refresh() async {
+    guard !isLoading else { return }
     isLoading = true
     defer { isLoading = false }
-    do {
-      let results = try await TwitchAPI.shared.users(logins: channels.map(\.login))
-      FavoritesStore.shared.refresh(results.map(\.0))
-      live = results.compactMap(\.1).sorted { $0.viewers > $1.viewers }
-      let liveIDs = Set(live.map(\.channel.id))
-      offline = channels.filter { !liveIDs.contains($0.id) }.sorted { $0.name.lowercased() < $1.name.lowercased() }
-      error = nil
-    } catch {
-      self.error = error.localizedDescription
-      offline = channels
+    lastRefresh = Date()
+    var liveByID: [String: LiveStream] = [:]
+    var offlineByID: [String: OfflineChannel] = [:]
+    var problem: String?
+
+    if TwitchAccount.shared.session != nil {
+      do {
+        let follows = try await TwitchAPI.shared.followedChannels()
+        twitchFollowIDs = Set(follows.map(\.id))
+        for follow in follows {
+          if let stream = follow.stream {
+            liveByID[follow.id] = stream
+          } else {
+            offlineByID[follow.id] = OfflineChannel(channel: follow.channel, lastLive: follow.lastLive)
+          }
+        }
+      } catch {
+        problem = "Couldn't load your Twitch follows (\(error.localizedDescription))."
+      }
+    } else {
+      twitchFollowIDs = []
     }
+
+    let hearted = FavoritesStore.shared.channels.filter { liveByID[$0.id] == nil && offlineByID[$0.id] == nil }
+    if !hearted.isEmpty {
+      do {
+        let results = try await TwitchAPI.shared.users(logins: hearted.map(\.login))
+        FavoritesStore.shared.refresh(results.map(\.0))
+        for (channel, stream) in results {
+          if let stream { liveByID[channel.id] = stream } else { offlineByID[channel.id] = OfflineChannel(channel: channel) }
+        }
+      } catch {
+        problem = problem ?? error.localizedDescription
+      }
+      for channel in hearted where liveByID[channel.id] == nil && offlineByID[channel.id] == nil {
+        offlineByID[channel.id] = OfflineChannel(channel: channel)
+      }
+    }
+
+    live = liveByID.values.sorted { $0.viewers > $1.viewers }
+    offline = offlineByID.values.sorted { a, b in
+      switch (a.lastLive, b.lastLive) {
+      case let (x?, y?): return x > y
+      case (.some, nil): return true
+      case (nil, .some): return false
+      case (nil, nil): return a.channel.name.lowercased() < b.channel.name.lowercased()
+      }
+    }
+    error = problem
+    loaded = true
   }
 }
 
 struct FollowingView: View {
   @EnvironmentObject private var favorites: FavoritesStore
-  @StateObject private var model = FollowingModel()
+  @ObservedObject private var store = FollowingStore.shared
+  @ObservedObject private var account = TwitchAccount.shared
+  @State private var showLogin = false
+  @State private var showOffline = true
 
   var body: some View {
     ScrollView {
-      if favorites.channels.isEmpty {
-        EmptyState(
-          systemImage: "heart", title: "No followed channels yet",
-          message: "Tap the heart on a channel to follow it. Follows are saved on this device.")
-          .padding(.top, 60)
-      } else {
-        if let error = model.error { ErrorBanner(message: error) { Task { await model.refresh(favorites.channels) } } }
-        if !model.live.isEmpty {
-          LazyVStack(alignment: .leading, spacing: 22) {
-            Text("Live").font(.title3.weight(.bold))
-            ForEach(model.live) { StreamCard(stream: $0) }
-          }
-          .padding()
+      LazyVStack(alignment: .leading, spacing: 0) {
+        if account.session == nil { signInCard }
+        if let error = store.error {
+          ErrorBanner(message: error) { Task { await store.refresh() } }
         }
-        if !model.offline.isEmpty {
-          LazyVStack(alignment: .leading, spacing: 12) {
-            Text("Offline").font(.title3.weight(.bold))
-            ForEach(model.offline) { channel in
-              NavigationLink(value: channel) { ChannelRow(channel: channel) }.buttonStyle(.plain)
+        if store.loaded, store.live.isEmpty, store.offline.isEmpty, store.error == nil {
+          EmptyState(
+            systemImage: "heart", title: "Nobody here yet",
+            message: account.session == nil
+              ? "Sign in to see who you follow on Twitch, or tap the heart under a stream."
+              : "Channels you follow on Twitch show up here.")
+            .padding(.top, 40)
+        }
+        if !store.live.isEmpty {
+          header("Live", count: store.live.count)
+          ForEach(store.live) { stream in
+            StreamCard(stream: stream).padding(.bottom, 22)
+          }
+        }
+        if !store.offline.isEmpty {
+          Button {
+            withAnimation(.easeInOut(duration: 0.2)) { showOffline.toggle() }
+          } label: {
+            HStack {
+              header("Offline", count: store.offline.count)
+              Spacer()
+              Image(systemName: "chevron.down").rotationEffect(.degrees(showOffline ? 0 : -90)).foregroundColor(.secondary)
             }
           }
-          .padding()
+          .buttonStyle(.plain)
+          if showOffline {
+            ForEach(store.offline) { entry in
+              NavigationLink(value: entry.channel) {
+                ChannelRow(channel: entry.channel, subtitle: entry.lastLive.map { "Last live \(Format.relative($0))" })
+                  .opacity(0.85)
+              }
+              .buttonStyle(.plain)
+              .padding(.vertical, 6)
+            }
+          }
         }
-        if model.isLoading && model.live.isEmpty && model.offline.isEmpty { ProgressView().padding(40) }
+        if store.isLoading && !store.loaded {
+          ProgressView().frame(maxWidth: .infinity).padding(40)
+        }
       }
+      .padding(.horizontal)
+      .padding(.bottom)
     }
-    .refreshable { await model.refresh(favorites.channels) }
+    .refreshable { await store.refresh() }
     .navigationTitle("Following")
-    .task(id: favorites.channels.map(\.id)) { await model.refresh(favorites.channels) }
+    .task(id: refreshKey) { await store.refresh() }
+    .onAppear { Task { await store.refreshIfStale() } }
+    .sheet(isPresented: $showLogin) { TwitchLoginView() }
+  }
+
+  /// Reload when the account or the hearted channels change.
+  private var refreshKey: String {
+    (account.session?.login ?? "-") + "|" + favorites.channels.map(\.id).joined(separator: ",")
+  }
+
+  private func header(_ title: String, count: Int) -> some View {
+    HStack(alignment: .firstTextBaseline, spacing: 6) {
+      Text(title).font(.title3.weight(.bold))
+      Text("\(count)").font(.subheadline.weight(.semibold)).foregroundColor(.secondary)
+    }
+    .padding(.top, 14)
+    .padding(.bottom, 10)
+  }
+
+  private var signInCard: some View {
+    Button {
+      showLogin = true
+    } label: {
+      HStack(spacing: 12) {
+        Image(systemName: "person.crop.circle.badge.plus").font(.title2).foregroundColor(.accentTeal)
+        VStack(alignment: .leading, spacing: 2) {
+          Text("Sign in with Twitch").font(.subheadline.weight(.semibold)).foregroundColor(.primary)
+          Text("See who you follow and chat as yourself").font(.footnote).foregroundColor(.secondary)
+        }
+        Spacer()
+        Image(systemName: "chevron.right").foregroundColor(.secondary)
+      }
+      .padding(14)
+      .background(Color(white: 0.11), in: RoundedRectangle(cornerRadius: 12))
+    }
+    .buttonStyle(.plain)
+    .padding(.top, 8)
   }
 }
