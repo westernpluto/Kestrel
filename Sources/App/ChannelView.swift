@@ -41,7 +41,7 @@ struct ChannelView: View {
   private var current: Channel { model.page?.channel ?? channel }
 
   var body: some View {
-    ScrollView {
+    RefreshableScrollView(refresh: { [model] in await model.load() }) {
       VStack(alignment: .leading, spacing: 16) {
         header
         if let stream = model.page?.stream {
@@ -67,7 +67,6 @@ struct ChannelView: View {
     }
     .navigationTitle(current.name)
     .navigationBarTitleDisplayMode(.inline)
-    .refreshable { await detachedRefresh { await model.load() } }
     .task { if model.page == nil { await model.load() } }
   }
 

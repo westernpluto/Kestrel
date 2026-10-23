@@ -12,6 +12,18 @@ final class ChatController: ObservableObject {
   @Published private(set) var canSend = false
   /// Room rules worth showing (slow mode, followers-only, …).
   @Published private(set) var roomRules: String?
+  /// The room only takes emotes.
+  @Published private(set) var emoteOnly = false
+  /// A message that didn't go out (the room's rules, or Twitch refused it): back into the box.
+  @Published private(set) var bounced: Bounced?
+
+  struct Bounced: Equatable {
+    let id = UUID()
+    var text: String
+    var reason: String
+  }
+
+  private var lastSent: (id: String, text: String, at: Date)?
   private(set) var messages: [ChatMessage] = []
   private(set) var thirdParty: [String: URL] = [:]
   private(set) var badges: [String: Badge] = [:]
@@ -236,6 +248,11 @@ final class ChatController: ObservableObject {
   func send(_ raw: String) {
     let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard canSend, !text.isEmpty, let socket, let login = signedInLogin else { return }
+    // Emote-only: Twitch would refuse anything but Twitch emotes, so don't send it at all.
+    if emoteOnly, !twitchEmoteIDs.isEmpty, !Self.onlyEmotes(text, twitchEmoteIDs) {
+      bounced = Bounced(text: raw, reason: "Emote-only chat: only Twitch emotes you have can be sent")
+      return
+    }
     let line: String
     if text.hasPrefix("/me ") {
       line = "PRIVMSG #\(channel.login.lowercased()) :\u{1}ACTION \(text.dropFirst(4))\u{1}"
@@ -246,12 +263,32 @@ final class ChatController: ObservableObject {
       guard let error, let chat = self else { return }
       Task { @MainActor in chat.enqueue(ChatMessage(notice: "Couldn't send: \(error.localizedDescription)")) }
     }
-    enqueue(ChatMessage(sent: text, userState: userState, login: login, emoteIDs: twitchEmoteIDs))
+    let echo = ChatMessage(sent: text, userState: userState, login: login, emoteIDs: twitchEmoteIDs)
+    lastSent = (echo.id, raw, Date())
+    enqueue(echo)
     let used = Set(text.split(separator: " ").map(String.init)).filter { emoteURLs[$0] != nil }
     if !used.isEmpty {
       RecentEmotes.add(Array(used))
       rebuildEmoteSections()
     }
+  }
+
+  /// Every word is a Twitch emote (third-party emotes are plain text to Twitch).
+  static func onlyEmotes(_ text: String, _ emotes: [String: String]) -> Bool {
+    let words = text.split(separator: " ").map(String.init)
+    return !words.isEmpty && words.allSatisfy { emotes[$0] != nil }
+  }
+
+  /// Twitch refused the message just sent: take the echo back out and return the text.
+  private func refused(_ reason: String) {
+    guard let sent = lastSent, Date().timeIntervalSince(sent.at) < 10 else { return }
+    lastSent = nil
+    pending.removeAll { $0.id == sent.id }
+    if messages.contains(where: { $0.id == sent.id }) {
+      messages.removeAll { $0.id == sent.id }
+      onUpdate?(true)
+    }
+    bounced = Bounced(text: sent.text, reason: reason)
   }
 
   private func connect() {
@@ -317,6 +354,7 @@ final class ChatController: ObservableObject {
         status = .connected
         room.merge(irc.tags) { _, new in new }
         roomRules = Self.describe(room)
+        emoteOnly = room["emote-only"] == "1"
       case "USERSTATE":
         userState = irc.tags
         canSend = signedInLogin != nil
@@ -341,6 +379,8 @@ final class ChatController: ObservableObject {
           connect()
           return
         }
+        // msg_emoteonly, msg_followersonly, msg_slowmode, msg_duplicate, …: your message didn't go out.
+        if let id = irc.tags["msg-id"], id.hasPrefix("msg_") { refused(message) }
         if let notice = ChatMessage(irc: irc) { enqueue(notice) }
       default:
         if let message = ChatMessage(irc: irc) {
@@ -899,6 +939,7 @@ struct ChatPanel: View {
   @State private var pickerOpen = false
   @State private var focused = false
   @State private var inputHeight = EmoteTextField.minHeight
+  @State private var warning: String?
 
   private static let spring = Animation.spring(response: 0.32, dampingFraction: 0.86)
 
@@ -930,6 +971,14 @@ struct ChatPanel: View {
     .onChange(of: account.session?.login) { _ in chat.reconnect() }
     .onChange(of: focused) { isFocused in
       if isFocused, pickerOpen { pickerOpen = false }
+    }
+    .onChange(of: chat.bounced) { bounced in
+      guard let bounced else { return }
+      draft = bounced.text
+      withAnimation(.easeOut(duration: 0.2)) { warning = bounced.reason }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+        withAnimation(.easeOut(duration: 0.3)) { if warning == bounced.reason { warning = nil } }
+      }
     }
   }
 
@@ -1034,14 +1083,19 @@ struct ChatPanel: View {
       .padding(.vertical, 10)
     } else if account.session != nil {
       VStack(alignment: .leading, spacing: 4) {
-        if let rules = chat.roomRules {
+        if let warning {
+          Label(warning, systemImage: "exclamationmark.circle.fill")
+            .font(.caption2.weight(.semibold)).foregroundColor(.orange).padding(.horizontal, 4)
+            .transition(.opacity)
+        } else if let rules = chat.roomRules {
           Text(rules).font(.caption2).foregroundColor(.secondary).padding(.horizontal, 4)
         }
         HStack(spacing: 8) {
           HStack(spacing: 4) {
             EmoteTextField(
               text: $draft, isFocused: $focused, height: $inputHeight,
-              placeholder: chat.canSend ? "Send a message" : "Joining chat…", enabled: chat.canSend,
+              placeholder: !chat.canSend ? "Joining chat…" : chat.emoteOnly ? "Emotes only" : "Send a message",
+              enabled: chat.canSend,
               emoteURL: { chat.emoteURL(for: $0) }, onSubmit: send
             )
             .frame(height: inputHeight)

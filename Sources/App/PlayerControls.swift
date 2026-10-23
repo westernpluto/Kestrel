@@ -15,6 +15,8 @@ struct PlayerVideoArea: View {
   var chromeVisible: Bool = true
   /// In the mini player (its own overlay takes the touches).
   var minimized: Bool = false
+  /// Landscape chat is on the left (swipes to show and hide it are mirrored).
+  var chatOnLeft: Bool = false
   var toggleChat: () -> Void
   var minimize: () -> Void
   /// Pulling the video down (portrait): how far, then where it was let go (and where it was headed).
@@ -195,8 +197,11 @@ struct PlayerVideoArea: View {
             OrientationLock.force(.landscape)
           }
         } else if landscape {
-          if dx < -60, !chatOpen { toggleChat() }
-          if dx > 60, chatOpen { toggleChat() }
+          // Swipe toward the middle to bring chat in, toward its edge to put it away.
+          let towardChatEdge = chatOnLeft ? dx < -60 : dx > 60
+          let awayFromChatEdge = chatOnLeft ? dx > 60 : dx < -60
+          if awayFromChatEdge, !chatOpen { toggleChat() }
+          if towardChatEdge, chatOpen { toggleChat() }
         }
       }
   }
@@ -318,36 +323,23 @@ struct PlayerControls: View {
     }
   }
 
+  /// The gear menu, built from plain values so it only redraws when those change. (Built from
+  /// the player directly, it was rebuilt with every twice-a-second stats update while open, which
+  /// made its text flicker.)
   private var settingsMenu: some View {
-    Menu {
-      let qualities = model.menuQualities
-      if qualities.count > 1 {
-        Menu {
-          Picker("Quality", selection: Binding(get: { model.menuSelectedQuality }, set: { id in
-            if let quality = qualities.first(where: { $0.id == id }) { model.selectQuality(quality) }
-          })) {
-            ForEach(qualities) { Text($0.label).tag($0.id) }
-          }
-        } label: {
-          Label("Quality · \(qualities.first { $0.id == model.menuSelectedQuality }?.label ?? "Auto")", systemImage: "slider.horizontal.3")
-        }
-      }
-      if model.isLive && model.canToggleLowLatency && !model.isRewinding {
-        Toggle(isOn: Binding(get: { settings.lowLatency }, set: { model.setLowLatency($0) })) {
-          Label("Low latency", systemImage: "bolt")
-        }
-      }
-      Toggle(isOn: $settings.showVideoStats) {
-        Label("Video stats", systemImage: "chart.bar.xaxis")
-      }
-    } label: {
-      Image(systemName: "gearshape.fill")
-        .font(.system(size: 18, weight: .semibold))
-        .frame(width: 40, height: 40)
-        .contentShape(Rectangle())
-    }
-    .accessibilityLabel("Settings")
-    .simultaneousGesture(TapGesture().onEnded { interacted(12) })
+    let qualities = model.menuQualities
+    return PlayerSettingsMenu(
+      qualities: qualities,
+      selected: model.menuSelectedQuality,
+      showLowLatency: model.isLive && model.canToggleLowLatency && !model.isRewinding,
+      lowLatency: settings.lowLatency,
+      showStats: settings.showVideoStats,
+      select: { [model] in model.selectQuality($0) },
+      setLowLatency: { [model] in model.setLowLatency($0) },
+      setStats: { [settings] in settings.showVideoStats = $0 },
+      opened: { [interacted] in interacted(12) }
+    )
+    .equatable()
   }
 
   private var bottomBar: some View {
@@ -686,5 +678,53 @@ struct StreamInfoBar: View {
     case .live: return model.stream?.title ?? model.channel?.name ?? ""
     case .video(let video): return video.title
     }
+  }
+}
+
+struct PlayerSettingsMenu: View, Equatable {
+  var qualities: [PlayerModel.Quality]
+  var selected: Int?
+  var showLowLatency: Bool
+  var lowLatency: Bool
+  var showStats: Bool
+  var select: (PlayerModel.Quality) -> Void
+  var setLowLatency: (Bool) -> Void
+  var setStats: (Bool) -> Void
+  var opened: () -> Void
+
+  static func == (a: Self, b: Self) -> Bool {
+    a.qualities == b.qualities && a.selected == b.selected && a.showLowLatency == b.showLowLatency
+      && a.lowLatency == b.lowLatency && a.showStats == b.showStats
+  }
+
+  var body: some View {
+    Menu {
+      if qualities.count > 1 {
+        Menu {
+          Picker("Quality", selection: Binding(get: { selected }, set: { id in
+            if let quality = qualities.first(where: { $0.id == id }) { select(quality) }
+          })) {
+            ForEach(qualities) { Text($0.label).tag($0.id) }
+          }
+        } label: {
+          Label("Quality · \(qualities.first { $0.id == selected }?.label ?? "Auto")", systemImage: "slider.horizontal.3")
+        }
+      }
+      if showLowLatency {
+        Toggle(isOn: Binding(get: { lowLatency }, set: setLowLatency)) {
+          Label("Low latency", systemImage: "bolt")
+        }
+      }
+      Toggle(isOn: Binding(get: { showStats }, set: setStats)) {
+        Label("Video stats", systemImage: "chart.bar.xaxis")
+      }
+    } label: {
+      Image(systemName: "gearshape.fill")
+        .font(.system(size: 18, weight: .semibold))
+        .frame(width: 40, height: 40)
+        .contentShape(Rectangle())
+    }
+    .accessibilityLabel("Settings")
+    .simultaneousGesture(TapGesture().onEnded { opened() })
   }
 }

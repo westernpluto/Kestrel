@@ -60,7 +60,37 @@ extension Error {
 /// redraws mid-refresh, which cancelled the requests and showed "cancelled". The work runs in
 /// its own task and the spinner waits for it.
 func detachedRefresh(_ work: @escaping @MainActor () async -> Void) async {
+  let started = Date()
   await Task { @MainActor in await work() }.value
+  // Let the new content lay out while the spinner is still there (ending the refresh while the
+  // list changes left a gap at the top), and don't snap back instantly on a quick refresh.
+  let elapsed = Date().timeIntervalSince(started)
+  try? await Task.sleep(nanoseconds: UInt64(max(0.2, 0.6 - elapsed) * 1_000_000_000))
+}
+
+/// A scroll view with pull to refresh that always settles back at the top afterwards.
+struct RefreshableScrollView<Content: View>: View {
+  var refresh: @MainActor () async -> Void
+  @ViewBuilder var content: () -> Content
+  private static var top: String { "refreshable-top" }
+
+  var body: some View {
+    ScrollViewReader { proxy in
+      ScrollView {
+        VStack(spacing: 0) {
+          Color.clear.frame(height: 0).id(Self.top)
+          content()
+        }
+      }
+      .refreshable {
+        await detachedRefresh(refresh)
+        // If the list was left pulled down after the spinner went away, put it back.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+          withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(Self.top, anchor: .top) }
+        }
+      }
+    }
+  }
 }
 
 struct LiveBadge: View {

@@ -7,7 +7,9 @@ struct BrowseView: View {
   @StateObject private var categories = Paginator<Category> { try await TwitchAPI.shared.topCategories(after: $0) }
 
   var body: some View {
-    ScrollView {
+    RefreshableScrollView(refresh: { [mode, streams, categories] in
+      if mode == .live { await streams.refresh() } else { await categories.refresh() }
+    }) {
       Picker("", selection: $mode) {
         ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
       }
@@ -20,11 +22,6 @@ struct BrowseView: View {
         StreamList(paginator: streams)
       case .categories:
         CategoryGrid(paginator: categories)
-      }
-    }
-    .refreshable {
-      await detachedRefresh { [mode, streams, categories] in
-        if mode == .live { await streams.refresh() } else { await categories.refresh() }
       }
     }
     .navigationTitle("Browse")
@@ -87,7 +84,7 @@ struct CategoryView: View {
   }
 
   var body: some View {
-    ScrollView {
+    RefreshableScrollView(refresh: { [streams] in await streams.refresh() }) {
       HStack(alignment: .top, spacing: 14) {
         RemoteImage(url: TwitchAPI.image(category.boxArtURL, width: 285, height: 380))
           .frame(width: 72, height: 96)
@@ -103,7 +100,6 @@ struct CategoryView: View {
       .padding(.horizontal)
       StreamList(paginator: streams, showCategory: false)
     }
-    .refreshable { await detachedRefresh { await streams.refresh() } }
     .navigationTitle(category.name)
     .navigationBarTitleDisplayMode(.inline)
     .task { if streams.items.isEmpty { await streams.refresh() } }
@@ -310,7 +306,7 @@ struct FollowingView: View {
   @State private var showOffline = true
 
   var body: some View {
-    ScrollView {
+    RefreshableScrollView(refresh: { [store] in await store.refresh(force: true) }) {
       LazyVStack(alignment: .leading, spacing: 0) {
         if account.session == nil { signInCard }
         if let error = store.error {
@@ -359,7 +355,6 @@ struct FollowingView: View {
       .padding(.horizontal)
       .padding(.bottom)
     }
-    .refreshable { await detachedRefresh { await store.refresh(force: true) } }
     .navigationTitle("Following")
     .task(id: refreshKey) { await store.refresh() }
     .onAppear { Task { await store.refreshIfStale() } }

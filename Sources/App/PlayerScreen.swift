@@ -214,8 +214,19 @@ final class InterfaceOrientationObserver: ObservableObject {
   }
 
   private func refresh() {
-    guard let value = Self.scene?.interfaceOrientation, value != orientation else { return }
+    guard let value = Self.currentOrientation, value != orientation else { return }
     orientation = value
+  }
+
+  /// The interface orientation, or the device's when the scene can't say.
+  private static var currentOrientation: UIInterfaceOrientation? {
+    if let value = scene?.effectiveGeometry.interfaceOrientation, value != .unknown { return value }
+    switch UIDevice.current.orientation {
+    case .landscapeLeft: return .landscapeRight  // device and interface name the sides oppositely
+    case .landscapeRight: return .landscapeLeft
+    case .portrait: return .portrait
+    default: return nil
+    }
   }
 
   private static var scene: UIWindowScene? {
@@ -223,7 +234,7 @@ final class InterfaceOrientationObserver: ObservableObject {
   }
 
   /// In landscape: whether the camera (Dynamic Island) is on the left, read right now.
-  static var cameraOnLeftNow: Bool? { cameraOnLeft(scene?.interfaceOrientation) }
+  static var cameraOnLeftNow: Bool? { cameraOnLeft(currentOrientation) }
 
   /// The last orientation seen.
   var cameraOnLeft: Bool? { Self.cameraOnLeft(orientation) }
@@ -237,18 +248,19 @@ final class InterfaceOrientationObserver: ObservableObject {
   }
 }
 
-/// The keyboard's height from the bottom of the screen, animated like the keyboard. Measured with
-/// UIKit's keyboard layout guide (exact, whatever the keyboard looks like) and the keyboard
-/// notifications; the larger wins.
+/// The keyboard's height from the bottom of the screen, animated like the keyboard, from the
+/// keyboard's own notifications. (A probe on UIKit's keyboard layout guide reported nonsense
+/// inside SwiftUI and threw the message box to the top of the screen.)
 final class KeyboardObserver: ObservableObject {
   @Published private(set) var overlap: CGFloat = 0
-  private var fromNotification: CGFloat = 0
-  private var fromGuide: CGFloat = 0
   private var tokens: [NSObjectProtocol] = []
 
   init() {
     let center = NotificationCenter.default
-    for name in [UIResponder.keyboardWillChangeFrameNotification, UIResponder.keyboardWillHideNotification] {
+    for name in [
+      UIResponder.keyboardWillChangeFrameNotification, UIResponder.keyboardWillHideNotification,
+      UIResponder.keyboardDidChangeFrameNotification,
+    ] {
       tokens.append(
         center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
           self?.handle(note)
@@ -262,68 +274,11 @@ final class KeyboardObserver: ObservableObject {
     let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue ?? .zero
     let screen = UIScreen.main.bounds
     let hiding = note.name == UIResponder.keyboardWillHideNotification || end.isEmpty || end.minY >= screen.maxY - 1
-    fromNotification = hiding ? 0 : max(0, screen.maxY - end.minY)
-    if hiding { fromGuide = 0 }
-    publish()
-  }
-
-  /// From the layout guide probe (includes the home-indicator strip when the keyboard is hidden,
-  /// so values that small count as no keyboard).
-  func guideChanged(_ value: CGFloat) {
-    fromGuide = value > 60 ? value : 0
-    if fromNotification == 0, fromGuide > 0 { return }  // wait for the notification to confirm
-    publish()
-  }
-
-  private func publish() {
-    let value = fromNotification > 0 ? max(fromNotification, fromGuide) : 0
+    // Never more than the keyboard can be (guards against a bogus frame).
+    let value = hiding ? 0 : min(screen.height * 0.6, max(0, screen.maxY - end.minY))
     guard abs(value - overlap) > 0.5 else { return }
     // The keyboard's own curve (a heavily damped spring).
     withAnimation(.interpolatingSpring(mass: 3, stiffness: 1000, damping: 500, initialVelocity: 0)) { overlap = value }
-  }
-}
-
-/// Reports where UIKit's keyboard layout guide says the keyboard starts.
-struct KeyboardProbe: UIViewRepresentable {
-  let observer: KeyboardObserver
-
-  func makeUIView(context: Context) -> ProbeView {
-    let view = ProbeView()
-    view.isUserInteractionEnabled = false
-    view.onChange = { [weak observer] value in observer?.guideChanged(value) }
-    return view
-  }
-
-  func updateUIView(_ view: ProbeView, context: Context) {}
-
-  final class ProbeView: UIView {
-    var onChange: ((CGFloat) -> Void)?
-    private let marker = UIView()
-    private var last: CGFloat = -1
-
-    override func didMoveToWindow() {
-      super.didMoveToWindow()
-      guard window != nil, marker.superview == nil else { return }
-      marker.translatesAutoresizingMaskIntoConstraints = false
-      marker.isUserInteractionEnabled = false
-      addSubview(marker)
-      NSLayoutConstraint.activate([
-        marker.leadingAnchor.constraint(equalTo: leadingAnchor),
-        marker.widthAnchor.constraint(equalToConstant: 1),
-        marker.topAnchor.constraint(equalTo: keyboardLayoutGuide.topAnchor),
-        marker.bottomAnchor.constraint(equalTo: keyboardLayoutGuide.bottomAnchor),
-      ])
-    }
-
-    override func layoutSubviews() {
-      super.layoutSubviews()
-      guard let window else { return }
-      let top = marker.convert(marker.bounds, to: window).minY
-      let value = max(0, window.bounds.maxY - top)
-      guard abs(value - last) > 0.5 else { return }
-      last = value
-      DispatchQueue.main.async { [weak self] in self?.onChange?(value) }
-    }
   }
 }
 
@@ -341,6 +296,9 @@ struct PlayerLayout: Equatable {
   var panelPadding: EdgeInsets
   var panelVisible: Bool
   var landscape: Bool
+  /// Landscape chat sits on the side away from the Dynamic Island, so its text can run to the
+  /// edge; the island's strip becomes the edge of the video's black border instead.
+  var chatOnLeft = false
 
   static let infoHeight: CGFloat = 62
   /// How far from the screen edge the Dynamic Island reaches in landscape (plus a little air).
@@ -352,7 +310,8 @@ struct PlayerLayout: Equatable {
   ///   - cameraOnLeft: landscape only; nil = unknown (keep clear on both sides).
   init(safe: CGSize, insets: EdgeInsets, keyboard: CGFloat, chatOpen: Bool, chatWidth: CGFloat, cameraOnLeft: Bool?) {
     landscape = safe.width > safe.height
-    let bottomPad = keyboard > 0 ? keyboard + 4 : insets.bottom
+    // A little air above the keyboard (newer keyboards draw slightly above the frame they report).
+    let bottomPad = keyboard > 0 ? keyboard + 14 : insets.bottom
     if !landscape {
       let width = safe.width
       let videoHeight = (width * 9 / 16).rounded()
@@ -372,25 +331,35 @@ struct PlayerLayout: Equatable {
     let top = -insets.top
     let height = safe.height + insets.top + insets.bottom
     let chat = min(max(chatWidth, 240), screenWidth * 0.5).rounded()
-    let cameraLeft = cameraOnLeft ?? true
-    let cameraRight = cameraOnLeft.map { !$0 } ?? true
     let clearance = min(Self.cameraClearance, max(insets.leading, insets.trailing))
+    // Camera on the right: chat goes left. Unknown: chat right, clear of a camera on either side.
+    chatOnLeft = cameraOnLeft == false
+    let cameraOnChatSide = cameraOnLeft == nil
     if chatOpen {
-      // Chat runs to the screen edge (its text only keeps clear of the camera if it's on that
-      // side); the video gets everything else and only keeps clear of the camera.
-      panel = CGRect(x: right - chat, y: top, width: chat, height: height)
-      panelPadding = EdgeInsets(top: insets.top + 6, leading: 0, bottom: bottomPad, trailing: cameraRight ? clearance : 12)
+      if chatOnLeft {
+        panel = CGRect(x: left, y: top, width: chat, height: height)
+        panelPadding = EdgeInsets(top: insets.top + 6, leading: 12, bottom: bottomPad, trailing: 0)
+        let videoRight = right - clearance
+        video = CGRect(x: panel.maxX, y: top, width: videoRight - panel.maxX, height: height)
+        controls = EdgeInsets(top: insets.top + 8, leading: 8, bottom: insets.bottom + 4, trailing: 8)
+      } else {
+        panel = CGRect(x: right - chat, y: top, width: chat, height: height)
+        panelPadding = EdgeInsets(
+          top: insets.top + 6, leading: 0, bottom: bottomPad, trailing: cameraOnChatSide ? clearance : 12)
+        let videoLeft = left + clearance
+        video = CGRect(x: videoLeft, y: top, width: panel.minX - videoLeft, height: height)
+        controls = EdgeInsets(top: insets.top + 8, leading: 8, bottom: insets.bottom + 4, trailing: 8)
+      }
       panelVisible = true
-      let videoLeft = cameraLeft ? left + clearance : left
-      video = CGRect(x: videoLeft, y: top, width: panel.minX - videoLeft, height: height)
-      controls = EdgeInsets(
-        top: insets.top + 8, leading: cameraLeft ? 8 : clearance, bottom: insets.bottom + 4, trailing: 8)
     } else {
       // Full screen: a 16:9 picture at full height leaves room for the camera on its own.
       video = CGRect(x: left, y: top, width: screenWidth, height: height)
       controls = EdgeInsets(top: insets.top + 8, leading: clearance, bottom: insets.bottom + 4, trailing: clearance)
-      panel = CGRect(x: right + 1, y: top, width: chat, height: height)
-      panelPadding = EdgeInsets(top: insets.top + 6, leading: 0, bottom: bottomPad, trailing: clearance)
+      panel = chatOnLeft
+        ? CGRect(x: left - chat - 1, y: top, width: chat, height: height)
+        : CGRect(x: right + 1, y: top, width: chat, height: height)
+      panelPadding = EdgeInsets(
+        top: insets.top + 6, leading: chatOnLeft ? 12 : 0, bottom: bottomPad, trailing: chatOnLeft ? 0 : 12)
       panelVisible = false
     }
   }
@@ -494,7 +463,7 @@ struct PlayerScreen: View {
 
         PlayerVideoArea(
           model: model, landscape: landscape, chatOpen: chatOpen, controlInsets: layout.controls,
-          chromeVisible: progress == 0, minimized: app.playerMinimized,
+          chromeVisible: progress == 0, minimized: app.playerMinimized, chatOnLeft: layout.chatOnLeft,
           toggleChat: { withAnimation(Self.spring) { landscapeChat.toggle() } },
           minimize: minimize,
           onPull: { dy in
@@ -555,9 +524,6 @@ struct PlayerScreen: View {
         }
       }
       .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
-      // Measures the keyboard only: it must never take touches (it covers the whole screen, and
-      // took every tap meant for the app behind the mini player).
-      .background(KeyboardProbe(observer: keyboard).allowsHitTesting(false))
       .opacity(closing ? 0 : 1)
       .scaleEffect(closing ? 0.96 : 1, anchor: .bottomTrailing)
       .statusBarHidden(landscape && progress == 0)
@@ -626,6 +592,7 @@ struct PlayerScreen: View {
   private func sidePanel(_ layout: PlayerLayout) -> some View {
     ChatPanel(chat: chat, bottomInset: layout.panelPadding.bottom, compact: layout.landscape)
       .padding(.top, layout.panelPadding.top)
+      .padding(.leading, layout.panelPadding.leading)
       .padding(.trailing, layout.panelPadding.trailing)
   }
 
@@ -636,12 +603,13 @@ struct PlayerScreen: View {
       .frame(width: 4, height: 44)
       .frame(width: 24, height: layout.panel.height)
       .contentShape(Rectangle())
-      .offset(x: layout.panel.minX - 12, y: layout.panel.minY)
+      .offset(x: (layout.chatOnLeft ? layout.panel.maxX : layout.panel.minX) - 12, y: layout.panel.minY)
       .gesture(
         DragGesture(minimumDistance: 2, coordinateSpace: .global)
           .onChanged { value in
             if resizingFrom == nil { resizingFrom = layout.panel.width }
-            let width = (resizingFrom ?? layout.panel.width) - value.translation.width
+            let dx = layout.chatOnLeft ? value.translation.width : -value.translation.width
+            let width = (resizingFrom ?? layout.panel.width) + dx
             resizedWidth = min(max(width, 240), screenWidth * 0.5)
           }
           .onEnded { _ in
