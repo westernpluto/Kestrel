@@ -21,6 +21,10 @@ An iOS client for watching Twitch with ads blocked inside the player, low-latenc
   - *Stitched-in ads*, low-latency player: the player loads its playlists from the local server too. Kestrel passes Twitch's playlists through with the low-latency tags intact but with every ad marker removed. While an ad is stitched into the video, Kestrel serves the playlist of an ad-free copy of the stream instead (the TwitchAdSolutions/vaft technique). If no copy is ad-free, the ad is hidden and muted.
   - VODs have no stitched-in ads, and the app never requests any.
 
+- **Twitch account (optional):** sign in on Twitch's own login page inside the app (or paste the website's `auth-token`). With Turbo, or a sub to the channel, Twitch sends no ads at all, and some channels only offer 1440p to signed-in viewers. If Twitch refuses a signed-in request, Kestrel plays as a guest and says so in the Activity log.
+- **Ad-free region proxy (optional):** Twitch decides about ads by where the request comes from. Settings → Ad-free region proxy sends only Twitch's playback requests (tokens and playlists, not video) through an HTTP proxy, e.g. one in a country where Twitch doesn't run ads. This is how TTV LOL PRO works.
+- **Video stats:** a Twitch-style overlay, switched on from the quality menu or Settings. It shows player, quality, codecs, resolution, frame rate, bitrate, bandwidth, buffer, latency, dropped frames, ad state, proxy and account.
+
 **Settings → Activity log** shows what happened in each ad break and any player fallbacks.
 
 ## Install

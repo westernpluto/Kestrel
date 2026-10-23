@@ -782,6 +782,24 @@ func testLowLatencySession() {
   check(media.status == 200 && media.body.contains("#EXT-X-TWITCH-PREFETCH"), "LL media over HTTP")
 }
 
+func testTokenInfo() {
+  let anonymous = PlaybackToken(
+    value: #"{"adblock":false,"chansub":{"restricted_bitrates":[],"view_until":1924905600},"hide_ads":false,"server_ads":true,"show_ads":true,"subscriber":false,"turbo":false,"user_id":null}"#,
+    signature: "s")
+  check(anonymous.info?.signedIn == false && anonymous.info?.showAds == true, "anonymous info")
+  check(anonymous.summary == "Twitch session: ads possible (not signed in)", anonymous.summary)
+  let turbo = PlaybackToken(
+    value: #"{"chansub":{"restricted_bitrates":["chunked"]},"hide_ads":true,"server_ads":false,"show_ads":false,"subscriber":false,"turbo":true,"user_id":123456}"#,
+    signature: "s")
+  check(turbo.info?.signedIn == true && turbo.info?.turbo == true, "turbo info")
+  check(turbo.summary == "Twitch session: no ads (signed in, Turbo); subscriber-only qualities: chunked", turbo.summary)
+  check(PlaybackToken(value: "not json", signature: "").info == nil, "bad token value")
+  // Proxy settings build a session without crashing (credentials included).
+  let client = URLSessionHTTPClient(timeout: 5, proxy: HTTPProxy(host: "proxy.example", port: 8080, username: "u", password: "p"))
+  check(client.proxy?.description == "proxy.example:8080", "proxy client")
+}
+
+testTokenInfo()
 testDates()
 testMasterParsing()
 testFullWindowAdDetection()

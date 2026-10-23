@@ -77,6 +77,7 @@ actor LowLatencySession: PlaylistSource {
   /// Fetches the master playlist. Returns Twitch's renditions (landscape and audio only).
   func start() async throws -> [HLSVariant] {
     let token = try await tokens.streamToken(login: login, playerType: config.mainPlayerType, platform: "web")
+    log.add(token.summary)
     let url = Usher.live(login: login, token: token, codecs: config.codecs, lowLatency: true)
     let (data, response) = try await http.data(for: Usher.playlistRequest(url))
     guard response.statusCode == 200, HLS.looksLikePlaylist(data), let text = String(data: data, encoding: .utf8) else {

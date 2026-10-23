@@ -20,6 +20,18 @@ final class AppSettings: ObservableObject {
     didSet { defaults.set(highestQualityOverLatency, forKey: "highestQualityOverLatency") }
   }
   @Published var playerEngine: PlayerEngine { didSet { defaults.set(playerEngine.rawValue, forKey: "playerEngine") } }
+  // Proxy for Twitch playback requests (tokens and playlists, not video).
+  @Published var proxyEnabled: Bool { didSet { defaults.set(proxyEnabled, forKey: "proxyEnabled"); applyProxy() } }
+  @Published var proxyHost: String { didSet { defaults.set(proxyHost, forKey: "proxyHost"); applyProxy() } }
+  @Published var proxyPort: String { didSet { defaults.set(proxyPort, forKey: "proxyPort"); applyProxy() } }
+  @Published var proxyUsername: String { didSet { defaults.set(proxyUsername, forKey: "proxyUsername"); applyProxy() } }
+  @Published var proxyPassword: String {
+    didSet {
+      SecretStore.set(proxyPassword.isEmpty ? nil : Data(proxyPassword.utf8), for: "proxy")
+      applyProxy()
+    }
+  }
+  @Published var showVideoStats: Bool { didSet { defaults.set(showVideoStats, forKey: "showVideoStats") } }
   @Published var chatEnabled: Bool { didSet { defaults.set(chatEnabled, forKey: "chatEnabled") } }
   @Published var thirdPartyEmotes: Bool { didSet { defaults.set(thirdPartyEmotes, forKey: "thirdPartyEmotes") } }
   @Published var chatTimestamps: Bool { didSet { defaults.set(chatTimestamps, forKey: "chatTimestamps") } }
@@ -28,7 +40,8 @@ final class AppSettings: ObservableObject {
   private init() {
     defaults.register(defaults: [
       "backupStreams": true, "allowLowQualityBackup": true, "adFallback": AdFallback.muteAndCover.rawValue,
-      "lowLatency": true, "enhancedCodecs": true, "highestQualityOverLatency": false, "backgroundAudio": true, "chatEnabled": true,
+      "lowLatency": true, "enhancedCodecs": true, "highestQualityOverLatency": false, "proxyEnabled": false,
+      "showVideoStats": false, "backgroundAudio": true, "chatEnabled": true,
       "thirdPartyEmotes": true, "chatTimestamps": false, "chatFontSize": 15.0,
     ])
     backupStreams = defaults.bool(forKey: "backupStreams")
@@ -39,10 +52,41 @@ final class AppSettings: ObservableObject {
     backgroundAudio = defaults.bool(forKey: "backgroundAudio")
     highestQualityOverLatency = defaults.bool(forKey: "highestQualityOverLatency")
     playerEngine = PlayerEngine.resolve(defaults.string(forKey: "playerEngine"))
+    proxyEnabled = defaults.bool(forKey: "proxyEnabled")
+    proxyHost = defaults.string(forKey: "proxyHost") ?? ""
+    proxyPort = defaults.string(forKey: "proxyPort") ?? ""
+    proxyUsername = defaults.string(forKey: "proxyUsername") ?? ""
+    proxyPassword = SecretStore.get("proxy").flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    showVideoStats = defaults.bool(forKey: "showVideoStats")
     chatEnabled = defaults.bool(forKey: "chatEnabled")
     thirdPartyEmotes = defaults.bool(forKey: "thirdPartyEmotes")
     chatTimestamps = defaults.bool(forKey: "chatTimestamps")
     chatFontSize = defaults.double(forKey: "chatFontSize")
+    initialized = true
+    applyProxy()
+  }
+
+  /// The proxy for playback requests, when it's switched on and filled in.
+  var playbackProxy: HTTPProxy? {
+    let host = proxyHost.trimmingCharacters(in: .whitespaces)
+    guard proxyEnabled, !host.isEmpty, let port = Int(proxyPort.trimmingCharacters(in: .whitespaces)), port > 0 else { return nil }
+    return HTTPProxy(
+      host: host, port: port, username: proxyUsername.isEmpty ? nil : proxyUsername,
+      password: proxyPassword.isEmpty ? nil : proxyPassword)
+  }
+
+  /// HTTP client for Twitch tokens and playlists (through the proxy when one is set).
+  func playbackClient(timeout: TimeInterval = 8) -> HTTPClient {
+    URLSessionHTTPClient(timeout: timeout, proxy: playbackProxy)
+  }
+
+  private var initialized = false
+
+  /// Playback tokens go through the proxy too: Twitch decides about ads by where the token
+  /// request comes from.
+  func applyProxy() {
+    guard initialized else { return }
+    TwitchAPI.shared.playbackHTTP = playbackProxy.map { URLSessionHTTPClient(timeout: 12, proxy: $0) }
   }
 
   /// Twitch's `supported_codecs` for new playbacks.

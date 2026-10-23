@@ -17,16 +17,38 @@ enum Browser {
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
 }
 
+/// An HTTP(S) proxy, e.g. one in a country where Twitch doesn't run ads.
+struct HTTPProxy: Equatable, Sendable {
+  var host: String
+  var port: Int
+  var username: String?
+  var password: String?
+
+  var description: String { "\(host):\(port)" }
+}
+
 final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
   let session: URLSession
+  let proxy: HTTPProxy?
 
-  init(timeout: TimeInterval = 10) {
+  init(timeout: TimeInterval = 10, proxy: HTTPProxy? = nil) {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.timeoutIntervalForRequest = timeout
     configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
     configuration.urlCache = nil
     configuration.httpMaximumConnectionsPerHost = 6
-    session = URLSession(configuration: configuration)
+    self.proxy = proxy
+    var delegate: ProxyCredentials?
+    if let proxy {
+      configuration.connectionProxyDictionary = [
+        "HTTPEnable": 1, "HTTPProxy": proxy.host, "HTTPPort": proxy.port,
+        "HTTPSEnable": 1, "HTTPSProxy": proxy.host, "HTTPSPort": proxy.port,
+      ]
+      if let username = proxy.username, !username.isEmpty {
+        delegate = ProxyCredentials(URLCredential(user: username, password: proxy.password ?? "", persistence: .forSession))
+      }
+    }
+    session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
   }
 
   func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -47,6 +69,23 @@ final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
       }
     } onCancel: {
       holder.cancel()
+    }
+  }
+}
+
+/// Answers a proxy's request for a username and password.
+private final class ProxyCredentials: NSObject, URLSessionTaskDelegate {
+  let credential: URLCredential
+  init(_ credential: URLCredential) { self.credential = credential }
+
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+  ) {
+    if challenge.protectionSpace.isProxy(), challenge.previousFailureCount == 0 {
+      completionHandler(.useCredential, credential)
+    } else {
+      completionHandler(.performDefaultHandling, nil)
     }
   }
 }
@@ -168,6 +207,40 @@ final class ActivityLog: @unchecked Sendable {
 struct PlaybackToken: Equatable, Sendable {
   var value: String
   var signature: String
+
+  /// What Twitch decided for this playback session (the token value is JSON).
+  struct Info: Equatable, Sendable {
+    var showAds: Bool?
+    var hideAds: Bool?
+    var serverAds: Bool?
+    var turbo: Bool?
+    var subscriber: Bool?
+    var signedIn: Bool
+    var restrictedBitrates: [String]
+  }
+
+  var info: Info? {
+    guard let object = try? JSONSerialization.jsonObject(with: Data(value.utf8)) as? [String: Any] else { return nil }
+    func flag(_ key: String) -> Bool? { (object[key] as? NSNumber)?.boolValue }
+    let userID = object["user_id"]
+    let signedIn = !(userID == nil || userID is NSNull || (userID as? String)?.isEmpty == true)
+    let restricted = ((object["chansub"] as? [String: Any])?["restricted_bitrates"] as? [String]) ?? []
+    return Info(
+      showAds: flag("show_ads"), hideAds: flag("hide_ads"), serverAds: flag("server_ads"), turbo: flag("turbo"),
+      subscriber: flag("subscriber"), signedIn: signedIn, restrictedBitrates: restricted)
+  }
+
+  /// One line for the activity log.
+  var summary: String {
+    guard let info else { return "Twitch session details unavailable" }
+    var parts: [String] = [info.signedIn ? "signed in" : "not signed in"]
+    if info.turbo == true { parts.append("Turbo") }
+    if info.subscriber == true { parts.append("subscriber") }
+    let ads = info.hideAds == true || info.showAds == false ? "no ads" : "ads possible"
+    var line = "Twitch session: \(ads) (\(parts.joined(separator: ", ")))"
+    if !info.restrictedBitrates.isEmpty { line += "; subscriber-only qualities: \(info.restrictedBitrates.joined(separator: ", "))" }
+    return line
+  }
 }
 
 protocol PlaybackTokenProvider: Sendable {

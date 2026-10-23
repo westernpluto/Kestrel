@@ -45,6 +45,11 @@
     private var audioOnlyForBackground = false
     private var pausedForBackground = false
     private var notificationTokens: [NSObjectProtocol] = []
+    private var localURL: URL?
+    private var lastReload = Date.distantPast
+    private var bufferingSince: Date?
+    private var framesDecoded = (count: 0, at: Date())
+    private var renderedFPS: Double?
 
     /// Quality-menu IDs at or above this pick a rendition for the Apple player.
     static let applePlayerQualityBase = 1000
@@ -113,6 +118,7 @@
           // as-is. Ads can't be filtered this way.
           let token = try await TwitchAPI.shared.streamToken(login: login, playerType: "popout", platform: "web")
           guard !stopped else { return }
+          localURL = nil
           player.load(Usher.live(login: login, token: token, codecs: codecs, lowLatency: true))
           return
         }
@@ -122,13 +128,16 @@
         config.backupStreams = settings.backupStreams
         config.allowLowQualityBackup = settings.allowLowQualityBackup
         let session = LowLatencySession(
-          login: login, config: config, http: URLSessionHTTPClient(timeout: 8), tokens: TwitchAPI.shared
+          login: login, config: config, http: settings.playbackClient(timeout: 8), tokens: TwitchAPI.shared
         ) { [weak self] update in
           guard let controller = self else { return }
           Task { @MainActor in controller.apply(update) }
         }
         let variants = try await session.start()
         guard !stopped, !Task.isCancelled else { return }
+        if TwitchAuth.shared.session != nil, let refused = TwitchAPI.shared.lastAuthFallback {
+          ActivityLog.shared.add("Twitch refused the signed-in request (\(refused)), so this stream plays as a guest")
+        }
         await StreamProxy.shared.ensureResponsive()
         guard !stopped, !Task.isCancelled else { return }
         if let old = self.session { StreamProxy.shared.remove(old.id) }
@@ -137,7 +146,10 @@
           ($0.height, $0.frameRate, $0.codecRank, $0.bandwidth) > ($1.height, $1.frameRate, $1.codecRank, $1.bandwidth)
         }
         adTimeline = AdTimeline()
-        player.load(try StreamProxy.shared.register(session))
+        let url = try StreamProxy.shared.register(session)
+        localURL = url
+        lastReload = Date()
+        player.load(url)
       } catch is CancellationError {
       } catch StreamSession.StartError.offline {
         model?.lowLatencyOffline()
@@ -162,8 +174,23 @@
     }
 
     private func apply(_ update: LowLatencyUpdate) {
+      let previous = adState
       adTimeline = update.ads
       adState = update.state
+      // Back from an ad-free copy to the main stream: the player can get stuck on the switch
+      // (TwitchAdSolutions reloads here too), so start it again at the live edge.
+      if case .replaced = previous, update.state == .none || update.state == .skipped {
+        reload(reason: "back from the ad-free copy")
+      }
+    }
+
+    /// Restarts playback on the same playlists (quick: no new token).
+    private func reload(reason: String) {
+      guard !stopped, Date().timeIntervalSince(lastReload) > 20 else { return }
+      lastReload = Date()
+      bufferingSince = nil
+      ActivityLog.shared.add("Low-latency player: reloading (\(reason))")
+      if let localURL { player.load(localURL) } else { load() }
     }
 
     // MARK: Player events (forwarded from the delegate proxy on the main queue)
@@ -295,6 +322,20 @@
       let latency = seconds.isFinite && seconds >= 0 ? seconds : nil
       model.latency = latency
 
+      // Stuck buffering (e.g. after a switch between copies of the stream): start again.
+      if player.state == .buffering, !pausedForBackground, !detachedForBackground {
+        if bufferingSince == nil { bufferingSince = Date() }
+        if let since = bufferingSince, Date().timeIntervalSince(since) > 8 { reload(reason: "stuck buffering") }
+      } else {
+        bufferingSince = nil
+      }
+      let decoded = player.videoFramesDecoded
+      let elapsed = Date().timeIntervalSince(framesDecoded.at)
+      if elapsed >= 1 {
+        renderedFPS = decoded >= framesDecoded.count ? Double(decoded - framesDecoded.count) / elapsed : nil
+        framesDecoded = (decoded, Date())
+      }
+
       // Only when no ad-free copy was found does the player get ad video; hide it while the frame
       // on screen (stamped `latency` seconds ago) is inside an ad.
       let inAd = latency.map { adTimeline.covers(Date().addingTimeInterval(-$0)) } ?? adTimeline.isActive
@@ -308,6 +349,32 @@
       }
       let shown: AdState = inAd ? .covering : (adState == .covering ? .searching : adState)
       if model.adState != shown { model.adState = shown }
+    }
+
+    /// Video stats for the overlay.
+    func stats() -> [StatLine] {
+      var lines = [StatLine(label: "Player", value: "Low latency (IVS \(player.version))")]
+      lines.append(StatLine(label: "Low-latency mode", value: player.isLiveLowLatency ? "on" : "off"))
+      if let quality = player.quality {
+        lines.append(StatLine(label: "Quality", value: Self.label(quality) + (player.autoQualityMode ? " (auto)" : "")))
+        lines.append(StatLine(label: "Codecs", value: quality.codecs.isEmpty ? "–" : quality.codecs))
+        let fps = renderedFPS.map { String(format: " · rendering %.0f", $0) } ?? ""
+        lines.append(StatLine(label: "Frame rate", value: String(format: "%.0f fps", quality.framerate) + fps))
+      }
+      let size = player.videoSize
+      if size.width > 0 { lines.append(StatLine(label: "Resolution", value: "\(Int(size.width))×\(Int(size.height))")) }
+      lines.append(StatLine(label: "Bitrate", value: StatFormat.mbps(Double(player.videoBitrate))))
+      lines.append(StatLine(label: "Bandwidth", value: StatFormat.mbps(Double(player.bandwidthEstimate))))
+      let ahead = player.buffered.seconds - player.position.seconds
+      lines.append(StatLine(label: "Buffer", value: StatFormat.seconds(ahead.isFinite ? max(0, ahead) : nil)))
+      let latency = player.liveLatency.seconds
+      lines.append(StatLine(label: "Latency", value: StatFormat.seconds(latency.isFinite ? latency : nil)))
+      lines.append(StatLine(label: "Frames", value: "\(player.videoFramesDecoded) decoded · \(player.videoFramesDropped) dropped"))
+      lines.append(StatLine(label: "Ads", value: adState.statsText))
+      lines.append(StatLine(label: "Playlists", value: localURL == nil ? "Twitch direct (no ad filtering)" : "Kestrel filter"))
+      lines.append(StatLine(label: "Proxy", value: StatFormat.proxy()))
+      lines.append(StatLine(label: "Account", value: TwitchAuth.shared.session?.login ?? "not signed in"))
+      return lines
     }
 
     // MARK: Controls

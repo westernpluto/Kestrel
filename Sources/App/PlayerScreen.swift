@@ -176,6 +176,9 @@ struct PlayerScreen: View {
         VideoPlayerView(player: model.player)
       #endif
       overlays
+      if settings.showVideoStats && !model.stats.isEmpty {
+        StatsOverlay(lines: model.stats)
+      }
     }
   }
 
@@ -313,6 +316,10 @@ struct PlayerScreen: View {
               } label: {
                 if quality.id == model.selectedQuality { Label(quality.label, systemImage: "checkmark") } else { Text(quality.label) }
               }
+            }
+            Divider()
+            Toggle(isOn: $settings.showVideoStats) {
+              Label("Video stats", systemImage: "chart.bar.xaxis")
             }
           } label: {
             Label(currentQualityLabel, systemImage: "slider.horizontal.3")

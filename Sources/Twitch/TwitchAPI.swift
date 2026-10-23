@@ -129,6 +129,36 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
 
   let http: HTTPClient
   let deviceID: String
+  private let lock = NSLock()
+  private var _playbackHTTP: HTTPClient?
+  private var _lastAuthFallback: String?
+
+  /// Used for playback tokens instead of `http` (e.g. through a proxy in an ad-free country).
+  var playbackHTTP: HTTPClient? {
+    get {
+      lock.lock()
+      defer { lock.unlock() }
+      return _playbackHTTP
+    }
+    set {
+      lock.lock()
+      _playbackHTTP = newValue
+      lock.unlock()
+    }
+  }
+
+  private func noteAuthFallback(_ message: String) {
+    lock.lock()
+    _lastAuthFallback = message
+    lock.unlock()
+  }
+
+  /// Set when a signed-in token request failed and an anonymous one was used instead.
+  var lastAuthFallback: String? {
+    lock.lock()
+    defer { lock.unlock() }
+    return _lastAuthFallback
+  }
 
   init(http: HTTPClient, deviceID: String? = nil) {
     self.http = http
@@ -143,12 +173,14 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     }
   }
 
-  private func request(body: [String: Any]) throws -> URLRequest {
+  private func request(body: [String: Any], anonymous: Bool = false) throws -> URLRequest {
     var request = URLRequest(url: URL(string: "https://gql.twitch.tv/gql")!)
     request.httpMethod = "POST"
     request.timeoutInterval = 10
     request.setValue(Self.webClientID, forHTTPHeaderField: "Client-ID")
-    request.setValue(deviceID, forHTTPHeaderField: "X-Device-Id")
+    let auth = anonymous ? nil : TwitchAuth.shared.session
+    request.setValue(auth?.deviceID ?? deviceID, forHTTPHeaderField: "X-Device-Id")
+    if let auth { request.setValue("OAuth \(auth.token)", forHTTPHeaderField: "Authorization") }
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
     request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -166,8 +198,8 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     try await send(["query": text, "variables": variables])
   }
 
-  private func send(_ body: [String: Any]) async throws -> JSONValue {
-    let (data, response) = try await http.data(for: try request(body: body))
+  private func send(_ body: [String: Any], anonymous: Bool = false, via client: HTTPClient? = nil) async throws -> JSONValue {
+    let (data, response) = try await (client ?? http).data(for: try request(body: body, anonymous: anonymous))
     guard let object = try? JSONSerialization.jsonObject(with: data) else {
       throw response.statusCode == 200 ? TwitchAPIError.decoding : TwitchAPIError.http(response.statusCode)
     }
@@ -397,7 +429,24 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
   private func playbackToken(login: String?, vodID: String?, playerType: String, platform: String) async throws
     -> PlaybackToken
   {
+    guard TwitchAuth.shared.session != nil else {
+      return try await playbackToken(login: login, vodID: vodID, playerType: playerType, platform: platform, anonymous: true)
+    }
+    do {
+      return try await playbackToken(login: login, vodID: vodID, playerType: playerType, platform: platform, anonymous: false)
+    } catch {
+      // Twitch sometimes demands an integrity check for signed-in requests: watch anonymously.
+      let token = try await playbackToken(login: login, vodID: vodID, playerType: playerType, platform: platform, anonymous: true)
+      noteAuthFallback(error.localizedDescription)
+      return token
+    }
+  }
+
+  private func playbackToken(login: String?, vodID: String?, playerType: String, platform: String, anonymous: Bool)
+    async throws -> PlaybackToken
+  {
     let isLive = login != nil
+    let client = playbackHTTP
     let key = isLive ? "streamPlaybackAccessToken" : "videoPlaybackAccessToken"
     func parse(_ data: JSONValue) -> PlaybackToken? {
       let t = data[key]
@@ -412,11 +461,12 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
         "isLive": isLive, "login": login ?? "", "isVod": !isLive, "vodID": vodID ?? "",
         "playerType": playerType, "platform": platform,
       ]
-      let data = try await send([
-        "operationName": "PlaybackAccessToken",
-        "extensions": ["persistedQuery": persisted],
-        "variables": variables,
-      ])
+      let data = try await send(
+        [
+          "operationName": "PlaybackAccessToken",
+          "extensions": ["persistedQuery": persisted],
+          "variables": variables,
+        ], anonymous: anonymous, via: client)
       if let token = parse(data) { return token }
     } catch {
       lastError = error
@@ -425,25 +475,41 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     do {
       let data: JSONValue
       if isLive {
-        data = try await query(
-          """
-          query null($login: String!, $platform: String!, $playerType: String!) {
-            streamPlaybackAccessToken(channelName: $login, params: { platform: $platform, playerType: $playerType }) { signature value }
-          }
-          """, variables: ["login": login ?? "", "platform": platform, "playerType": playerType])
+        data = try await send(
+          [
+            "query": """
+            query null($login: String!, $platform: String!, $playerType: String!) {
+              streamPlaybackAccessToken(channelName: $login, params: { platform: $platform, playerType: $playerType }) { signature value }
+            }
+            """,
+            "variables": ["login": login ?? "", "platform": platform, "playerType": playerType],
+          ], anonymous: anonymous, via: client)
       } else {
-        data = try await query(
-          """
-          query null($id: ID!, $platform: String!, $playerType: String!) {
-            videoPlaybackAccessToken(id: $id, params: { platform: $platform, playerType: $playerType }) { signature value }
-          }
-          """, variables: ["id": vodID ?? "", "platform": platform, "playerType": playerType])
+        data = try await send(
+          [
+            "query": """
+            query null($id: ID!, $platform: String!, $playerType: String!) {
+              videoPlaybackAccessToken(id: $id, params: { platform: $platform, playerType: $playerType }) { signature value }
+            }
+            """,
+            "variables": ["id": vodID ?? "", "platform": platform, "playerType": playerType],
+          ], anonymous: anonymous, via: client)
       }
       if let token = parse(data) { return token }
     } catch {
       lastError = error
     }
     throw lastError
+  }
+
+  // MARK: Account
+
+  /// Whether the signed-in account has Turbo (nil if unknown).
+  func currentUserHasTurbo() async -> Bool? {
+    guard TwitchAuth.shared.session != nil, let data = try? await query("query null { currentUser { login hasTurbo } }") else {
+      return nil
+    }
+    return data["currentUser"]["hasTurbo"].bool
   }
 
   // MARK: Image URL helpers

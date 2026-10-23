@@ -2,10 +2,31 @@ import SwiftUI
 
 struct SettingsView: View {
   @EnvironmentObject private var settings: AppSettings
+  @ObservedObject private var account = TwitchAccount.shared
   @State private var imageCacheCleared = false
+  @State private var showLogin = false
+  @State private var confirmSignOut = false
 
   var body: some View {
     Form {
+      Section {
+        if let session = account.session {
+          LabeledContent("Signed in as", value: session.login)
+          LabeledContent("Twitch Turbo", value: account.hasTurbo.map { $0 ? "Yes: no ads" : "No" } ?? "…")
+          Button("Sign out", role: .destructive) { confirmSignOut = true }
+        } else {
+          Button {
+            showLogin = true
+          } label: {
+            Label("Sign in with Twitch", systemImage: "person.crop.circle.badge.plus")
+          }
+        }
+      } header: {
+        Text("Twitch account")
+      } footer: {
+        Text("Optional. With Turbo, or a sub to the channel you're watching, Twitch sends no ads at all. Some channels only offer 1440p to signed-in viewers. Your token stays on this iPhone and only goes to Twitch.")
+      }
+
       Section {
         Toggle("Switch to ad-free copy", isOn: $settings.backupStreams)
         Toggle("Allow 360p during ads", isOn: $settings.allowLowQualityBackup)
@@ -17,7 +38,7 @@ struct SettingsView: View {
       } header: {
         Text("Ad blocking")
       } footer: {
-        Text("When an ad starts, Kestrel fetches other copies of the same stream in the background and switches to one without the ad. 360p copies are only used if no full-quality copy is ad-free. Changes apply to the next stream you open.")
+        Text("When Twitch puts an ad into the stream, Kestrel switches to a copy of the stream without it. These days Twitch puts ads into every full-quality copy, so during the break that's usually the 360p copy (with 360p off, the ad is hidden instead). For no ads at all: Turbo or a sub (sign in above), or an ad-free region proxy (below). Changes apply to the next stream you open.")
       }
 
       Section {
@@ -44,10 +65,27 @@ struct SettingsView: View {
       Section {
         Toggle("Enhanced quality (HEVC/AV1)", isOn: $settings.enhancedCodecs)
         Toggle("Keep audio in background", isOn: $settings.backgroundAudio)
+        Toggle("Video stats", isOn: $settings.showVideoStats)
       } header: {
         Text("Playback")
       } footer: {
         Text("Streams always start at the highest quality and stay there; pick another in the player's menu for just that stream. Enhanced quality asks Twitch for HEVC/AV1 renditions (this device decodes \(DeviceCodecs.summary)), which is how 1440p is delivered on channels using Enhanced Broadcasting. Most channels top out at 1080p60. Applies to the next stream you open.")
+      }
+
+      Section {
+        Toggle("Use a proxy", isOn: $settings.proxyEnabled)
+        if settings.proxyEnabled {
+          TextField("Host", text: $settings.proxyHost)
+            .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+          TextField("Port", text: $settings.proxyPort).keyboardType(.numberPad)
+          TextField("Username (optional)", text: $settings.proxyUsername)
+            .textInputAutocapitalization(.never).autocorrectionDisabled()
+          SecureField("Password (optional)", text: $settings.proxyPassword)
+        }
+      } header: {
+        Text("Ad-free region proxy")
+      } footer: {
+        Text("Twitch decides about ads by where you watch from. With an HTTP proxy in a country where Twitch doesn't run ads (how TTV LOL PRO works), streams come without ads at full quality. Only Twitch's playback requests use it; video still comes straight from Twitch. Applies to the next stream you open.")
       }
 
       Section("Chat") {
@@ -71,6 +109,10 @@ struct SettingsView: View {
       }
     }
     .navigationTitle("Settings")
+    .sheet(isPresented: $showLogin) { TwitchLoginView() }
+    .confirmationDialog("Sign out of Twitch?", isPresented: $confirmSignOut, titleVisibility: .visible) {
+      Button("Sign out", role: .destructive) { account.signOut() }
+    }
   }
 }
 

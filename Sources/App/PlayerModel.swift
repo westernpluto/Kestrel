@@ -28,6 +28,8 @@ final class PlayerModel: ObservableObject {
   @Published private(set) var stream: LiveStream?
   @Published private(set) var channel: Channel?
   @Published var isBuffering = true
+  /// The video stats overlay's rows (only filled while it's switched on).
+  @Published var stats: [StatLine] = []
   /// The live player in use (VODs always use the Apple player).
   @Published private(set) var engine: PlayerEngine
 
@@ -112,7 +114,7 @@ final class PlayerModel: ObservableObject {
     var config = AppSettings.shared.sessionConfig
     config.codecs = codecs
     let session = StreamSession(
-      login: channel.login, config: config, http: URLSessionHTTPClient(timeout: 8),
+      login: channel.login, config: config, http: AppSettings.shared.playbackClient(timeout: 8),
       tokens: TwitchAPI.shared
     ) { [weak self] state, ranges in
       guard let model = self else { return }
@@ -363,12 +365,16 @@ final class PlayerModel: ObservableObject {
       lastInfoRefresh = now
       Task { await refreshInfo() }
     }
+    let wantsStats = AppSettings.shared.showVideoStats
+    if !wantsStats, !stats.isEmpty { stats = [] }
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
         lowLatency.tick()
+        if wantsStats { stats = lowLatency.stats() }
         return
       }
     #endif
+    if wantsStats { stats = appleStats() }
     guard isLive, let item = player.currentItem else { return }
     let currentDate = item.currentDate()
     if let currentDate { latency = max(0, now.timeIntervalSince(currentDate)) }
@@ -389,6 +395,43 @@ final class PlayerModel: ObservableObject {
       ActivityLog.shared.add(String(format: "%.0f s behind live, jumping ahead", latency))
       goLive()
     }
+  }
+
+  /// Video stats for the Apple player.
+  private func appleStats() -> [StatLine] {
+    guard let item = player.currentItem else { return [] }
+    var lines = [StatLine(label: "Player", value: isLive ? "Apple (AVPlayer)" : "Apple (AVPlayer), video")]
+    if let variant = currentVariant {
+      lines.append(StatLine(label: "Quality", value: variant.label))
+      lines.append(StatLine(label: "Codecs", value: variant.codecs.isEmpty ? "–" : variant.codecs))
+      if variant.frameRate > 0 { lines.append(StatLine(label: "Frame rate", value: String(format: "%.0f fps", variant.frameRate))) }
+    } else {
+      lines.append(StatLine(label: "Quality", value: "Auto"))
+    }
+    let size = item.presentationSize
+    if size.width > 0 { lines.append(StatLine(label: "Resolution", value: "\(Int(size.width))×\(Int(size.height))")) }
+    let events = item.accessLog()?.events ?? []
+    if let event = events.last {
+      lines.append(StatLine(label: "Bitrate", value: StatFormat.mbps(event.indicatedBitrate)))
+      lines.append(StatLine(label: "Bandwidth", value: StatFormat.mbps(event.observedBitrate)))
+    }
+    let current = item.currentTime().seconds
+    let buffered = item.loadedTimeRanges.map(\.timeRangeValue)
+      .first { $0.start.seconds <= current + 0.5 && CMTimeRangeGetEnd($0).seconds >= current }
+      .map { CMTimeRangeGetEnd($0).seconds - current }
+    lines.append(StatLine(label: "Buffer", value: StatFormat.seconds(buffered)))
+    if isLive { lines.append(StatLine(label: "Latency", value: StatFormat.seconds(latency))) }
+    let dropped = events.reduce(0) { $0 + max(0, $1.numberOfDroppedVideoFrames) }
+    let stalls = events.reduce(0) { $0 + max(0, $1.numberOfStalls) }
+    lines.append(StatLine(label: "Dropped frames", value: "\(dropped)"))
+    lines.append(StatLine(label: "Stalls", value: "\(stalls)"))
+    if isLive {
+      lines.append(StatLine(label: "Ads", value: adState.statsText))
+      lines.append(StatLine(label: "Playlists", value: "Kestrel filter"))
+      lines.append(StatLine(label: "Proxy", value: StatFormat.proxy()))
+      lines.append(StatLine(label: "Account", value: TwitchAuth.shared.session?.login ?? "not signed in"))
+    }
+    return lines
   }
 
   private func refreshInfo() async {
