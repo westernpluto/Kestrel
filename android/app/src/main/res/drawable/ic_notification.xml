@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Go-live alert icon: a screen with a play button (white, the system tints it). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M4,4h16a2,2 0,0 1,2 2v10a2,2 0,0 1,-2 2h-9l-4,3v-3h-3a2,2 0,0 1,-2 -2v-10a2,2 0,0 1,2 -2z M10,7.5v7l5.5,-3.5z" />
+</vector>

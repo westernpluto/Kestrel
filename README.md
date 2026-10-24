@@ -1,6 +1,6 @@
 # Kestrel
 
-An iOS client for watching Twitch without ads, with low-latency playback, chat and your follows.
+A client for watching Twitch without ads, with low-latency playback, chat and your follows: for iPhone, and for Android (see [android/README.md](android/README.md)).
 
 ## Features
 
@@ -48,16 +48,18 @@ An iOS client for watching Twitch without ads, with low-latency playback, chat a
 
 ## Install
 
-Download the IPA from the latest GitHub Actions run (**Actions → Build IPA → Artifacts**) and sideload it with your usual tool (SideStore, AltStore, Feather, TrollStore…). Requires iOS 16+.
+Download the IPA from the latest GitHub Actions run (**Actions → Build IPA and APK → Artifacts**) and sideload it with your usual tool (SideStore, AltStore, Feather, TrollStore…). Requires iOS 16+.
 
 - **Kestrel-ipa**: the main build (Xcode, iOS 26 SDK: Liquid Glass on iOS 26).
 - **Kestrel-ipa-classic**: the same app built on Linux with the iOS 16.5 SDK (classic tab bar). Use it if the main build failed.
+- **Kestrel-apk**: the Android app (Android 8.0+). Open the APK on the phone to install it; it can be shared with anyone as is. See [android/README.md](android/README.md).
 
 ## Build
 
-**GitHub Actions** (no Mac needed): push to your repo. The `Build IPA` workflow runs two builds side by side, each downloading the Amazon IVS Player SDK (pinned version, SHA-256 checked) and running `./build.sh`:
+**GitHub Actions** (no Mac needed): push to your repo. The `Build IPA and APK` workflow runs three builds side by side. The two iOS builds each download the Amazon IVS Player SDK (pinned version, SHA-256 checked) and run `./build.sh`:
 - on a macOS runner with the newest Xcode (iOS 26 SDK) → `Kestrel-ipa`;
-- on Linux with a Swift 5.8 iOS toolchain and the iOS 16.5 SDK → `Kestrel-ipa-classic`.
+- on Linux with a Swift 5.8 iOS toolchain and the iOS 16.5 SDK → `Kestrel-ipa-classic`;
+- and the Android app is built with Gradle in `android/` → `Kestrel-apk`.
 
 If the IVS SDK can't be downloaded or linked, a build goes ahead without the low-latency player and flags a warning on the run.
 
@@ -78,6 +80,7 @@ If the IVS SDK can't be downloaded or linked, a build goes ahead without the low
 | `Sources/Core/LocalHTTPServer.swift` | Localhost server the players load playlists from |
 | `Sources/Twitch/` | GraphQL API, sign-in, playback tokens, follows, chat/IRC, third-party emotes |
 | `Sources/App/` | SwiftUI app: player screen and controls, players, chat (UIKit list with animated emotes), images |
+| `android/` | The Android app (Kotlin, Jetpack Compose, Media3/ExoPlayer) |
 
 ## Limitations
 
