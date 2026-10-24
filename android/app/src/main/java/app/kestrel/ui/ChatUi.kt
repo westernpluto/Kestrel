@@ -144,6 +144,15 @@ fun nameColor(hex: String?, seed: String): Color {
     return palette[Math.floorMod(hash, palette.size)]
 }
 
+/**
+ * Fades its content in and out. A function of its own, so inside a Box that's inside a Column it
+ * uses the plain fade (not the Column's version, which Compose only allows directly in a Column).
+ */
+@Composable
+private fun Fading(visible: Boolean, modifier: Modifier, content: @Composable () -> Unit) {
+    AnimatedVisibility(visible, modifier = modifier, enter = fadeIn(), exit = fadeOut()) { content() }
+}
+
 private data class RenderedMessage(val text: AnnotatedString, val inline: Map<String, InlineTextContent>, val highlighted: Boolean)
 
 private fun render(message: ChatMessage, chat: ChatController, fontSize: Float, me: String?): RenderedMessage {
@@ -370,7 +379,7 @@ fun ChatPanel(chat: ChatController, active: Boolean, compact: Boolean, modifier:
                 chat.status == ChatController.Status.Connecting && !chat.isReplay -> "Connecting to chat…"
                 else -> null
             }
-            AnimatedVisibility(pill != null, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp)) {
+            Fading(pill != null, Modifier.align(Alignment.TopCenter).padding(top = 8.dp)) {
                 Row(
                     Modifier.background(Color(0xE6202024), RoundedCornerShape(50)).padding(horizontal = 10.dp, vertical = 5.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -382,7 +391,7 @@ fun ChatPanel(chat: ChatController, active: Boolean, compact: Boolean, modifier:
                     Text(pill ?: "", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
-            AnimatedVisibility(!following, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)) {
+            Fading(!following, Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)) {
                 Row(
                     Modifier.clip(RoundedCornerShape(50)).background(AccentTeal).clickable {
                         following = true
