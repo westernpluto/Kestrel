@@ -1,5 +1,7 @@
 package app.kestrel.core
 
+import android.content.Context
+import android.webkit.WebSettings
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Authenticator
 import okhttp3.Call
@@ -17,10 +19,31 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 object Browser {
-    /** Twitch's GQL rejects some requests that don't look like a browser, and the website (sign-in,
-     *  follows) is only the full one for a desktop browser. */
+    /** Twitch's GQL rejects some requests that don't look like a browser (for Kestrel's own
+     *  requests; pages in a WebView use [webUserAgent]). */
     const val USER_AGENT =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+
+    /** The phone's own WebView, as it introduces itself. */
+    fun engineUserAgent(context: Context): String =
+        runCatching { WebSettings.getDefaultUserAgent(context) }.getOrNull().orEmpty()
+
+    /**
+     * For twitch.tv in a WebView: desktop Chrome (the full website), with the version of the
+     * Chrome engine the page really runs on. A fixed, older version said one thing while the
+     * engine's own answers said another, and the site's bot protection refused the login.
+     */
+    fun webUserAgent(context: Context): String {
+        val major = Regex("Chrome/(\\d+)").find(engineUserAgent(context))?.groupValues?.get(1) ?: "140"
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$major.0.0.0 Safari/537.36"
+    }
+
+    /** The phone's own WebView as Chrome for Android (Twitch's mobile site). */
+    fun mobileUserAgent(context: Context): String {
+        val engine = engineUserAgent(context)
+        if (engine.isEmpty()) return USER_AGENT
+        return engine.replace("; wv)", ")").replace(Regex(" Version/[\\d.]+"), "")
+    }
 }
 
 /** An HTTP(S) proxy, e.g. one in a country where Twitch doesn't run ads. */

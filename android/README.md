@@ -18,7 +18,7 @@ Anyone can install that same `Kestrel.apk`: send it to them in any messenger or 
 - **Rewind live streams** through the broadcast's VOD while it's recorded, with seek previews and chat from that point of the stream.
 - **VODs:** resume where you left off (synced with your Twitch account when signed in), chat replay, muted parts that play instead of freezing, recordings that keep growing.
 - **Chat:** Twitch, 7TV, BTTV and FFZ emotes (animated), badges, recent messages, sending as yourself, the emote picker, `:emote` and `@name` autocomplete, hold a message to copy it or reply.
-- **Sign in with Twitch** on Twitch's own login page (or paste the auth-token), follow/unfollow on Twitch, your follows in Following.
+- **Sign in with Twitch** on Twitch's own login page (if the full site's login won't go through, **Try the mobile site** under it; or paste the auth-token), follow/unfollow on Twitch, your follows in Following. Sign-in problems are written to **Settings → Activity log**.
 - **Go-live alerts**, background audio with the media notification and lock screen controls, picture in picture, **Settings → Reset Kestrel**.
 
 ## What's different

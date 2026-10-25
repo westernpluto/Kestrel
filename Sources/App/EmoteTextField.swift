@@ -22,7 +22,6 @@ final class EmoteAttachment: NSTextAttachment {
 struct EmoteTextField: UIViewRepresentable {
   @Binding var text: String
   @Binding var isFocused: Bool
-  @Binding var height: CGFloat
   var placeholder: String
   var enabled: Bool
   var emoteURL: (String) -> URL?
@@ -33,6 +32,23 @@ struct EmoteTextField: UIViewRepresentable {
   static let maxHeight: CGFloat = 104
 
   func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+  /// The box is as tall as its text (up to `maxHeight`, then it scrolls), measured by SwiftUI
+  /// itself at the width it gives the box. (A height reported back afterwards could lag behind
+  /// what was typed, leaving the second line outside the box.)
+  func sizeThatFits(_ proposal: ProposedViewSize, uiView view: EmoteTextView, context: Context) -> CGSize? {
+    guard let width = proposal.width, width.isFinite else { return nil }
+    guard width > 40 else { return CGSize(width: max(0, width), height: Self.minHeight) }
+    return CGSize(width: width, height: Self.boxHeight(view, width: width))
+  }
+
+  static func fittingHeight(_ view: UITextView, width: CGFloat) -> CGFloat {
+    view.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height.rounded(.up)
+  }
+
+  static func boxHeight(_ view: UITextView, width: CGFloat) -> CGFloat {
+    min(maxHeight, max(minHeight, fittingHeight(view, width: width)))
+  }
 
   func makeUIView(context: Context) -> EmoteTextView {
     let view = EmoteTextView(usingTextLayoutManager: false)
@@ -194,7 +210,7 @@ struct EmoteTextField: UIViewRepresentable {
         apply(cached)
       } else {
         apply(nil)
-        ImagePipeline.shared.load(url, maxPixels: 112) { [weak view, weak attachment] image in
+        ImagePipeline.shared.load(url, maxPixels: 112) { [weak self, weak view, weak attachment] image in
           guard let view, let attachment else { return }
           apply(image)
           // Redraw with the picture (and its real width).
@@ -202,19 +218,20 @@ struct EmoteTextField: UIViewRepresentable {
           view.layoutManager.invalidateLayout(forCharacterRange: all, actualCharacterRange: nil)
           view.layoutManager.invalidateDisplay(forCharacterRange: all)
           _ = attachment
+          self?.reportHeight(view)
         }
       }
       return attachment
     }
 
-    private func reportHeight(_ view: UITextView) {
+    /// The text changed: past the tallest the box gets, it scrolls (keeping the cursor in view);
+    /// SwiftUI is asked to measure the box again so it grows or shrinks with the text.
+    func reportHeight(_ view: UITextView) {
       let width = view.bounds.width > 0 ? view.bounds.width : 200
-      let fitting = view.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
-      let height = min(EmoteTextField.maxHeight, max(EmoteTextField.minHeight, fitting.rounded()))
-      view.isScrollEnabled = fitting > EmoteTextField.maxHeight
-      if abs(height - parent.height) > 0.5 {
-        DispatchQueue.main.async { [weak self] in self?.parent.height = height }
-      }
+      let scrolls = EmoteTextField.fittingHeight(view, width: width) > EmoteTextField.maxHeight
+      if view.isScrollEnabled != scrolls { view.isScrollEnabled = scrolls }
+      if scrolls { view.scrollRangeToVisible(view.selectedRange) }
+      view.invalidateIntrinsicContentSize()
     }
 
     // MARK: UITextViewDelegate

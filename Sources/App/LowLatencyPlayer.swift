@@ -44,6 +44,10 @@
     private var detachedForBackground = false
     private var audioOnlyForBackground = false
     private var pausedForBackground = false
+    /// Switches to audio only after a while in the background (not right away: a quick trip to
+    /// Notification Center or another app shouldn't cost the picture a rebuffer on return).
+    private var audioOnlyTask: Task<Void, Never>?
+    private static let audioOnlyDelay: UInt64 = 45_000_000_000
     private var notificationTokens: [NSObjectProtocol] = []
     private var localURL: URL?
     private var route: StreamRoute = .twitch
@@ -92,6 +96,7 @@
     func stop() {
       stopped = true
       loadTask?.cancel()
+      audioOnlyTask?.cancel()
       player.pause()
       player.delegate = nil
       proxy.controller = nil
@@ -298,7 +303,9 @@
       applyChosen()
     }
 
-    private func applyChosen() {
+    /// - Parameter smoothly: switch at the next chance without dropping what's buffered (no
+    ///   rebuffer; the new quality shows a moment later).
+    private func applyChosen(smoothly: Bool = false) {
       guard let index = chosen else {
         player.autoQualityMode = true
         return
@@ -306,7 +313,12 @@
       guard index < menuQualities.count else { return }
       let quality = menuQualities[index]
       player.autoQualityMode = false
-      if player.quality.map({ !$0.isEqual(to: quality) }) ?? true { player.quality = quality }
+      guard player.quality.map({ !$0.isEqual(to: quality) }) ?? true else { return }
+      if smoothly {
+        player.setQuality(quality, adaptive: true)
+      } else {
+        player.quality = quality
+      }
     }
 
     private static func codecRank(_ quality: IVSQuality) -> Int {
@@ -334,7 +346,7 @@
       guard let model, !stopped, !suspended else { return }
       let seconds = player.liveLatency.seconds
       let latency = seconds.isFinite && seconds >= 0 ? seconds : nil
-      model.latency = latency
+      model.setLatency(latency)
 
       // Stuck buffering (e.g. after a switch between copies of the stream): start again.
       if player.state == .buffering, !pausedForBackground, !detachedForBackground {
@@ -465,13 +477,15 @@
     private func enteredBackground() {
       guard !stopped, !suspended, !proxy.pictureInPictureStarting, !(pip?.isPictureInPictureActive ?? false) else { return }
       if AppSettings.shared.backgroundAudio {
-        // Keep the sound: take the picture off screen and switch to the audio-only rendition.
+        // Keep the sound: take the picture off screen, and if it stays in the background a while,
+        // switch to the audio-only rendition (saves data and battery while only listening).
         detachedForBackground = true
         view?.player = nil
-        if let audio = menuQualities.first(where: { $0.width == 0 }) {
-          audioOnlyForBackground = true
-          player.autoQualityMode = false
-          player.quality = audio
+        audioOnlyTask?.cancel()
+        audioOnlyTask = Task { [weak self] in
+          try? await Task.sleep(nanoseconds: Self.audioOnlyDelay)
+          guard !Task.isCancelled else { return }
+          self?.switchToAudioOnly()
         }
       } else {
         pausedForBackground = true
@@ -479,15 +493,27 @@
       }
     }
 
+    private func switchToAudioOnly() {
+      guard detachedForBackground, !stopped, !suspended, !audioOnlyForBackground,
+        let audio = menuQualities.first(where: { $0.width == 0 })
+      else { return }
+      audioOnlyForBackground = true
+      player.autoQualityMode = false
+      player.quality = audio
+    }
+
     private func enteringForeground() {
+      audioOnlyTask?.cancel()
+      audioOnlyTask = nil
       guard !stopped, !suspended else { return }
       if detachedForBackground {
         detachedForBackground = false
         view?.player = player
       }
       if audioOnlyForBackground {
+        // Back to the picture without stopping the sound to rebuffer.
         audioOnlyForBackground = false
-        applyChosen()
+        applyChosen(smoothly: true)
       }
       if pausedForBackground {
         pausedForBackground = false

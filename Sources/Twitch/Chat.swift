@@ -553,8 +553,10 @@ enum ThirdPartyEmotes {
     var result: [String: URL] = [:]
     for (_, set) in sets.dictionary {
       for emote in set["emoticons"].array {
+        // Animated emotes list their moving version separately ("urls" is the still picture).
         guard let name = emote["name"].string,
-          var link = emote["urls"]["2"].string ?? emote["urls"]["1"].string
+          var link = emote["animated"]["2"].string ?? emote["animated"]["1"].string
+            ?? emote["urls"]["2"].string ?? emote["urls"]["1"].string
         else { continue }
         if link.hasPrefix("//") { link = "https:" + link }
         if let url = URL(string: link) { result[name] = url }

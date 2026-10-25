@@ -104,8 +104,10 @@ object ThirdPartyEmotes {
             val set = sets.optJSONObject(key) ?: continue
             for (emote in set.arr("emoticons").objects()) {
                 val name = emote.str("name") ?: continue
-                val urls = emote.obj("urls") ?: continue
-                var link = urls.str("2") ?: urls.str("1") ?: continue
+                // Animated emotes list their moving version separately ("urls" is the still picture).
+                val animated = emote.obj("animated")
+                val urls = emote.obj("urls")
+                var link = animated?.str("2") ?: animated?.str("1") ?: urls?.str("2") ?: urls?.str("1") ?: continue
                 if (link.startsWith("//")) link = "https:$link"
                 result[name] = link
             }

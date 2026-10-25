@@ -47,6 +47,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -55,6 +56,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -218,10 +220,21 @@ private fun ChatLine(
     me: String?,
     onReply: ((String) -> Unit)?,
     onTap: () -> Unit,
+    onMenu: (Boolean) -> Unit,
 ) {
     val rendered = remember(message, chat.decorationsVersion, fontSize, EmoteAspects.version, me) { render(message, chat, fontSize, me) }
     var menu by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
+    // Chat holds still while this message's menu is open (so the menu stays by its message).
+    val reportMenu by rememberUpdatedState(onMenu)
+    val holding = remember { booleanArrayOf(false) }
+    LaunchedEffect(menu) {
+        if (menu != holding[0]) {
+            holding[0] = menu
+            reportMenu(menu)
+        }
+    }
+    DisposableEffect(Unit) { onDispose { if (holding[0]) reportMenu(false) } }
     Box {
         Text(
             rendered.text,
@@ -284,6 +297,8 @@ fun ChatPanel(chat: ChatController, active: Boolean, compact: Boolean, modifier:
     val focusRequester = remember { FocusRequester() }
     val listState = rememberLazyListState()
     var following by remember { mutableStateOf(true) }
+    /** A message's menu is open: new messages don't scroll chat until it closes. */
+    var menuOpen by remember { mutableStateOf(false) }
     val messages = chat.messages
 
     LaunchedEffect(active) {
@@ -307,8 +322,8 @@ fun ChatPanel(chat: ChatController, active: Boolean, compact: Boolean, modifier:
         }
     }
     val newest = messages.lastOrNull()?.id
-    LaunchedEffect(newest, messages.size) {
-        if (following && messages.isNotEmpty()) listState.animateScrollToItem(0)
+    LaunchedEffect(newest, messages.size, menuOpen) {
+        if (following && !menuOpen && messages.isNotEmpty()) listState.animateScrollToItem(0)
     }
 
     fun insertAtEnd(text: String) {
@@ -370,6 +385,7 @@ fun ChatPanel(chat: ChatController, active: Boolean, compact: Boolean, modifier:
                         message, chat, fontSize, chat.ownLogin,
                         onReply = reply,
                         onTap = { focusManager.clearFocus() },
+                        onMenu = { open -> menuOpen = open },
                     )
                 }
             }

@@ -156,14 +156,16 @@ object TwitchIntegrity {
         val view = WebView(host?.context ?: Kestrel.app)
         view.settings.javaScriptEnabled = true
         view.settings.domStorageEnabled = true
-        view.settings.userAgentString = Browser.USER_AGENT
+        // The same site the account signed in on (the mobile site's tokens are for its own client).
+        view.settings.userAgentString =
+            if (TwitchAuth.session?.clientID != null) Browser.mobileUserAgent(view.context) else Browser.webUserAgent(view.context)
         view.settings.mediaPlaybackRequiresUserGesture = true
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
         view.addJavascriptInterface(Bridge(), "KestrelIntegrity")
         hookedAtStart = runCatching {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-                WebViewCompat.addDocumentStartJavaScript(view, HOOK, setOf("https://www.twitch.tv"))
+                WebViewCompat.addDocumentStartJavaScript(view, HOOK, setOf("https://www.twitch.tv", "https://m.twitch.tv"))
                 true
             } else {
                 false
@@ -196,7 +198,7 @@ object TwitchIntegrity {
         val session = TwitchAuth.session ?: return
         if (askedManually >= 2) return
         askedManually++
-        view.evaluateJavascript(askScript(TwitchApi.CLIENT_ID, session.token, TwitchApi.accountDeviceId), null)
+        view.evaluateJavascript(askScript(session.clientID ?: TwitchApi.CLIENT_ID, session.token, TwitchApi.accountDeviceId), null)
     }
 
     private class Bridge {

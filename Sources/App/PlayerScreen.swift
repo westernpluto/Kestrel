@@ -388,11 +388,58 @@ private func lerp(_ a: CGRect, _ b: CGRect, _ t: CGFloat) -> CGRect {
 
 // MARK: - Screen
 
+/// Owns a player screen's player and chat without passing their changes on (see `PlayerScreen`).
+final class PlayerSession: ObservableObject {
+  let model: PlayerModel
+  let chat: ChatController
+
+  init(target: PlaybackTarget) {
+    model = PlayerModel(target: target)
+    switch target {
+    case .live(let channel):
+      chat = ChatController(channel: channel)
+    case .video(let video):
+      let owner = video.owner ?? Channel(id: "", login: "", displayName: "", profileImageURL: nil)
+      chat = ChatController(channel: owner, replayVideoID: video.id)
+    }
+  }
+}
+
+/// Keeps chat in step with the video: VOD chat replay, and chat from the VOD while rewinding.
+private struct ChatFollower: View {
+  @ObservedObject var model: PlayerModel
+  let chat: ChatController
+
+  var body: some View {
+    Color.clear
+      .frame(width: 0, height: 0)
+      .allowsHitTesting(false)
+      .onChange(of: model.position) { position in
+        if chat.isReplay { chat.replay(at: position) }
+      }
+      // Rewinding a live stream: chat follows the VOD; back to live chat on return.
+      .onChange(of: model.isRewinding) { rewinding in
+        if rewinding, let videoID = model.rewind?.videoID {
+          chat.startRewindReplay(videoID: videoID, at: model.rewindPosition)
+        } else if !rewinding {
+          chat.endRewindReplay()
+        }
+      }
+      .onChange(of: model.rewindPosition) { position in
+        if model.isRewinding { chat.replay(at: position) }
+      }
+  }
+}
+
 /// The player, shown over the app: full screen, or shrunk into the mini player.
 struct PlayerScreen: View {
   let target: PlaybackTarget
-  @StateObject private var model: PlayerModel
-  @StateObject private var chat: ChatController
+  /// The player and chat are owned here but not watched: this screen's layout doesn't depend on
+  /// their state, so it isn't rebuilt every time the player ticks (the views that show player
+  /// state watch it themselves). Rebuilding all of it twice a second cost animations frames.
+  @StateObject private var session: PlayerSession
+  private var model: PlayerModel { session.model }
+  private var chat: ChatController { session.chat }
   @StateObject private var keyboard = KeyboardObserver()
   @StateObject private var orientation = InterfaceOrientationObserver()
   @EnvironmentObject private var app: AppModel
@@ -411,14 +458,7 @@ struct PlayerScreen: View {
 
   init(target: PlaybackTarget) {
     self.target = target
-    _model = StateObject(wrappedValue: PlayerModel(target: target))
-    switch target {
-    case .live(let channel):
-      _chat = StateObject(wrappedValue: ChatController(channel: channel))
-    case .video(let video):
-      let owner = video.owner ?? Channel(id: "", login: "", displayName: "", profileImageURL: nil)
-      _chat = StateObject(wrappedValue: ChatController(channel: owner, replayVideoID: video.id))
-    }
+    _session = StateObject(wrappedValue: PlayerSession(target: target))
   }
 
   var body: some View {
@@ -464,6 +504,15 @@ struct PlayerScreen: View {
           .opacity(layout.panelVisible ? expandedOpacity : 0)
           .allowsHitTesting(layout.panelVisible && progress == 0)
 
+        // The mini player's shadow, cast from a fixed outline that moves with the video. (A shadow
+        // worked out from the video's own pixels was redrawn on every frame while it moved, and
+        // while lists scrolled underneath it.)
+        MiniPlayerShadow()
+          .frame(width: video.width, height: video.height)
+          .offset(x: video.minX, y: video.minY)
+          .opacity(Double(progress))
+          .allowsHitTesting(false)
+
         PlayerVideoArea(
           model: model, landscape: landscape, chatOpen: chatOpen, controlInsets: layout.controls,
           chromeVisible: progress == 0, minimized: app.playerMinimized, chatOnLeft: layout.chatOnLeft,
@@ -483,7 +532,6 @@ struct PlayerScreen: View {
         )
         .frame(width: video.width, height: video.height)
         .clipShape(RoundedRectangle(cornerRadius: 12 * progress, style: .continuous))
-        .shadow(color: .black.opacity(0.5 * Double(progress)), radius: 14 * progress, y: 5 * progress)
         .offset(x: video.minX, y: video.minY)
 
         if chatOpen && progress == 0 { resizeHandle(layout, screenWidth: screenWidth) }
@@ -535,25 +583,12 @@ struct PlayerScreen: View {
     .ignoresSafeArea(.keyboard)
     .preferredColorScheme(.dark)
     .animation(Self.spring, value: landscapeChat)
+    .background(ChatFollower(model: model, chat: chat))
     .task {
       orientation.start()
       OrientationLock.playerVisible(true)
       chat.start()
       await model.start()
-    }
-    .onChange(of: model.position) { position in
-      if chat.isReplay { chat.replay(at: position) }
-    }
-    // Rewinding a live stream: chat follows the VOD; back to live chat on return.
-    .onChange(of: model.isRewinding) { rewinding in
-      if rewinding, let videoID = model.rewind?.videoID {
-        chat.startRewindReplay(videoID: videoID, at: model.rewindPosition)
-      } else if !rewinding {
-        chat.endRewindReplay()
-      }
-    }
-    .onChange(of: model.rewindPosition) { position in
-      if model.isRewinding { chat.replay(at: position) }
     }
     .onChange(of: app.playerMinimized) { minimized in
       // The app is portrait; only the full-screen player turns.
@@ -641,6 +676,31 @@ struct PlayerScreen: View {
           }
       )
       .accessibilityLabel("Resize chat")
+  }
+}
+
+/// A soft shadow from a rounded outline (cheap to draw, unlike a shadow of the content itself).
+struct MiniPlayerShadow: UIViewRepresentable {
+  func makeUIView(context: Context) -> ShadowView { ShadowView() }
+  func updateUIView(_ view: ShadowView, context: Context) {}
+
+  final class ShadowView: UIView {
+    override init(frame: CGRect) {
+      super.init(frame: frame)
+      isUserInteractionEnabled = false
+      backgroundColor = .clear
+      layer.shadowColor = UIColor.black.cgColor
+      layer.shadowOpacity = 0.5
+      layer.shadowRadius = 14
+      layer.shadowOffset = CGSize(width: 0, height: 5)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+      super.layoutSubviews()
+      layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: 12).cgPath
+    }
   }
 }
 

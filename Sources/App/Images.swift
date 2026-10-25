@@ -211,25 +211,141 @@ struct CachedImageView: UIViewRepresentable {
 
 final class LoadingImageView: UIImageView {
   private var current: URL?
+  /// An animated picture plays on this layer, driven by Core Animation itself: UIImageView only
+  /// started an animated image if animations happened to be on when it was set, which they
+  /// weren't for chat rows added in a burst, so in busy chats emotes often sat still.
+  private var framesLayer: CALayer?
+  private var animatedPicture: UIImage?
+  private static let framesKey = "kestrel.frames"
 
   override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: UIView.noIntrinsicMetric) }
+
+  override var contentMode: UIView.ContentMode {
+    didSet { framesLayer?.contentsGravity = Self.gravity(contentMode) }
+  }
 
   func load(_ url: URL?, maxPixels: CGFloat?, fallback: URL?) {
     guard url != current else { return }
     current = url
     guard let url else {
-      image = nil
+      show(nil)
       return
     }
     if let cached = ImagePipeline.shared.cached(url, maxPixels: maxPixels) {
-      image = cached
+      show(cached)
+      return
+    }
+    show(nil)
+    ImagePipeline.shared.load(url, maxPixels: maxPixels, fallback: fallback) { [weak self] image in
+      guard let self, self.current == url else { return }
+      UIView.transition(with: self, duration: 0.15, options: .transitionCrossDissolve) { self.show(image) }
+    }
+  }
+
+  /// Shows a picture; an animated one plays by itself for as long as it's on screen.
+  private func show(_ picture: UIImage?) {
+    guard let picture, let frames = picture.images, frames.count > 1 else {
+      animatedPicture = nil
+      if let framesLayer {
+        framesLayer.removeAnimation(forKey: Self.framesKey)
+        framesLayer.contents = nil
+        framesLayer.isHidden = true
+      }
+      image = picture
       return
     }
     image = nil
-    ImagePipeline.shared.load(url, maxPixels: maxPixels, fallback: fallback) { [weak self] image in
-      guard let self, self.current == url else { return }
-      UIView.transition(with: self, duration: 0.15, options: .transitionCrossDissolve) { self.image = image }
+    animatedPicture = picture
+    let frameLayer = framesLayer ?? makeFramesLayer()
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    frameLayer.isHidden = false
+    frameLayer.frame = bounds
+    frameLayer.contentsScale = picture.scale
+    frameLayer.contents = frames.first?.cgImage
+    CATransaction.commit()
+    startFrames()
+  }
+
+  private func makeFramesLayer() -> CALayer {
+    let frameLayer = CALayer()
+    frameLayer.contentsGravity = Self.gravity(contentMode)
+    frameLayer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(), "hidden": NSNull()]
+    layer.addSublayer(frameLayer)
+    framesLayer = frameLayer
+    return frameLayer
+  }
+
+  /// (Re)starts the animation, in step with every other copy of the same picture on screen (as
+  /// browsers do), only while the view is in a window.
+  private func startFrames() {
+    guard let frameLayer = framesLayer, let picture = animatedPicture else { return }
+    frameLayer.removeAnimation(forKey: Self.framesKey)
+    guard window != nil, let animation = Self.frameAnimation(for: picture) else { return }
+    let now = CACurrentMediaTime()
+    animation.beginTime = frameLayer.convertTime(now, from: nil) - now.truncatingRemainder(dividingBy: animation.duration)
+    frameLayer.add(animation, forKey: Self.framesKey)
+  }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window == nil {
+      framesLayer?.removeAnimation(forKey: Self.framesKey)
+    } else if animatedPicture != nil, framesLayer?.animation(forKey: Self.framesKey) == nil {
+      startFrames()
     }
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    guard let framesLayer else { return }
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    framesLayer.frame = bounds
+    CATransaction.commit()
+  }
+
+  private static func gravity(_ mode: UIView.ContentMode) -> CALayerContentsGravity {
+    switch mode {
+    case .scaleAspectFit: return .resizeAspect
+    case .scaleAspectFill: return .resizeAspectFill
+    case .scaleToFill: return .resize
+    default: return .center
+    }
+  }
+
+  private static let templateKey = UnsafeMutableRawPointer.allocate(byteCount: 1, alignment: 1)
+
+  /// The frames of an animated picture as a Core Animation keyframe animation: each frame held
+  /// for its own delay (repeats from decoding are merged), looping forever. Made once per picture.
+  static func frameAnimation(for picture: UIImage) -> CAKeyframeAnimation? {
+    if let made = objc_getAssociatedObject(picture, templateKey) as? CAKeyframeAnimation {
+      return made.copy() as? CAKeyframeAnimation
+    }
+    guard let frames = picture.images, frames.count > 1, picture.duration > 0 else { return nil }
+    var values: [CGImage] = []
+    var keyTimes: [NSNumber] = []
+    var previous: UIImage?
+    for (index, frame) in frames.enumerated() {
+      if let previous, previous === frame { continue }
+      previous = frame
+      guard let cgImage = frame.cgImage else { continue }
+      values.append(cgImage)
+      keyTimes.append(NSNumber(value: Double(index) / Double(frames.count)))
+    }
+    guard values.count > 1 else { return nil }
+    keyTimes[0] = 0
+    keyTimes.append(1)
+    let animation = CAKeyframeAnimation(keyPath: "contents")
+    animation.values = values
+    animation.keyTimes = keyTimes
+    animation.calculationMode = .discrete
+    animation.duration = picture.duration
+    animation.repeatCount = .infinity
+    // Kept through the app going to the background and back.
+    animation.isRemovedOnCompletion = false
+    objc_setAssociatedObject(picture, templateKey, animation, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    return animation.copy() as? CAKeyframeAnimation
   }
 }
 

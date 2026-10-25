@@ -30,17 +30,32 @@ object TwitchAccount {
         Kestrel.scope.launch { refreshTurbo() }
     }
 
-    suspend fun signIn(rawToken: String, deviceId: String?) {
+    /**
+     * @param fromWebsite the token came from Twitch's own login page, so whichever Twitch client the
+     *   page used is fine (the mobile site has its own); a pasted token has to be the desktop site's.
+     */
+    suspend fun signIn(rawToken: String, deviceId: String?, fromWebsite: Boolean = false) {
         val token = rawToken.trim(' ', '\n', '\t', '"', '\'').replace("OAuth ", "").replace("oauth:", "")
-        val (login, userId) = TwitchAuth.validate(token)
-        val newSession = TwitchAuth.Session(token, login, userId, deviceId)
+        if (token.isEmpty()) throw TwitchAuth.ValidationException("That's not a token.")
+        val owner = TwitchAuth.validate(token)
+        val client = owner.clientID?.takeIf { it.isNotEmpty() && it != TwitchApi.CLIENT_ID }
+        if (client != null && !fromWebsite) {
+            throw TwitchAuth.ValidationException("This token belongs to another app. Use the website's auth-token.")
+        }
+        val newSession = TwitchAuth.Session(token, owner.login, owner.userID, deviceId, client)
         Prefs.setJson(KEY, newSession.toJson())
         TwitchAuth.session = newSession
         session = newSession
-        ActivityLog.add("Signed in to Twitch as $login")
-        refreshTurbo()
+        ActivityLog.add(
+            if (client == null) "Signed in to Twitch as ${owner.login}"
+            else "Signed in to Twitch as ${owner.login} (through Twitch's mobile site)",
+        )
         TwitchIntegrity.invalidate()
-        FollowingStore.refresh(force = true)
+        // Not waited for: the sign-in screen closes as soon as the login itself is in.
+        Kestrel.scope.launch {
+            refreshTurbo()
+            FollowingStore.refresh(force = true)
+        }
     }
 
     suspend fun refreshTurbo() {

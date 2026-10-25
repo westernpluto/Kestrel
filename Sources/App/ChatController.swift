@@ -627,6 +627,8 @@ final class ChatMessageView: UIView {
     isOpaque = false
     backgroundColor = .clear
     contentMode = .redraw
+    // The text is drawn off the main thread, so busy chat doesn't take frames from animations.
+    layer.drawsAsynchronously = true
   }
 
   required init?(coder: NSCoder) { fatalError() }
@@ -745,6 +747,18 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   /// busy chats, since rows only appeared once it ended).
   private var glide: CADisplayLink?
   private var lastGlideFrame: CFTimeInterval = 0
+  /// A message's menu is open (or opening): chat holds still underneath so the menu stays on its
+  /// message (it used to keep scrolling, leaving the highlight on an empty spot), and catches up
+  /// once the menu closes.
+  private var menuHold = false
+  private var menuShown = false
+  private var holdGeneration = 0
+  /// What arrived meanwhile: nil = nothing, true = a full reload is due.
+  private var heldReload: Bool?
+  private var heldImages = false
+  /// When rows were last measured for a new width (see `reflowForWidth`).
+  private var lastReflow: CFTimeInterval = 0
+  private var reflowScheduled = false
   var onMention: ((String) -> Void)?
 
   init(chat: ChatController) {
@@ -823,16 +837,36 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
     if abs(tableView.bounds.width - lastWidth) > 0.5 {
-      lastWidth = tableView.bounds.width
-      lastHeight = tableView.bounds.height
-      heights = [:]
-      tableView.reloadData()
-      if following { scrollToBottom(animated: false) }
+      reflowForWidth()
     } else if abs(tableView.bounds.height - lastHeight) > 0.5 {
       // Keyboard or emote picker: stay on the newest messages.
       lastHeight = tableView.bounds.height
       if following { scrollToBottom(animated: false) }
     }
+  }
+
+  /// The width changed, so every row is measured again. While it keeps changing (dragging chat's
+  /// edge, turning the phone) that happens about a dozen times a second instead of every frame,
+  /// which measured all of chat 120 times a second and made those animations stutter.
+  private func reflowForWidth() {
+    let now = CACurrentMediaTime()
+    let wait = 0.08 - (now - lastReflow)
+    if wait > 0 {
+      guard !reflowScheduled else { return }
+      reflowScheduled = true
+      DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+        guard let self else { return }
+        self.reflowScheduled = false
+        if abs(self.tableView.bounds.width - self.lastWidth) > 0.5 { self.reflowForWidth() }
+      }
+      return
+    }
+    lastReflow = now
+    lastWidth = tableView.bounds.width
+    lastHeight = tableView.bounds.height
+    heights = [:]
+    tableView.reloadData()
+    if following { scrollToBottom(animated: false) }
   }
 
   private func key(_ message: ChatMessage) -> String { "\(message.id)-\(message.isDeleted)" }
@@ -847,6 +881,10 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   }
 
   private func chatUpdated(fullReload: Bool) {
+    if menuHold {
+      heldReload = (heldReload ?? false) || fullReload
+      return
+    }
     if fullReload {
       rendered = [:]
       heights = [:]
@@ -907,6 +945,10 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   /// Pictures finished loading: messages laid out before theirs arrived get their real widths.
   /// Only those rows change (a full reload made busy chats flash and jump).
   private func imagesArrived() {
+    if menuHold {
+      heldImages = true
+      return
+    }
     var changed: [Int] = []
     var heightChanged = false
     var shiftAbove: CGFloat = 0
@@ -954,7 +996,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   }
 
   private func scrollToBottom(animated: Bool) {
-    guard !displayed.isEmpty else { return }
+    guard !displayed.isEmpty, !menuHold else { return }
     tableView.layoutIfNeeded()
     let bottom = bottomOffset
     let distance = bottom - tableView.contentOffset.y
@@ -984,7 +1026,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   }
 
   fileprivate func glideStep(_ link: CADisplayLink) {
-    guard following, !tableView.isDragging, !tableView.isDecelerating else {
+    guard following, !menuHold, !tableView.isDragging, !tableView.isDecelerating else {
       stopGlide()
       return
     }
@@ -1044,8 +1086,10 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint)
     -> UIContextMenuConfiguration?
   {
+    guard indexPath.row < displayed.count else { return nil }
     let message = displayed[indexPath.row]
     guard message.kind != .notice else { return nil }
+    holdForMenu()
     return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
       var actions = [
         UIAction(title: "Copy message", image: UIImage(systemName: "doc.on.doc")) { _ in UIPasteboard.general.string = message.text }
@@ -1059,7 +1103,57 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     }
   }
 
+  func tableView(
+    _ tableView: UITableView, willDisplayContextMenu configuration: UIContextMenuConfiguration,
+    animator: UIContextMenuInteractionAnimating?
+  ) {
+    menuShown = true
+  }
+
+  func tableView(
+    _ tableView: UITableView, willEndContextMenuInteraction configuration: UIContextMenuConfiguration,
+    animator: UIContextMenuInteractionAnimating?
+  ) {
+    // Catch up once the menu has gone (rows moving under the closing menu looked broken too).
+    if let animator {
+      animator.addCompletion { [weak self] in self?.releaseMenuHold() }
+    } else {
+      releaseMenuHold()
+    }
+  }
+
+  /// Holds chat still from the moment a press may become a menu.
+  private func holdForMenu() {
+    menuHold = true
+    menuShown = false
+    stopGlide()
+    holdGeneration += 1
+    let generation = holdGeneration
+    // The press may never become a menu (a tap, a scroll): don't hold long without one.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+      guard let self, self.holdGeneration == generation, !self.menuShown else { return }
+      self.releaseMenuHold()
+    }
+  }
+
+  private func releaseMenuHold() {
+    guard menuHold else { return }
+    menuHold = false
+    menuShown = false
+    holdGeneration += 1
+    if let full = heldReload {
+      heldReload = nil
+      chatUpdated(fullReload: full)
+    }
+    if heldImages {
+      heldImages = false
+      imagesArrived()
+    }
+    if following { scrollToBottom(animated: true) }
+  }
+
   func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+    releaseMenuHold()
     following = false
     stopGlide()
   }
@@ -1125,7 +1219,6 @@ struct ChatPanel: View {
   @State private var showLogin = false
   @State private var pickerOpen = false
   @State private var focused = false
-  @State private var inputHeight = EmoteTextField.minHeight
   @State private var warning: String?
 
   private static let spring = Animation.spring(response: 0.32, dampingFraction: 0.86)
@@ -1290,15 +1383,16 @@ struct ChatPanel: View {
         } else if let rules = chat.roomRules {
           Text(rules).font(.caption2).foregroundColor(.secondary).padding(.horizontal, 4)
         }
-        HStack(spacing: 8) {
-          HStack(spacing: 4) {
+        // Bottom-aligned: as the box grows with longer messages, its buttons stay by the last line.
+        HStack(alignment: .bottom, spacing: 8) {
+          HStack(alignment: .bottom, spacing: 4) {
             EmoteTextField(
-              text: $draft, isFocused: $focused, height: $inputHeight,
+              text: $draft, isFocused: $focused,
               placeholder: !chat.canSend ? "Joining chat…" : chat.emoteOnly ? "Emotes only" : "Send a message",
               enabled: chat.canSend && active,
               emoteURL: { chat.emoteURL(for: $0) }, onSubmit: send
             )
-            .frame(height: inputHeight)
+            .frame(minHeight: EmoteTextField.minHeight)
             Button {
               if pickerOpen {
                 focused = true
@@ -1313,12 +1407,12 @@ struct ChatPanel: View {
                 .frame(width: 32, height: 32)
                 .contentShape(Rectangle())
             }
+            .padding(.bottom, 2)
             .accessibilityLabel(pickerOpen ? "Keyboard" : "Emotes")
           }
           .padding(.leading, 12)
           .padding(.trailing, 4)
-          .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18))
-          .animation(.easeOut(duration: 0.15), value: inputHeight)
+          .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
           Button(action: send) {
             Image(systemName: "paperplane.fill").font(.system(size: 16, weight: .semibold))
               .frame(width: 36, height: 36)

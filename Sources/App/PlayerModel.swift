@@ -24,7 +24,7 @@ final class PlayerModel: ObservableObject {
   @Published var selectedQuality: Int?
   @Published var adState: AdState = .none
   @Published var coveringAd = false
-  @Published var latency: Double?
+  @Published private(set) var latency: Double?
   @Published private(set) var stream: LiveStream?
   @Published private(set) var channel: Channel?
   @Published var isBuffering = true
@@ -798,6 +798,13 @@ final class PlayerModel: ObservableObject {
       })
   }
 
+  /// Latency as shown (to a tenth of a second), published only when that changes: every view
+  /// watching the player redraws on each change, and it ticks twice a second.
+  func setLatency(_ value: Double?) {
+    let shown = value.map { ($0 * 10).rounded() / 10 }
+    if shown != latency { latency = shown }
+  }
+
   private func tick() {
     let now = Date()
     NowPlaying.shared.update(self)
@@ -806,7 +813,11 @@ final class PlayerModel: ObservableObject {
       Task { await refreshInfo() }
     }
     if isLive, phase == .playing { checkForArchive() }
-    if let rewind { broadcastElapsed = max(0, now.timeIntervalSince(rewind.startedAt)) }
+    if let rewind {
+      // Whole seconds (all that's shown): fewer changes for the views watching the player.
+      let elapsed = max(0, now.timeIntervalSince(rewind.startedAt)).rounded(.down)
+      if elapsed != broadcastElapsed { broadcastElapsed = elapsed }
+    }
     if isRewinding {
       tickRewind()
       return
@@ -869,7 +880,7 @@ final class PlayerModel: ObservableObject {
     }
     guard isLive, let item = player.currentItem else { return }
     let currentDate = item.currentDate()
-    if let currentDate { latency = max(0, now.timeIntervalSince(currentDate)) }
+    if let currentDate { setLatency(max(0, now.timeIntervalSince(currentDate))) }
 
     let inAd = currentDate.map { date in adRanges.contains { $0.contains(date) } } ?? false
     if inAd != coveringAd { coveringAd = inAd }
@@ -1184,7 +1195,7 @@ final class PlayerModel: ObservableObject {
     if pictureInPictureActive != (rewindPictureInPicture?.isPictureInPictureActive ?? false) {
       pictureInPictureActive = rewindPictureInPicture?.isPictureInPictureActive ?? false
     }
-    latency = max(0, broadcastElapsed - rewindPosition)
+    setLatency(max(0, broadcastElapsed - rewindPosition))
     // The end of what was recorded when it was loaded: more has been recorded since, so load it
     // again, or go live if that's all but caught up.
     if let item = rewindPlayer.currentItem, rewindPendingSeek == nil, !rewindSeeking, !isPaused,

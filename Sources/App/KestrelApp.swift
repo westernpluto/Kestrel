@@ -126,6 +126,7 @@ struct TabBarProbe: UIViewRepresentable {
 
   final class ProbeView: UIView {
     var report: ((CGFloat) -> Void)?
+    private var measuring = false
 
     override func didMoveToWindow() {
       super.didMoveToWindow()
@@ -137,10 +138,15 @@ struct TabBarProbe: UIViewRepresentable {
       measureSoon()
     }
 
+    /// The bar settles after the screen does (and animates in iOS 26): measure now and again a
+    /// moment later. Layout passes meanwhile (every frame of an animation) don't add more.
     private func measureSoon() {
-      // The bar settles after the screen does (and animates in iOS 26).
-      for delay in [0.0, 0.4] {
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.measure() }
+      guard !measuring else { return }
+      measuring = true
+      DispatchQueue.main.async { [weak self] in self?.measure() }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+        self?.measuring = false
+        self?.measure()
       }
     }
 

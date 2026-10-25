@@ -57,7 +57,8 @@ object TwitchApi {
         val session = if (anonymous) null else TwitchAuth.session
         val builder = Request.Builder()
             .url("https://gql.twitch.tv/gql")
-            .header("Client-ID", CLIENT_ID)
+            // The token only works with the client it was issued to (the mobile site's, if signed in there).
+            .header("Client-ID", session?.clientID ?: CLIENT_ID)
             .header("X-Device-Id", session?.deviceID ?: deviceId)
             .header("User-Agent", Browser.USER_AGENT)
             .post(body.toString().toRequestBody(JSON))
