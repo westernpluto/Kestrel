@@ -50,6 +50,8 @@ A client for watching Twitch without ads, with low-latency playback, chat and yo
 
 Download the IPA from the latest GitHub Actions run (**Actions → Build IPA and APK → Artifacts**) and sideload it with your usual tool (SideStore, AltStore, Feather, TrollStore…). Requires iOS 16+.
 
+**Signing with a wildcard certificate (Feather and similar):** turn on **Merge Entitlements** (Feather: Settings → Signing Options, or Properties when signing). Without it the app is signed as "any app" of the certificate's team, so iOS can't tell which app is playing: tapping Kestrel in the Dynamic Island or on the lock screen doesn't open it, and the Keychain isn't available. With it, Feather gives Kestrel its real identity from the entitlements built into the app. Feather 2.9.0 doesn't have the option yet; the **Build Feather** workflow (`.github/workflows/feather.yml`) builds Feather's latest source, which does: download its **Feather-ipa** artifact, sign and install it with your current Feather once, then turn the option on.
+
 - **Kestrel-ipa**: the main build (Xcode, iOS 26 SDK: Liquid Glass on iOS 26).
 - **Kestrel-ipa-classic**: the same app built on Linux with the iOS 16.5 SDK (classic tab bar). Use it if the main build failed.
 - **Kestrel-apk**: the Android app (Android 8.0+). Open the APK on the phone to install it; it can be shared with anyone as is. See [android/README.md](android/README.md).

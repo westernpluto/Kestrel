@@ -12,6 +12,8 @@ import app.kestrel.core.Kestrel
 import app.kestrel.core.LiveStream
 import app.kestrel.core.Prefs
 import app.kestrel.core.TwitchApi
+import app.kestrel.core.TwitchAuth
+import app.kestrel.core.TwitchDeviceLogin
 import app.kestrel.core.Video
 import app.kestrel.core.objects
 import app.kestrel.core.strings
@@ -122,7 +124,10 @@ object FollowingStore {
         recentChanges[channel.id] = follow to System.currentTimeMillis()
         try {
             try {
-                TwitchApi.setFollow(follow, channel.id, TwitchIntegrity.headers())
+                // Signed in with a code (as Twitch's TV app): the website's integrity token doesn't
+                // apply to that client, so the follow goes without one first.
+                val viaCode = TwitchAuth.session?.clientID == TwitchDeviceLogin.CLIENT_ID
+                TwitchApi.setFollow(follow, channel.id, if (viaCode) emptyMap() else TwitchIntegrity.headers())
             } catch (e: GqlException) {
                 if (!e.gqlMessage.contains("integrity", ignoreCase = true)) throw e
                 // The token ran out or wasn't accepted: get a fresh one and try once more.

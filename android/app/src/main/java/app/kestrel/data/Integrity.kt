@@ -158,7 +158,7 @@ object TwitchIntegrity {
         view.settings.domStorageEnabled = true
         // The same site the account signed in on (the mobile site's tokens are for its own client).
         view.settings.userAgentString =
-            if (TwitchAuth.session?.clientID != null) Browser.mobileUserAgent(view.context) else Browser.webUserAgent(view.context)
+            if (TwitchAuth.session?.mobileSite == true) Browser.mobileUserAgent(view.context) else Browser.webUserAgent(view.context)
         view.settings.mediaPlaybackRequiresUserGesture = true
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)

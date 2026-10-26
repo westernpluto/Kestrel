@@ -1,0 +1,51 @@
+# Builds Feather (the signing app) from its latest source, which has "Merge Entitlements": with a
+# wildcard certificate it gives each app its real identity, so iOS knows which app is playing and
+# tapping Kestrel in the Dynamic Island or on the lock screen opens it. Feather 2.9.0, the latest
+# release, doesn't have it yet. Download the Feather-ipa artifact, sign and install it with your
+# current Feather once, then turn on Settings → Signing Options → Merge Entitlements.
+#
+# Runs when this file changes, or from Actions → Build Feather → Run workflow.
+name: Build Feather
+
+on:
+  push:
+    paths:
+      - .github/workflows/feather.yml
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Feather commit, tag or branch to build (the default has Merge Entitlements)
+        required: false
+        default: ""
+
+env:
+  # Feather's "entitlement merging" commit (main, after v2.9.0).
+  FEATHER_REF: 7078b053c0af262809a48e4d3898d42b0d35fedf
+
+jobs:
+  feather:
+    runs-on: macos-26
+    steps:
+      - name: Check out Feather
+        uses: actions/checkout@v4
+        with:
+          repository: khcrysalis/Feather
+          ref: ${{ inputs.ref || env.FEATHER_REF }}
+          submodules: recursive
+
+      - name: Pick the newest Xcode
+        run: |
+          XCODE="$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -viE 'beta|release_candidate|_rc' | sort -V | tail -1)"
+          [ -n "$XCODE" ] || XCODE="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Build Feather (iPhone)
+        run: make iphoneos
+
+      - name: Upload Feather.ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feather-ipa
+          path: packages/Feather.ipa
+          if-no-files-found: error

@@ -18,11 +18,12 @@ Anyone can install that same `Kestrel.apk`: send it to them in any messenger or 
 - **Rewind live streams** through the broadcast's VOD while it's recorded, with seek previews and chat from that point of the stream.
 - **VODs:** resume where you left off (synced with your Twitch account when signed in), chat replay, muted parts that play instead of freezing, recordings that keep growing.
 - **Chat:** Twitch, 7TV, BTTV and FFZ emotes (animated), badges, recent messages, sending as yourself, the emote picker, `:emote` and `@name` autocomplete, hold a message to copy it or reply.
-- **Sign in with Twitch** on Twitch's own login page (if the full site's login won't go through, **Try the mobile site** under it; or paste the auth-token), follow/unfollow on Twitch, your follows in Following. Sign-in problems are written to **Settings → Activity log**.
+- **Sign in with Twitch**, follow/unfollow on Twitch, your follows in Following. Sign-in problems are written to **Settings → Activity log**.
 - **Go-live alerts**, background audio with the media notification and lock screen controls, picture in picture, **Settings → Reset Kestrel**.
 
 ## What's different
 
+- **Signing in** works with a code by default, the way TV apps sign in: Kestrel shows a code, you enter it at twitch.tv/activate in any browser where you're signed in to Twitch (the phone's own, or another device's) and approve it, and Kestrel signs in by itself (Twitch lists it as its TV app). Twitch's login page inside the app, and pasting the auth-token, are the other two options on the sign-in screen. A code sign-in renews itself before it runs out.
 - **Background checks for go-live alerts** run about every 15 minutes (Android's minimum for background work), every minute while the app is open or playing. Battery savers on some phones can delay them; exclude Kestrel from battery optimization if alerts come late.
 - **Picture in picture** starts when you leave the app while a stream plays (Settings → Picture in picture), or from the player's PiP button.
 - **Rewinding** switches the one video player between the live stream and the VOD (the last picture stays up meanwhile, so there's no black flash, but each switch takes a moment to buffer). The iPhone app keeps both loaded.

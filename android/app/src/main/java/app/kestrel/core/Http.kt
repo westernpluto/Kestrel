@@ -38,11 +38,13 @@ object Browser {
         return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$major.0.0.0 Safari/537.36"
     }
 
-    /** The phone's own WebView as Chrome for Android (Twitch's mobile site). */
+    /** The phone's own WebView as Chrome on a phone (Twitch's mobile site), even on a tablet or an
+     *  unfolded foldable, whose WebView leaves out "Mobile" and so gets the desktop site. */
     fun mobileUserAgent(context: Context): String {
         val engine = engineUserAgent(context)
         if (engine.isEmpty()) return USER_AGENT
-        return engine.replace("; wv)", ")").replace(Regex(" Version/[\\d.]+"), "")
+        val cleaned = engine.replace("; wv)", ")").replace(Regex(" Version/[\\d.]+"), "")
+        return if (cleaned.contains(" Mobile")) cleaned else cleaned.replace(" Safari/", " Mobile Safari/")
     }
 }
 

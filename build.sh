@@ -20,7 +20,14 @@ if [[ "$(uname)" == "Darwin" ]] && xcrun --sdk iphoneos --show-sdk-path >/dev/nu
   SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
   SWIFTC=(xcrun --sdk iphoneos swiftc)
   EXTRA=()
-  sign() { codesign --force --sign - --timestamp=none "$1"; }
+  # sign <path> [entitlements]
+  sign() {
+    if [[ -n "${2:-}" ]]; then
+      codesign --force --sign - --timestamp=none --entitlements "$2" "$1"
+    else
+      codesign --force --sign - --timestamp=none "$1"
+    fi
+  }
 else
   THEOS="${THEOS:-$HOME/theos}"
   TC="$THEOS/toolchain/linux/iphone/bin"
@@ -32,7 +39,8 @@ else
   # compiler-rt (for #available checks); Xcode's driver links this automatically
   RT="$(ls "$TC"/../lib/clang/*/lib/darwin/libclang_rt.ios.a 2>/dev/null | head -1)"
   [[ -n "$RT" ]] && EXTRA+=(-Xlinker "$RT")
-  sign() { "$TC/ldid" -S "$1"; }
+  # sign <path> [entitlements]
+  sign() { "$TC/ldid" "-S${2:-}" "$1"; }
 fi
 
 # Optional: the Amazon IVS Player SDK enables the low-latency player (#if canImport(AmazonIVSPlayer)).
@@ -79,7 +87,12 @@ if [[ -n "$IVS_FRAMEWORK" ]]; then
   if [[ "$(uname)" == "Darwin" ]]; then sign "$BUNDLE/Frameworks/AmazonIVSPlayer.framework"
   else sign "$BUNDLE/Frameworks/AmazonIVSPlayer.framework/AmazonIVSPlayer"; fi
 fi
-sign "$BUNDLE/$APP"
+# The app's own entitlements go into its signature (XXXXXXXXXX stands for whoever's team signs it).
+# Signing tools use them to give the app its real identity: signed with a wildcard certificate as
+# just "TEAMID.*", iOS couldn't tell which app was playing (tapping it in the Dynamic Island or on
+# the lock screen didn't open Kestrel) and the Keychain didn't work. In Feather, that's
+# Settings → Signing Options → Merge Entitlements.
+sign "$BUNDLE/$APP" Resources/Kestrel.entitlements
 
 echo "==> Packaging"
 (cd "$OUT" && zip -qry "$APP.ipa" Payload)
