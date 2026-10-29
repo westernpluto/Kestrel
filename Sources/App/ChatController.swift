@@ -1219,7 +1219,7 @@ struct ChatPanel: View {
   @State private var showLogin = false
   @State private var pickerOpen = false
   @State private var focused = false
-  @State private var warning: String?
+  @State private var warning: String? = nil
 
   private static let spring = Animation.spring(response: 0.32, dampingFraction: 0.86)
 

@@ -98,7 +98,7 @@ final class TwitchAccount: ObservableObject {
 struct TwitchLoginView: View {
   @Environment(\.dismiss) private var dismiss
   @ObservedObject private var account = TwitchAccount.shared
-  @State private var error: String?
+  @State private var error: String? = nil
   @State private var working = false
   @State private var pasting = false
   @State private var pasted = ""

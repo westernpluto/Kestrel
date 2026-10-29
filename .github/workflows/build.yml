@@ -12,24 +12,21 @@ env:
   IVS_SHA256: "a848cb36f59d5d19f11456913d7a8c035fb118a7f3a0a4e12230e2e534970430"
 
 jobs:
-  # The main build: Xcode's iOS 26 SDK, so the app gets iOS 26's Liquid Glass look (the floating
-  # glass tab bar you can slide a finger along, glass navigation bars and menus).
-  build-macos:
-    runs-on: macos-26
+  # iPhone: Xcode 27.1 and its iOS 27.1 SDK, so Kestrel fills iPhone Duo's displays (built with an
+  # older SDK, iPhone Duo shows the app at a regular iPhone's size with empty space around it).
+  build-ios:
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
 
-      - name: Pick the newest Xcode
+      - name: Pick Xcode 27.1
         run: |
-          XCODE="$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -viE 'beta|release_candidate|_rc' | sort -V | tail -1)"
-          [ -n "$XCODE" ] || XCODE="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          XCODE=/Applications/Xcode_27.1.app
+          [ -d "$XCODE" ] || XCODE="$(ls -d /Applications/Xcode_27.*.app 2>/dev/null | grep -viE 'beta|release_candidate|_rc' | sort -V | tail -1)"
+          [ -n "$XCODE" ] || XCODE=/Applications/Xcode.app
           sudo xcode-select -s "$XCODE/Contents/Developer"
           xcodebuild -version
-          SDK_VERSION="$(xcrun --sdk iphoneos --show-sdk-version)"
-          echo "iOS SDK $SDK_VERSION"
-          case "$SDK_VERSION" in
-            1[0-9].*|2[0-5].*) echo "::warning::iOS SDK $SDK_VERSION is older than 26: no Liquid Glass in this build." ;;
-          esac
+          echo "iOS SDK $(xcrun --sdk iphoneos --show-sdk-version)"
 
       - name: Download Amazon IVS Player SDK
         id: ivs
@@ -41,18 +38,11 @@ jobs:
           unzip -q -o /tmp/ivs.zip -d vendor
           test -d vendor/AmazonIVSPlayer.xcframework || mv "$(find vendor -maxdepth 3 -name AmazonIVSPlayer.xcframework -type d | head -1)" vendor/
 
-      - name: Build IPA (with the low-latency player)
-        id: build_ivs
-        if: steps.ivs.outcome == 'success'
-        continue-on-error: true
-        run: ./build.sh
-        env:
-          VERSION: 1.0.${{ github.run_number }}
-          BUILD_NUMBER: ${{ github.run_number }}
-
-      - name: Build IPA (Apple player only)
-        if: steps.build_ivs.outcome != 'success'
+      - name: Build IPA
         run: |
+          if [ -d vendor/AmazonIVSPlayer.xcframework ] && ./build.sh; then
+            exit 0
+          fi
           echo "::warning::Built without the Amazon IVS SDK, so the low-latency player isn't included."
           rm -rf vendor/AmazonIVSPlayer.xcframework
           ./build.sh
@@ -65,73 +55,6 @@ jobs:
         with:
           name: Kestrel-ipa
           path: build/Kestrel.ipa
-
-  # Fallback: the Linux toolchain (iOS 16.5 SDK). Same app with the classic look; use it if the
-  # macOS build above fails.
-  build-linux:
-    # The Linux iOS toolchain below is built for Ubuntu 22.04.
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache iOS toolchain + SDK
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: ~/theos
-          key: ios-toolchain-swift5.8-sdk16.5-v1
-
-      - name: Install iOS toolchain + SDK
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p ~/theos/toolchain ~/theos/sdks
-          curl -fsSL https://github.com/kabiroberai/swift-toolchain-linux/releases/download/v2.3.0/swift-5.8-ubuntu22.04.tar.xz \
-            | tar -xJ -C ~/theos/toolchain
-          git clone --depth 1 --filter=blob:none --no-checkout https://github.com/theos/sdks.git /tmp/sdks
-          git -C /tmp/sdks sparse-checkout init --cone
-          git -C /tmp/sdks sparse-checkout set iPhoneOS16.5.sdk
-          git -C /tmp/sdks checkout
-          mv /tmp/sdks/iPhoneOS16.5.sdk ~/theos/sdks/
-
-      - name: Download Amazon IVS Player SDK
-        id: ivs
-        continue-on-error: true
-        run: |
-          curl -fsSL --retry 3 -o /tmp/ivs.zip "https://player.live-video.net/${IVS_VERSION}/AmazonIVSPlayer.xcframework.zip"
-          echo "${IVS_SHA256}  /tmp/ivs.zip" | sha256sum -c -
-          mkdir -p vendor
-          unzip -q -o /tmp/ivs.zip -d vendor
-          test -d vendor/AmazonIVSPlayer.xcframework || mv "$(find vendor -maxdepth 3 -name AmazonIVSPlayer.xcframework -type d | head -1)" vendor/
-
-      - name: Build IPA (with the low-latency player)
-        id: build_ivs
-        if: steps.ivs.outcome == 'success'
-        continue-on-error: true
-        run: ./build.sh
-        env:
-          VERSION: 1.0.${{ github.run_number }}
-          BUILD_NUMBER: ${{ github.run_number }}
-
-      - name: Build IPA (Apple player only)
-        if: steps.build_ivs.outcome != 'success'
-        run: |
-          echo "::warning::Built without the Amazon IVS SDK, so the low-latency player isn't included."
-          rm -rf vendor/AmazonIVSPlayer.xcframework
-          ./build.sh
-        env:
-          VERSION: 1.0.${{ github.run_number }}
-          BUILD_NUMBER: ${{ github.run_number }}
-
-      - name: Upload IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: Kestrel-ipa-classic
-          path: build/Kestrel.ipa
-
-      - name: Core tests (ad blocking, playlists, chat parsing)
-        continue-on-error: true
-        run: |
-          if command -v swiftc >/dev/null; then ./Tests/run.sh; else echo "No host Swift on this runner; skipping."; fi
 
   # Android: an APK for any phone running Android 8 or later (install it, or share the file).
   build-android:

@@ -100,7 +100,8 @@ struct VideoRows: View {
     if !paginator.items.isEmpty {
       Text("Videos").font(.headline).feedRow(top: 10, bottom: 2)
     }
-    ForEach(paginator.items) { video in
+    // Rows on a phone; two (or more) columns of them on a wide screen.
+    AdaptiveFeed(items: paginator.items, tileWidth: 320, reached: { paginator.loadMoreIfNeeded(current: $0) }) { video in
       Button {
         app.playing = .video(video)
       } label: {
@@ -128,8 +129,6 @@ struct VideoRows: View {
         .contentShape(Rectangle())
       }
       .buttonStyle(PressableStyle(scale: 0.98))
-      .feedRow(top: 7, bottom: 7)
-      .onAppear { paginator.loadMoreIfNeeded(current: video) }
     }
     if paginator.isLoading { ProgressView().frame(maxWidth: .infinity).padding().feedRow() }
   }

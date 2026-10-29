@@ -39,16 +39,14 @@ struct BrowseView: View {
   }
 }
 
-/// Live streams as list rows (inside a FeedList).
+/// Live streams inside a FeedList: rows on a phone, cards in columns on a wide screen.
 struct StreamRows: View {
   @ObservedObject var paginator: Paginator<LiveStream>
   var showCategory = true
 
   var body: some View {
-    ForEach(paginator.items) { stream in
-      StreamRow(stream: stream, showCategory: showCategory)
-        .feedRow(top: 7, bottom: 7)
-        .onAppear { paginator.loadMoreIfNeeded(current: stream) }
+    AdaptiveFeed(items: paginator.items, reached: { paginator.loadMoreIfNeeded(current: $0) }) { stream in
+      StreamTile(stream: stream, showCategory: showCategory)
     }
     if paginator.isLoading {
       ProgressView().frame(maxWidth: .infinity).padding().feedRow()
@@ -59,13 +57,19 @@ struct StreamRows: View {
   }
 }
 
-/// Categories as rows of box art (inside a FeedList).
+/// Categories as rows of box art (inside a FeedList): three to a row on a phone, more on a wide
+/// screen (an even number, so iPhone Duo's fold falls between them).
 struct CategoryRows: View {
   @ObservedObject var paginator: Paginator<Category>
   @EnvironmentObject private var app: AppModel
-  private let columns = 3
+  @Environment(\.feedWidth) private var width
+
+  private var columns: Int {
+    width >= 600 ? FeedGrid.columns(width, tile: 140) : 3
+  }
 
   var body: some View {
+    let columns = self.columns
     let rows = stride(from: 0, to: paginator.items.count, by: columns).map {
       Array(paginator.items[$0..<min($0 + columns, paginator.items.count)])
     }
@@ -468,9 +472,7 @@ struct FollowingView: View {
       }
       if !store.live.isEmpty {
         header("Live", count: store.live.count).feedRow(top: 10, bottom: 4)
-        ForEach(store.live) { stream in
-          StreamRow(stream: stream).feedRow(top: 7, bottom: 7)
-        }
+        AdaptiveFeed(items: store.live) { stream in StreamTile(stream: stream) }
       }
       if !store.offline.isEmpty {
         Button {
@@ -486,7 +488,7 @@ struct FollowingView: View {
         .buttonStyle(.plain)
         .feedRow(top: 14, bottom: 4)
         if showOffline {
-          ForEach(store.offline) { entry in
+          AdaptiveFeed(items: store.offline, rowPadding: 5) { entry in
             Button {
               app.push(.channel(entry.channel))
             } label: {
@@ -494,7 +496,6 @@ struct FollowingView: View {
                 .opacity(0.85)
             }
             .buttonStyle(.plain)
-            .feedRow(top: 5, bottom: 5)
           }
         }
       }

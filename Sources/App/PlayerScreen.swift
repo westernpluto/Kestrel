@@ -118,12 +118,30 @@ struct AirPlayButton: UIViewRepresentable {
 /// Browsing stays portrait; the player turns with the phone. The full-screen button and swipes
 /// force an orientation, which then holds until the phone is physically turned that way (so
 /// tapping full screen while holding the phone upright doesn't flip straight back).
+///
+/// A large window (iPhone Duo's inner display, an iPad) is never locked or turned: the app is used
+/// whichever way the device is held, and full screen there just gives the video the whole window.
 enum OrientationLock {
   /// Read by `AppDelegate`.
-  static private(set) var mask: UIInterfaceOrientationMask = .portrait
+  static var mask: UIInterfaceOrientationMask { largeWindow ? .all : lockedMask }
+  private static var lockedMask: UIInterfaceOrientationMask = .portrait
+  /// The window is big enough to use any way up (at least 600 points both ways).
+  static private(set) var largeWindow = false
   private static var playerActive = false
   private static var forced: UIInterfaceOrientationMask?
   private static var observer: NSObjectProtocol?
+
+  /// The window's size (it changes when iPhone Duo is opened or closed).
+  static func windowSizeChanged(_ size: CGSize) {
+    guard size.width > 0, size.height > 0 else { return }
+    let large = isLarge(size)
+    guard large != largeWindow else { return }
+    largeWindow = large
+    forced = nil
+    apply(lockedMask, rotateTo: nil)
+  }
+
+  static func isLarge(_ size: CGSize) -> Bool { min(size.width, size.height) >= 600 }
 
   static func playerVisible(_ visible: Bool) {
     playerActive = visible
@@ -138,6 +156,7 @@ enum OrientationLock {
 
   /// `.portrait` or `.landscape`.
   static func force(_ orientation: UIInterfaceOrientationMask) {
+    guard !largeWindow else { return }
     forced = orientation
     if orientation == .portrait {
       apply(.portrait, rotateTo: .portrait)
@@ -170,7 +189,7 @@ enum OrientationLock {
   }
 
   private static func apply(_ newMask: UIInterfaceOrientationMask, rotateTo target: UIInterfaceOrientationMask?) {
-    mask = newMask
+    lockedMask = newMask
     guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else { return }
     for window in scene.windows {
       var controller = window.rootViewController
@@ -179,8 +198,20 @@ enum OrientationLock {
         controller = current.presentedViewController
       }
     }
-    if let target { scene.requestGeometryUpdate(.iOS(interfaceOrientations: target)) { _ in } }
+    if let target, !largeWindow { scene.requestGeometryUpdate(.iOS(interfaceOrientations: target)) { _ in } }
   }
+}
+
+/// The app's window: its size is what layouts go by. (Not "the screen": iPhone Duo has two, and
+/// the window doesn't always fill one.)
+enum AppWindow {
+  static var current: UIWindow? {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let active = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+    return active?.windows.first { $0.isKeyWindow } ?? active?.windows.first
+  }
+
+  static var bounds: CGRect { current?.bounds ?? CGRect(x: 0, y: 0, width: 390, height: 844) }
 }
 
 /// Which way the interface is turned, so the layout knows which side the Dynamic Island is on
@@ -272,10 +303,18 @@ final class KeyboardObserver: ObservableObject {
 
   private func handle(_ note: Notification) {
     let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue ?? .zero
-    let screen = UIScreen.main.bounds
-    let hiding = note.name == UIResponder.keyboardWillHideNotification || end.isEmpty || end.minY >= screen.maxY - 1
+    // The keyboard's frame is in screen coordinates: where it starts in the app's window.
+    let window = AppWindow.current
+    let frame: CGRect
+    if let window, let screen = window.windowScene?.screen, !end.isEmpty {
+      frame = window.convert(end, from: screen.coordinateSpace)
+    } else {
+      frame = end
+    }
+    let bounds = window?.bounds ?? AppWindow.bounds
+    let hiding = note.name == UIResponder.keyboardWillHideNotification || end.isEmpty || frame.minY >= bounds.maxY - 1
     // Never more than the keyboard can be (guards against a bogus frame).
-    let value = hiding ? 0 : min(screen.height * 0.6, max(0, screen.maxY - end.minY))
+    let value = hiding ? 0 : min(bounds.height * 0.6, max(0, bounds.maxY - frame.minY))
     guard abs(value - overlap) > 0.5 else { return }
     // The keyboard's own curve (a heavily damped spring).
     withAnimation(.interpolatingSpring(mass: 3, stiffness: 1000, damping: 500, initialVelocity: 0)) { overlap = value }
@@ -296,6 +335,15 @@ struct PlayerLayout: Equatable {
   var panelPadding: EdgeInsets
   var panelVisible: Bool
   var landscape: Bool
+  /// A large window (iPhone Duo's inner display, iPad): never turned, chat stays beside or below
+  /// the video, and full screen gives the video the whole window.
+  var large = false
+  /// Phone landscape, or full screen in a large window: the controls take their full-screen form
+  /// (leave full screen, show or hide chat, the title on top).
+  var fullScreen = false
+  /// Large window, landscape: the room left under the video and its info bar, for the stream's
+  /// details (the video is as wide as its column allows; a taller one would only add black bars).
+  var details: CGRect?
   /// Landscape chat sits on the side away from the Dynamic Island, so its text can run to the
   /// edge; the island's strip becomes the edge of the video's black border instead.
   var chatOnLeft = false
@@ -307,11 +355,48 @@ struct PlayerLayout: Equatable {
   /// - Parameters:
   ///   - safe: size of the safe area; `insets`: from it to the screen edges.
   ///   - keyboard: keyboard height from the bottom of the screen.
+  ///   - chatOpen: phone: landscape chat shown; large window: not in full screen.
   ///   - cameraOnLeft: landscape only; nil = unknown (keep clear on both sides).
-  init(safe: CGSize, insets: EdgeInsets, keyboard: CGFloat, chatOpen: Bool, chatWidth: CGFloat, cameraOnLeft: Bool?) {
+  ///   - large: a large window (see `large`).
+  init(
+    safe: CGSize, insets: EdgeInsets, keyboard: CGFloat, chatOpen: Bool, chatWidth: CGFloat, cameraOnLeft: Bool?,
+    large: Bool = false
+  ) {
     landscape = safe.width > safe.height
+    self.large = large
     // A little air above the keyboard (newer keyboards draw slightly above the frame they report).
     let bottomPad = keyboard > 0 ? keyboard + 14 : insets.bottom
+    if large && !chatOpen {
+      // Full screen in a large window: the video gets all of it, whichever way it's held.
+      fullScreen = true
+      info = nil
+      video = CGRect(
+        x: -insets.leading, y: -insets.top, width: safe.width + insets.leading + insets.trailing,
+        height: safe.height + insets.top + insets.bottom)
+      controls = EdgeInsets(top: insets.top + 8, leading: insets.leading + 8, bottom: insets.bottom + 4, trailing: insets.trailing + 8)
+      let chat = min(max(chatWidth, 280), safe.width * 0.45).rounded()
+      panel = CGRect(x: video.maxX + 1, y: video.minY, width: chat, height: video.height)
+      panelPadding = EdgeInsets(top: insets.top + 6, leading: 0, bottom: bottomPad, trailing: insets.trailing)
+      panelVisible = false
+      return
+    }
+    if large && landscape {
+      // Chat in a full-height column on the trailing side; the video at the top of the column
+      // beside it, its info bar under it, and the stream's details in the rest.
+      let chat = min(max(chatWidth, 280), safe.width * 0.45).rounded()
+      panel = CGRect(x: safe.width - chat, y: -insets.top, width: chat + insets.trailing, height: safe.height + insets.top + insets.bottom)
+      panelPadding = EdgeInsets(top: insets.top + 6, leading: 0, bottom: bottomPad, trailing: insets.trailing)
+      let column = panel.minX - 1
+      let videoHeight = min((column * 9 / 16).rounded(), max(0, safe.height - Self.infoHeight))
+      video = CGRect(x: 0, y: 0, width: column, height: videoHeight)
+      controls = EdgeInsets(top: 2, leading: 6, bottom: 2, trailing: 6)
+      info = CGRect(x: 0, y: videoHeight, width: column, height: Self.infoHeight)
+      let detailsTop = videoHeight + Self.infoHeight
+      let room = safe.height + insets.bottom - detailsTop
+      details = room >= 80 ? CGRect(x: 0, y: detailsTop, width: column, height: room) : nil
+      panelVisible = true
+      return
+    }
     if !landscape {
       let width = safe.width
       let videoHeight = (width * 9 / 16).rounded()
@@ -325,6 +410,7 @@ struct PlayerLayout: Equatable {
       return
     }
     info = nil
+    fullScreen = true
     let left = -insets.leading
     let right = safe.width + insets.trailing
     let screenWidth = right - left
@@ -375,7 +461,7 @@ struct PlayerLayout: Equatable {
 
   /// Room to leave under scrolling content for the mini player.
   static var miniInset: CGFloat {
-    let width = min(UIScreen.main.bounds.width, 520) * 0.5
+    let width = min(AppWindow.bounds.width, 520) * 0.5
     return (width * 9 / 16).rounded() + 20
   }
 }
@@ -446,13 +532,16 @@ struct PlayerScreen: View {
   @AppStorage("landscapeChat") private var landscapeChat = true
   /// Landscape chat width, as a share of the screen width (drag the chat's edge to change it).
   @AppStorage("landscapeChatShare") private var chatShare = 0.32
-  @State private var resizingFrom: CGFloat?
-  @State private var resizedWidth: CGFloat?
+  @State private var resizingFrom: CGFloat? = nil
+  @State private var resizedWidth: CGFloat? = nil
   /// 0 = full screen … 1 = mini player, while a finger is moving it.
-  @State private var dragProgress: CGFloat?
+  @State private var dragProgress: CGFloat? = nil
   /// The mini player following a finger (to throw it away).
   @State private var miniOffset: CGSize = .zero
   @State private var closing = false
+  /// Full screen in a large window (iPhone Duo's inner display): the video takes the whole window
+  /// instead of the phone being turned.
+  @State private var largeFullScreen = false
 
   static let spring = Animation.spring(response: 0.38, dampingFraction: 0.86)
 
@@ -465,13 +554,15 @@ struct PlayerScreen: View {
     GeometryReader { geometry in
       let insets = Self.insets(geometry)
       let landscape = geometry.size.width > geometry.size.height
-      let progress = landscape ? 0 : (dragProgress ?? (app.playerMinimized ? 1 : 0))
-      let chatOpen = landscape && landscapeChat
       let screenWidth = geometry.size.width + insets.leading + insets.trailing
+      let large = OrientationLock.isLarge(CGSize(width: screenWidth, height: geometry.size.height + insets.top + insets.bottom))
+      let chatOpen = large ? !largeFullScreen : landscape && landscapeChat
       let layout = PlayerLayout(
         safe: geometry.size, insets: insets, keyboard: keyboard.overlap, chatOpen: chatOpen,
         chatWidth: resizedWidth ?? screenWidth * chatShare,
-        cameraOnLeft: landscape ? (InterfaceOrientationObserver.cameraOnLeftNow ?? orientation.cameraOnLeft) : nil)
+        cameraOnLeft: landscape && !large ? (InterfaceOrientationObserver.cameraOnLeftNow ?? orientation.cameraOnLeft) : nil,
+        large: large)
+      let progress = layout.fullScreen ? 0 : (dragProgress ?? (app.playerMinimized ? 1 : 0))
       let mini = PlayerLayout.mini(safe: geometry.size, bottomInset: insets.bottom, tabBar: app.tabBarHeight)
         .offsetBy(dx: miniOffset.width, dy: miniOffset.height)
       let video = lerp(layout.video, mini, progress)
@@ -490,6 +581,14 @@ struct PlayerScreen: View {
           StreamInfoBar(model: model, target: target)
             .frame(width: info.width, height: info.height)
             .offset(x: info.minX, y: info.minY + progress * 140)
+            .opacity(expandedOpacity)
+            .allowsHitTesting(progress == 0)
+        }
+
+        if let details = layout.details {
+          StreamDetailsPanel(model: model, target: target)
+            .frame(width: details.width, height: details.height)
+            .offset(x: details.minX, y: details.minY + progress * 140)
             .opacity(expandedOpacity)
             .allowsHitTesting(progress == 0)
         }
@@ -514,10 +613,29 @@ struct PlayerScreen: View {
           .allowsHitTesting(false)
 
         PlayerVideoArea(
-          model: model, landscape: landscape, chatOpen: chatOpen, controlInsets: layout.controls,
+          model: model, landscape: layout.fullScreen, chatOpen: chatOpen, controlInsets: layout.controls,
           chromeVisible: progress == 0, minimized: app.playerMinimized, chatOnLeft: layout.chatOnLeft,
-          toggleChat: { withAnimation(Self.spring) { landscapeChat.toggle() } },
+          toggleChat: {
+            withAnimation(Self.spring) {
+              if large { largeFullScreen.toggle() } else { landscapeChat.toggle() }
+            }
+          },
           minimize: minimize,
+          enterFullScreen: {
+            if large {
+              dismissKeyboard()
+              withAnimation(Self.spring) { largeFullScreen = true }
+            } else {
+              OrientationLock.force(.landscape)
+            }
+          },
+          exitFullScreen: {
+            if large {
+              withAnimation(Self.spring) { largeFullScreen = false }
+            } else {
+              OrientationLock.force(.portrait)
+            }
+          },
           onPull: { dy in
             if dragProgress == nil { dismissKeyboard() }
             dragProgress = min(1, max(0, dy / pullDistance))
@@ -534,7 +652,7 @@ struct PlayerScreen: View {
         .clipShape(RoundedRectangle(cornerRadius: 12 * progress, style: .continuous))
         .offset(x: video.minX, y: video.minY)
 
-        if chatOpen && progress == 0 { resizeHandle(layout, screenWidth: screenWidth) }
+        if layout.landscape && layout.panelVisible && progress == 0 { resizeHandle(layout, screenWidth: screenWidth) }
 
         if app.playerMinimized || progress > 0.5 {
           MiniPlayerOverlay(
@@ -577,8 +695,8 @@ struct PlayerScreen: View {
       .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
       .opacity(closing ? 0 : 1)
       .scaleEffect(closing ? 0.96 : 1, anchor: .bottomTrailing)
-      .statusBarHidden(landscape && progress == 0)
-      .persistentSystemOverlays(landscape && progress == 0 ? .hidden : .automatic)
+      .statusBarHidden(layout.fullScreen && progress == 0)
+      .persistentSystemOverlays(layout.fullScreen && progress == 0 ? .hidden : .automatic)
     }
     .ignoresSafeArea(.keyboard)
     .preferredColorScheme(.dark)
@@ -593,7 +711,10 @@ struct PlayerScreen: View {
     .onChange(of: app.playerMinimized) { minimized in
       // The app is portrait; only the full-screen player turns.
       OrientationLock.playerVisible(!minimized)
-      if minimized { dismissKeyboard() }
+      if minimized {
+        dismissKeyboard()
+        largeFullScreen = false
+      }
     }
     .onDisappear {
       model.stop()
@@ -633,21 +754,25 @@ struct PlayerScreen: View {
     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
   }
 
-  /// Distances from the safe area to the screen edges.
+  /// Distances from the safe area to the window's edges (the window, not the screen: iPhone Duo
+  /// has two screens, and the window can be smaller than either). Each side on its own: they're
+  /// often uneven, e.g. iPhone Duo's status bar runs down one side.
   private static func insets(_ geometry: GeometryProxy) -> EdgeInsets {
     let frame = geometry.frame(in: .global)
-    var screen = UIScreen.main.bounds.size
-    // Mid-rotation the screen can still report the old orientation: trust the safe area's shape.
-    if (screen.width > screen.height) != (geometry.size.width > geometry.size.height) {
-      screen = CGSize(width: screen.height, height: screen.width)
+    var window = AppWindow.bounds.size
+    // Mid-rotation the window can still report the old orientation: trust the safe area's shape.
+    if (window.width > window.height) != (geometry.size.width > geometry.size.height) {
+      window = CGSize(width: window.height, height: window.width)
     }
     return EdgeInsets(
       top: max(0, frame.minY), leading: max(0, frame.minX),
-      bottom: max(0, screen.height - frame.maxY), trailing: max(0, screen.width - frame.maxX))
+      bottom: max(0, window.height - frame.maxY), trailing: max(0, window.width - frame.maxX))
   }
 
   private func sidePanel(_ layout: PlayerLayout) -> some View {
-    ChatPanel(chat: chat, bottomInset: layout.panelPadding.bottom, compact: layout.landscape, active: !app.playerMinimized)
+    ChatPanel(
+      chat: chat, bottomInset: layout.panelPadding.bottom, compact: layout.landscape && !layout.large,
+      active: !app.playerMinimized)
       .padding(.top, layout.panelPadding.top)
       .padding(.leading, layout.panelPadding.leading)
       .padding(.trailing, layout.panelPadding.trailing)

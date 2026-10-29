@@ -1,7 +1,6 @@
 #!/bin/bash
-# Builds build/Kestrel.ipa (ad-hoc signed; sideload tools re-sign it).
-#  - Linux: uses the Theos iOS toolchain + SDK ($THEOS, default ~/theos)
-#  - macOS: uses Xcode's iOS SDK
+# Builds build/Kestrel.ipa with Xcode's iOS SDK (ad-hoc signed; sideload tools re-sign it).
+# Use Xcode 27.1 or later: built with the iOS 27.1 SDK, Kestrel fills iPhone Duo's displays.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -13,35 +12,14 @@ OUT=build
 BUNDLE="$OUT/Payload/$APP.app"
 SOURCES=(Sources/Core/*.swift Sources/Twitch/*.swift Sources/App/*.swift)
 
+xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1 || { echo "Xcode with the iOS SDK is needed (macOS)" >&2; exit 1; }
+SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+SWIFTC=(xcrun --sdk iphoneos swiftc)
+EXTRA=()
+sign() { codesign --force --sign - --timestamp=none "$1"; }
+
 rm -rf "$OUT"
 mkdir -p "$BUNDLE"
-
-if [[ "$(uname)" == "Darwin" ]] && xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
-  SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
-  SWIFTC=(xcrun --sdk iphoneos swiftc)
-  EXTRA=()
-  # sign <path> [entitlements]
-  sign() {
-    if [[ -n "${2:-}" ]]; then
-      codesign --force --sign - --timestamp=none --entitlements "$2" "$1"
-    else
-      codesign --force --sign - --timestamp=none "$1"
-    fi
-  }
-else
-  THEOS="${THEOS:-$HOME/theos}"
-  TC="$THEOS/toolchain/linux/iphone/bin"
-  [[ -x "$TC/swiftc" ]] || { echo "Theos iOS toolchain not found at $TC" >&2; exit 1; }
-  SDK="${SDK:-$(ls -d "$THEOS"/sdks/iPhoneOS*.sdk | sort -V | tail -1)}"
-  export PATH="$TC:$PATH"
-  SWIFTC=("$TC/swiftc")
-  EXTRA=(-resource-dir "$TC/../lib/swift" -tools-directory "$TC")
-  # compiler-rt (for #available checks); Xcode's driver links this automatically
-  RT="$(ls "$TC"/../lib/clang/*/lib/darwin/libclang_rt.ios.a 2>/dev/null | head -1)"
-  [[ -n "$RT" ]] && EXTRA+=(-Xlinker "$RT")
-  # sign <path> [entitlements]
-  sign() { "$TC/ldid" "-S${2:-}" "$1"; }
-fi
 
 # Optional: the Amazon IVS Player SDK enables the low-latency player (#if canImport(AmazonIVSPlayer)).
 # Point IVS_XCFRAMEWORK at AmazonIVSPlayer.xcframework, or unpack it into vendor/.
@@ -83,16 +61,8 @@ if [[ -n "$IVS_FRAMEWORK" ]]; then
 fi
 
 echo "==> Signing (ad-hoc)"
-if [[ -n "$IVS_FRAMEWORK" ]]; then
-  if [[ "$(uname)" == "Darwin" ]]; then sign "$BUNDLE/Frameworks/AmazonIVSPlayer.framework"
-  else sign "$BUNDLE/Frameworks/AmazonIVSPlayer.framework/AmazonIVSPlayer"; fi
-fi
-# The app's own entitlements go into its signature (XXXXXXXXXX stands for whoever's team signs it).
-# Signing tools use them to give the app its real identity: signed with a wildcard certificate as
-# just "TEAMID.*", iOS couldn't tell which app was playing (tapping it in the Dynamic Island or on
-# the lock screen didn't open Kestrel) and the Keychain didn't work. In Feather, that's
-# Settings → Signing Options → Merge Entitlements.
-sign "$BUNDLE/$APP" Resources/Kestrel.entitlements
+[[ -n "$IVS_FRAMEWORK" ]] && sign "$BUNDLE/Frameworks/AmazonIVSPlayer.framework"
+sign "$BUNDLE/$APP"
 
 echo "==> Packaging"
 (cd "$OUT" && zip -qry "$APP.ipa" Payload)

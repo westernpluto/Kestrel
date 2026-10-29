@@ -8,6 +8,7 @@ import SwiftUI
 
 struct PlayerVideoArea: View {
   @ObservedObject var model: PlayerModel
+  /// The controls' full-screen form (phone landscape, or full screen in a large window).
   var landscape: Bool
   var chatOpen: Bool
   var controlInsets: EdgeInsets
@@ -19,12 +20,15 @@ struct PlayerVideoArea: View {
   var chatOnLeft: Bool = false
   var toggleChat: () -> Void
   var minimize: () -> Void
+  /// Full screen: on a phone the player turns; in a large window the video takes the whole window.
+  var enterFullScreen: () -> Void
+  var exitFullScreen: () -> Void
   /// Pulling the video down (portrait): how far, then where it was let go (and where it was headed).
   var onPull: (CGFloat) -> Void = { _ in }
   var onPullEnd: (CGFloat, CGFloat) -> Void = { _, _ in }
   @EnvironmentObject private var settings: AppSettings
   @State private var controlsVisible = true
-  @State private var hideTask: Task<Void, Never>?
+  @State private var hideTask: Task<Void, Never>? = nil
   /// A pinch also moves the fingers; don't read it as a swipe.
   @State private var lastPinch = Date.distantPast
   @State private var pulling = false
@@ -55,7 +59,8 @@ struct PlayerVideoArea: View {
       }
       PlayerControls(
         model: model, landscape: landscape, chatOpen: chatOpen, visible: controlsShown && chromeVisible && !pulling,
-        insets: controlInsets, toggleChat: toggleChat, minimize: minimize, interacted: { scheduleHide(after: $0) })
+        insets: controlInsets, toggleChat: toggleChat, minimize: minimize,
+        enterFullScreen: enterFullScreen, exitFullScreen: exitFullScreen, interacted: { scheduleHide(after: $0) })
       if let resumed = model.resumedAt, chromeVisible {
         resumeNotice(resumed)
           .padding(.leading, controlInsets.leading + 8)
@@ -193,9 +198,9 @@ struct PlayerVideoArea: View {
         guard Date().timeIntervalSince(lastPinch) > 0.5 else { return }
         if abs(dy) > abs(dx) {
           if dy > 70, landscape {
-            OrientationLock.force(.portrait)
+            exitFullScreen()
           } else if dy < -70, !landscape {
-            OrientationLock.force(.landscape)
+            enterFullScreen()
           }
         } else if landscape {
           // Swipe toward the middle to bring chat in, toward its edge to put it away.
@@ -222,7 +227,7 @@ struct PlayerVideoArea: View {
     if landscape {
       withAnimation(.easeInOut(duration: 0.25)) { model.setFill(!model.fillsScreen) }
     } else {
-      OrientationLock.force(.landscape)
+      enterFullScreen()
     }
   }
 
@@ -260,6 +265,8 @@ struct PlayerControls: View {
   var insets: EdgeInsets
   var toggleChat: () -> Void
   var minimize: () -> Void
+  var enterFullScreen: () -> Void
+  var exitFullScreen: () -> Void
   /// Keeps the controls up for this many more seconds.
   var interacted: (Double) -> Void
   @EnvironmentObject private var settings: AppSettings
@@ -303,7 +310,7 @@ struct PlayerControls: View {
   private var topBar: some View {
     HStack(spacing: 2) {
       button("chevron.down", label: landscape ? "Exit full screen" : "Minimize") {
-        landscape ? OrientationLock.force(.portrait) : minimize()
+        landscape ? exitFullScreen() : minimize()
       }
       if landscape {
         VStack(alignment: .leading, spacing: 1) {
@@ -373,7 +380,7 @@ struct PlayerControls: View {
           landscape ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
           label: landscape ? "Exit full screen" : "Full screen"
         ) {
-          OrientationLock.force(landscape ? .portrait : .landscape)
+          landscape ? exitFullScreen() : enterFullScreen()
         }
       }
     }
@@ -486,9 +493,9 @@ struct SeekBar: View {
   var onStart: () -> Void = {}
   var onScrub: (Double) -> Void = { _ in }
   var onCommit: (Double) -> Void
-  @State private var dragTime: Double?
+  @State private var dragTime: Double? = nil
   /// Where the thumb was let go, held until playback gets there (so it doesn't jump back).
-  @State private var landedTime: Double?
+  @State private var landedTime: Double? = nil
 
   private static let bubbleWidth: CGFloat = 168
 
@@ -689,6 +696,125 @@ struct StreamInfoBar: View {
     switch target {
     case .live: return model.stream?.title ?? model.channel?.name ?? ""
     case .video(let video): return video.title
+    }
+  }
+}
+
+/// A large window in landscape (iPhone Duo's inner display): the room under the video's info bar
+/// shows the stream's details: the whole title, who's watching and for how long, and its tags.
+struct StreamDetailsPanel: View {
+  @ObservedObject var model: PlayerModel
+  let target: PlaybackTarget
+  @EnvironmentObject private var app: AppModel
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 14) {
+        Text(title)
+          .font(.title3.weight(.semibold))
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)
+        WrapLayout(spacing: 18, lineSpacing: 8) { facts }
+          .font(.subheadline)
+        if !tags.isEmpty {
+          WrapLayout(spacing: 6, lineSpacing: 6) {
+            ForEach(tags, id: \.self) { TagChip(text: $0) }
+          }
+        }
+      }
+      .padding(.horizontal, 16)
+      .padding(.top, 6)
+      .padding(.bottom, 16)
+      .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    .scrollIndicators(.hidden)
+    .overlay(alignment: .top) { Divider().overlay(Color.white.opacity(0.08)) }
+  }
+
+  @ViewBuilder
+  private var facts: some View {
+    switch target {
+    case .live:
+      if let viewers = model.stream?.viewers {
+        Label("\(Format.viewers(viewers)) watching", systemImage: "person.fill").foregroundColor(.white.opacity(0.85))
+      }
+      if let uptime = Format.uptime(since: model.stream?.startedAt) {
+        Label("Live for \(uptime)", systemImage: "clock").foregroundColor(.white.opacity(0.85))
+      }
+      if let category = model.stream?.category {
+        Button {
+          app.openCategory(category)
+        } label: {
+          Label(category.name, systemImage: "square.grid.2x2").foregroundColor(.accentTeal)
+        }
+        .buttonStyle(PressableStyle(scale: 0.97))
+      }
+    case .video(let video):
+      Label("\(Format.viewers(video.viewCount)) views", systemImage: "eye").foregroundColor(.white.opacity(0.85))
+      if video.createdAt != nil {
+        Label(Format.relative(video.createdAt), systemImage: "calendar").foregroundColor(.white.opacity(0.85))
+      }
+      if video.lengthSeconds > 0 {
+        Label(Format.duration(video.lengthSeconds), systemImage: "film").foregroundColor(.white.opacity(0.85))
+      }
+      if let category = video.categoryName {
+        Label(category, systemImage: "square.grid.2x2").foregroundColor(.accentTeal)
+      }
+    }
+  }
+
+  private var title: String {
+    switch target {
+    case .live: return model.stream?.title ?? model.channel?.name ?? ""
+    case .video(let video): return video.title
+    }
+  }
+
+  private var tags: [String] {
+    if case .live = target { return model.stream?.tags ?? [] }
+    return []
+  }
+}
+
+/// Lays its items out in lines, starting a new line when one is full.
+struct WrapLayout: Layout {
+  var spacing: CGFloat = 8
+  var lineSpacing: CGFloat = 8
+
+  func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    let width = proposal.width ?? .infinity
+    var x: CGFloat = 0
+    var y: CGFloat = 0
+    var lineHeight: CGFloat = 0
+    var widest: CGFloat = 0
+    for subview in subviews {
+      let size = subview.sizeThatFits(.unspecified)
+      if x > 0, x + size.width > width {
+        y += lineHeight + lineSpacing
+        x = 0
+        lineHeight = 0
+      }
+      x += size.width + spacing
+      lineHeight = max(lineHeight, size.height)
+      widest = max(widest, x - spacing)
+    }
+    return CGSize(width: proposal.width ?? widest, height: subviews.isEmpty ? 0 : y + lineHeight)
+  }
+
+  func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    var x = bounds.minX
+    var y = bounds.minY
+    var lineHeight: CGFloat = 0
+    for subview in subviews {
+      let size = subview.sizeThatFits(.unspecified)
+      if x > bounds.minX, x + size.width > bounds.maxX {
+        y += lineHeight + lineSpacing
+        x = bounds.minX
+        lineHeight = 0
+      }
+      subview.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+      x += size.width + spacing
+      lineHeight = max(lineHeight, size.height)
     }
   }
 }

@@ -250,6 +250,13 @@ final class AppModel: ObservableObject {
     push(.channel(channel))
   }
 
+  /// Shrinks the player and opens a category's page in the current section.
+  func openCategory(_ category: Category) {
+    playerMinimized = true
+    if tab == .settings { tab = .following }
+    push(.category(category))
+  }
+
   /// Opens a page in the current section. A page that's already open there is gone back to,
   /// never stacked a second time.
   func push(_ route: Route) {

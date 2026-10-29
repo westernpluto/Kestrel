@@ -68,10 +68,12 @@ func detachedRefresh(_ work: @escaping @MainActor () async -> Void) async {
 }
 
 /// A list of rows with the system's pull to refresh (the same spinner and spring-back as other
-/// apps; a SwiftUI scroll view's version stuttered and left gaps).
+/// apps; a SwiftUI scroll view's version stuttered and left gaps). It tells what's inside how wide
+/// it is, so wide screens (iPhone Duo's inner display, iPad) get tiles in columns.
 struct FeedList<Content: View>: View {
   var refresh: @MainActor () async -> Void
   @ViewBuilder var content: () -> Content
+  @State private var width: CGFloat = 0
 
   var body: some View {
     List {
@@ -80,7 +82,101 @@ struct FeedList<Content: View>: View {
     }
     .listStyle(.plain)
     .environment(\.defaultMinListRowHeight, 1)
+    .environment(\.feedWidth, width)
     .refreshable { await detachedRefresh(refresh) }
+    .background(
+      GeometryReader { proxy in
+        Color.clear
+          .onAppear { width = proxy.size.width }
+          .onChange(of: proxy.size.width) { newWidth in width = newWidth }
+      }
+    )
+  }
+}
+
+private struct FeedWidthKey: EnvironmentKey {
+  static let defaultValue: CGFloat = 0
+}
+
+private struct FeedColumnsKey: EnvironmentKey {
+  static let defaultValue = 1
+}
+
+extension EnvironmentValues {
+  /// The width of the feed a view is in (0 until it's measured).
+  var feedWidth: CGFloat {
+    get { self[FeedWidthKey.self] }
+    set { self[FeedWidthKey.self] = newValue }
+  }
+
+  /// How many columns of tiles the feed shows (1: a list of rows).
+  var feedColumns: Int {
+    get { self[FeedColumnsKey.self] }
+    set { self[FeedColumnsKey.self] = newValue }
+  }
+}
+
+enum FeedGrid {
+  /// One column on a phone. On a wide screen, as many tiles of at least `tile` points as fit, in
+  /// an even number of columns: iPhone Duo's fold runs down the middle of its inner display, and
+  /// an even count keeps it between tiles instead of across one.
+  static func columns(_ width: CGFloat, tile: CGFloat = 300) -> Int {
+    guard width >= 600 else { return 1 }
+    return max(2, Int(width / tile) / 2 * 2)
+  }
+}
+
+/// Items in a FeedList: rows on a phone, tiles in columns on a wide screen (one list row per line
+/// of tiles). Tiles can read `feedColumns` to pick their look.
+struct AdaptiveFeed<Item: Identifiable, Tile: View>: View {
+  let items: [Item]
+  /// Narrowest a tile gets on a wide screen.
+  var tileWidth: CGFloat = 300
+  /// Space above and below each row on a phone.
+  var rowPadding: CGFloat = 7
+  /// The item came on screen (to load more).
+  var reached: (Item) -> Void = { _ in }
+  @ViewBuilder var tile: (Item) -> Tile
+  @Environment(\.feedWidth) private var width
+
+  var body: some View {
+    let columns = FeedGrid.columns(width, tile: tileWidth)
+    if columns <= 1 {
+      ForEach(items) { item in
+        tile(item)
+          .feedRow(top: rowPadding, bottom: rowPadding)
+          .onAppear { reached(item) }
+      }
+    } else {
+      let lines = stride(from: 0, to: items.count, by: columns).map { Array(items[$0..<min($0 + columns, items.count)]) }
+      ForEach(lines, id: \.first?.id) { line in
+        HStack(alignment: .top, spacing: 16) {
+          ForEach(line) { item in
+            tile(item).frame(maxWidth: .infinity, alignment: .topLeading)
+          }
+          // The last line's tiles stay the same width as the others.
+          ForEach(0..<(columns - line.count), id: \.self) { _ in Color.clear.frame(maxWidth: .infinity, maxHeight: 0) }
+        }
+        .environment(\.feedColumns, columns)
+        .feedRow(top: 9, bottom: 9)
+        .onAppear { if let last = line.last { reached(last) } }
+      }
+    }
+  }
+}
+
+/// A live stream in a feed: a row on a phone, a card with a big picture in columns.
+struct StreamTile: View {
+  let stream: LiveStream
+  var showCategory = true
+  @Environment(\.feedColumns) private var columns
+
+  var body: some View {
+    if columns > 1 {
+      StreamCard(stream: stream, showChannel: true, showCategory: showCategory)
+    } else {
+      StreamRow(stream: stream, showCategory: showCategory)
+    }
   }
 }
 
@@ -209,9 +305,12 @@ struct ChipRow: Layout {
   }
 }
 
-/// The channel page's "Live now": one tile (picture and text) that opens the stream.
+/// One tile (picture and text) that opens the stream: the channel page's "Live now", and streams
+/// in columns on a wide screen (then with the channel's name, and held for more).
 struct StreamCard: View {
   let stream: LiveStream
+  var showChannel = false
+  var showCategory = true
   @EnvironmentObject private var app: AppModel
 
   var body: some View {
@@ -229,16 +328,26 @@ struct StreamCard: View {
             }
           }
           .overlay {
-            Image(systemName: "play.fill").font(.system(size: 30, weight: .bold)).foregroundColor(.white)
-              .shadow(color: .black.opacity(0.6), radius: 6)
+            if !showChannel {
+              Image(systemName: "play.fill").font(.system(size: 30, weight: .bold)).foregroundColor(.white)
+                .shadow(color: .black.opacity(0.6), radius: 6)
+            }
           }
           .clipShape(RoundedRectangle(cornerRadius: 10))
         VStack(alignment: .leading, spacing: 4) {
+          if showChannel {
+            HStack(spacing: 6) {
+              Avatar(url: stream.channel.profileImageURL, size: 22)
+              Text(stream.channel.name).font(.subheadline.weight(.bold)).foregroundColor(.primary).lineLimit(1)
+            }
+          }
           Text(stream.title.isEmpty ? stream.channel.name : stream.title)
-            .font(.subheadline.weight(.semibold)).foregroundColor(.primary).lineLimit(2)
+            .font(showChannel ? Font.subheadline : Font.subheadline.weight(.semibold))
+            .foregroundColor(showChannel ? .secondary : .primary)
+            .lineLimit(2)
             .multilineTextAlignment(.leading)
-          if let category = stream.category {
-            Text(category.name).font(.footnote).foregroundColor(.accentTeal)
+          if showCategory, let category = stream.category {
+            Text(category.name).font(.footnote).foregroundColor(.accentTeal).lineLimit(1)
           }
           if !stream.tags.isEmpty {
             ChipRow(spacing: 4) {
@@ -250,6 +359,15 @@ struct StreamCard: View {
       .contentShape(Rectangle())
     }
     .buttonStyle(PressableStyle(scale: 0.98))
+    .contextMenu {
+      if showChannel {
+        Button { app.playing = .live(stream.channel) } label: { Label("Watch", systemImage: "play.fill") }
+        Button { app.push(.channel(stream.channel)) } label: { Label("Open channel", systemImage: "person.crop.circle") }
+        if let category = stream.category {
+          Button { app.push(.category(category)) } label: { Label(category.name, systemImage: "square.grid.2x2") }
+        }
+      }
+    }
   }
 }
 

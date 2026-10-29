@@ -44,8 +44,8 @@ struct RootView: View {
 
   var body: some View {
     ZStack {
-      // The system tab bar: built with the iOS 26 SDK it's the floating Liquid Glass bar (slide a
-      // finger along it to switch sections).
+      // The system tab bar: the floating Liquid Glass bar (slide a finger along it to switch
+      // sections). On iPhone Duo the system moves it to the side when that leaves more room.
       TabView(selection: $app.tab) {
         NavigationStack(path: $app.followingPath) { FollowingView().appDestinations().miniPlayerRoom() }
           .tabItem { Label("Following", systemImage: "heart") }
@@ -78,6 +78,21 @@ struct RootView: View {
       }
     }
     .animation(.spring(response: 0.42, dampingFraction: 0.88), value: app.playing?.id)
+    .background(WindowSizeReporter())
+  }
+}
+
+/// Tells the orientation lock how big the window is: it changes when iPhone Duo is opened or
+/// closed, and a large window is used whichever way it's held.
+struct WindowSizeReporter: View {
+  var body: some View {
+    GeometryReader { proxy in
+      Color.clear
+        .onAppear { OrientationLock.windowSizeChanged(proxy.size) }
+        .onChange(of: proxy.size) { size in OrientationLock.windowSizeChanged(size) }
+    }
+    .ignoresSafeArea()
+    .allowsHitTesting(false)
   }
 }
 

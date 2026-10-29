@@ -39,7 +39,8 @@ A client for watching Twitch without ads, with low-latency playback, chat and yo
 - **Chat:** Twitch, 7TV, BTTV and FFZ emotes (animated), badges, and recent messages when you join. New messages glide in frame by frame (busy chats and VOD replays included); only messages whose pictures arrive late are redrawn.
 - **Lists:** live channels as compact rows like Twitch's (small picture on the left; streamer, title, category and tags on the right). Each row is one tile that opens the stream (hold it for the channel or category). The system's pull to refresh. Browse switches between Live and Categories with a swipe. Search keeps your recent searches (swipe one away, or Clear) and fetches its results again when you come back to it, so who's live stays current.
 - **Go-live alerts** (Settings → Notifications): a notification when a channel you follow (or hearted) goes live; tap it to watch. Kestrel checks every minute while it's open or playing. A sideloaded app has no push server, so once Kestrel is closed iOS decides when it may check in the background (often every 15–30 minutes, less if you rarely open it, never if you swipe it away in the app switcher), and alerts can come late.
-- **iOS 26 look:** the main build uses the iOS 26 SDK, so the tab bar is the floating Liquid Glass bar (slide a finger along it to switch sections), with glass navigation bars and menus.
+- **Liquid Glass look:** the floating glass tab bar (slide a finger along it to switch sections), with glass navigation bars and menus.
+- **iPhone Duo:** built with the iOS 27.1 SDK, Kestrel fills both displays and follows along when the phone is opened or closed. On the inner display it's used whichever way it's held: in landscape, chat runs down the side with the video beside it, the stream's info bar under the video and its details (whole title, viewers, uptime, category, tags) in the room below; in portrait, chat sits under the video. Full screen gives the video the whole display. Lists show streams as cards in two columns (an even number of columns keeps the fold between them), categories in more columns. Layouts go by the window's size, not the device, so iPad and split screen get the same treatment.
 - **Video stats:** a Twitch-style overlay with player, quality, codecs, resolution, frame rate, bitrate, bandwidth, buffer, latency, dropped frames, ad state and ad-blocking route.
 
 **Starting fresh:** deleting an app on iOS keeps what it saved in the Keychain, so Kestrel now clears its Keychain items (the Twitch login, your proxy password) the first time it runs after a reinstall. **Settings → Reset Kestrel** erases everything it has stored at any time, then closes it so it opens as new.
@@ -50,25 +51,16 @@ A client for watching Twitch without ads, with low-latency playback, chat and yo
 
 Download the IPA from the latest GitHub Actions run (**Actions → Build IPA and APK → Artifacts**) and sideload it with your usual tool (SideStore, AltStore, Feather, TrollStore…). Requires iOS 16+.
 
-**Signing with a wildcard certificate (Feather and similar):** turn on **Merge Entitlements** (Feather: Settings → Signing Options, or Properties when signing). Without it the app is signed as "any app" of the certificate's team, so iOS can't tell which app is playing: tapping Kestrel in the Dynamic Island or on the lock screen doesn't open it, and the Keychain isn't available. With it, Feather gives Kestrel its real identity from the entitlements built into the app. Feather 2.9.0 doesn't have the option yet; the **Build Feather** workflow (`.github/workflows/feather.yml`) builds Feather's latest source, which does: download its **Feather-ipa** artifact, sign and install it with your current Feather once, then turn the option on.
-
-- **Kestrel-ipa**: the main build (Xcode, iOS 26 SDK: Liquid Glass on iOS 26).
-- **Kestrel-ipa-classic**: the same app built on Linux with the iOS 16.5 SDK (classic tab bar). Use it if the main build failed.
+- **Kestrel-ipa**: the iPhone app (Xcode 27.1, iOS 27.1 SDK).
 - **Kestrel-apk**: the Android app (Android 8.0+). Open the APK on the phone to install it; it can be shared with anyone as is. See [android/README.md](android/README.md).
 
 ## Build
 
-**GitHub Actions** (no Mac needed): push to your repo. The `Build IPA and APK` workflow runs three builds side by side. The two iOS builds each download the Amazon IVS Player SDK (pinned version, SHA-256 checked) and run `./build.sh`:
-- on a macOS runner with the newest Xcode (iOS 26 SDK) → `Kestrel-ipa`;
-- on Linux with a Swift 5.8 iOS toolchain and the iOS 16.5 SDK → `Kestrel-ipa-classic`;
-- and the Android app is built with Gradle in `android/` → `Kestrel-apk`.
+**GitHub Actions** (no Mac needed): push to your repo. The `Build IPA and APK` workflow makes one build of each app:
+- iPhone: on GitHub's Xcode 27 runner with Xcode 27.1, it downloads the Amazon IVS Player SDK (pinned version, SHA-256 checked) and runs `./build.sh` → `Kestrel-ipa`. If the IVS SDK can't be downloaded or linked, it builds without the low-latency player and flags a warning on the run.
+- Android: Gradle in `android/` → `Kestrel-apk`.
 
-If the IVS SDK can't be downloaded or linked, a build goes ahead without the low-latency player and flags a warning on the run.
-
-**Locally:**
-- Linux: install the Theos iOS toolchain at `~/theos` (the same layout the workflow creates), then run `./build.sh`.
-- macOS with Xcode: just run `./build.sh`.
-- For the low-latency player, unpack `https://player.live-video.net/<version>/AmazonIVSPlayer.xcframework.zip` into `vendor/` (or set `IVS_XCFRAMEWORK`).
+**Locally** (macOS with Xcode 27.1 or later): run `./build.sh`. For the low-latency player, unpack `https://player.live-video.net/<version>/AmazonIVSPlayer.xcframework.zip` into `vendor/` (or set `IVS_XCFRAMEWORK`).
 
 **Core tests** (playlist parsing, ad handling against a simulated Twitch and ad-free server, the local server, chat parsing): `./Tests/run.sh`. Needs a host Swift toolchain (Linux or macOS).
 
