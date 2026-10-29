@@ -33,15 +33,32 @@ jobs:
           ref: ${{ inputs.ref || env.FEATHER_REF }}
           submodules: recursive
 
-      - name: Pick the newest Xcode
-        run: |
-          XCODE="$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -viE 'beta|release_candidate|_rc' | sort -V | tail -1)"
-          [ -n "$XCODE" ] || XCODE="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
-          sudo xcode-select -s "$XCODE/Contents/Developer"
-          xcodebuild -version
-
+      # Xcode 26.6 crashes while loading Feather's Swift packages (an Xcode bug: "count of array
+      # (32) differs from count of index set (31)"). Feather's own releases are built with Xcode
+      # 26.3, so that goes first; if it isn't installed or fails too, every other installed Xcode is
+      # tried, newest first.
       - name: Build Feather (iPhone)
-        run: make iphoneos
+        run: |
+          {
+            ls -d /Applications/Xcode_26.3*.app 2>/dev/null || true
+            ls -d /Applications/Xcode_*.app | grep -viE 'beta|release_candidate|_rc' | sort -rV
+          } | awk '!seen[$0]++' > /tmp/xcodes.txt
+          echo "Xcode versions to try:"; cat /tmp/xcodes.txt
+          while read -r XCODE; do
+            echo "::group::Building with $(basename "$XCODE")"
+            sudo xcode-select -s "$XCODE/Contents/Developer"
+            xcodebuild -version
+            if make iphoneos; then
+              echo "::endgroup::"
+              echo "Built with $(basename "$XCODE")"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "::warning::$(basename "$XCODE") couldn't build Feather; trying another Xcode."
+            rm -rf _build packages "${TMPDIR:-/tmp}/Feather"
+          done < /tmp/xcodes.txt
+          echo "::error::None of the installed Xcode versions could build Feather."
+          exit 1
 
       - name: Upload Feather.ipa
         uses: actions/upload-artifact@v4
