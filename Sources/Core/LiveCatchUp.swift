@@ -30,8 +30,10 @@ struct LiveCatchUp: Sendable {
   static let rates: (fast: Float, medium: Float, gentle: Float) = (1.2, 1.1, 1.05)
   private static let relaxAfter: TimeInterval = 90
 
-  init(now: Date = Date()) {
-    targetBuffer = Self.startBuffer
+  /// - Parameter targetBuffer: the margin to start from (the last stream's, so a connection that
+  ///   needed more doesn't have to stall again to get it).
+  init(targetBuffer: Double? = nil, now: Date = Date()) {
+    self.targetBuffer = min(Self.maxBuffer, max(Self.minBuffer, targetBuffer ?? Self.startBuffer))
     holdUntil = now.addingTimeInterval(1)
     smoothSince = now
   }
@@ -40,10 +42,14 @@ struct LiveCatchUp: Sendable {
   ///   - buffer: seconds buffered ahead of the playhead (nil: unknown).
   ///   - latency: seconds behind live (nil: unknown).
   ///   - playing: playing, not paused or buffering.
+  ///   - maxRate: the most it may speed up (less on a connection with little to spare: playing
+  ///     faster also downloads faster).
   /// - Returns: the rate to play at.
   @discardableResult
-  mutating func update(buffer: Double?, latency: Double?, playing: Bool, now: Date = Date()) -> Float {
-    guard playing, now >= holdUntil, let buffer, let latency, buffer.isFinite, latency.isFinite else {
+  mutating func update(
+    buffer: Double?, latency: Double?, playing: Bool, maxRate: Float = LiveCatchUp.rates.fast, now: Date = Date()
+  ) -> Float {
+    guard playing, now >= holdUntil, maxRate > 1, let buffer, let latency, buffer.isFinite, latency.isFinite else {
       rate = 1
       return rate
     }
@@ -68,7 +74,7 @@ struct LiveCatchUp: Sendable {
     } else {
       next = 1
     }
-    rate = next
+    rate = min(next, maxRate)
     return rate
   }
 
@@ -76,8 +82,14 @@ struct LiveCatchUp: Sendable {
   mutating func stalled(now: Date = Date()) {
     targetBuffer = min(Self.maxBuffer, targetBuffer + 0.4)
     rate = 1
-    holdUntil = now.addingTimeInterval(8)
+    holdUntil = now.addingTimeInterval(12)
     smoothSince = now
+  }
+
+  /// Normal speed for a while (e.g. while the quality changes).
+  mutating func hold(for seconds: TimeInterval, now: Date = Date()) {
+    rate = 1
+    holdUntil = max(holdUntil, now.addingTimeInterval(seconds))
   }
 
   /// A new start (load, resume): normal speed, then catch up once it's settled.

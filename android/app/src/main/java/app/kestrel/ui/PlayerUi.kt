@@ -50,6 +50,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -73,6 +74,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -90,6 +92,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -591,22 +595,42 @@ private fun PlayerControls(
                 RoundIcon(KIcons.Gear, "Settings", onClick = onMenu)
             }
         }
-        // Play / pause.
+        // Play / pause, with ten-second skips beside it in VODs and while rewinding.
         if (controller.phase == PlayerController.Phase.Playing && !controller.coveringAd && !scrubbing) {
-            Box(
-                Modifier.align(Alignment.Center).size(64.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.35f))
-                    .clickable {
-                        controller.togglePause()
-                        onInteract()
-                    },
-                contentAlignment = Alignment.Center,
+            val skips = controller.canSkipBack || controller.canSkipForward
+            Row(
+                Modifier.align(Alignment.Center),
+                horizontalArrangement = Arrangement.spacedBy(if (landscape) 40.dp else 26.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    if (controller.isPaused) Icons.Filled.PlayArrow else KIcons.Pause,
-                    contentDescription = if (controller.isPaused) "Play" else "Pause",
-                    tint = Color.White,
-                    modifier = Modifier.size(if (landscape) 38.dp else 32.dp),
-                )
+                if (skips) {
+                    SkipButton(back = true, enabled = controller.canSkipBack) {
+                        controller.skip(-10.0)
+                        onInteract()
+                    }
+                }
+                Box(
+                    Modifier.size(64.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.35f))
+                        .clickable {
+                            controller.togglePause()
+                            onInteract()
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        if (controller.isPaused) Icons.Filled.PlayArrow else KIcons.Pause,
+                        contentDescription = if (controller.isPaused) "Play" else "Pause",
+                        tint = Color.White,
+                        modifier = Modifier.size(if (landscape) 38.dp else 32.dp),
+                    )
+                }
+                if (skips) {
+                    // Kept in place (invisible) when there's nowhere to go, so pause stays centred.
+                    SkipButton(back = false, enabled = controller.canSkipForward) {
+                        controller.skip(10.0)
+                        onInteract()
+                    }
+                }
             }
         }
         // Bottom bar.
@@ -889,6 +913,23 @@ private fun ResumeBanner(controller: PlayerController) {
                 modifier = Modifier.clip(RoundedCornerShape(50)).clickable { controller.startOver() }.padding(horizontal = 8.dp, vertical = 8.dp),
             )
         }
+    }
+}
+
+/** Ten seconds back or forward: a circular arrow with "10" in it. */
+@Composable
+private fun SkipButton(back: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier.size(50.dp).alpha(if (enabled) 1f else 0f).clip(CircleShape).background(Color.Black.copy(alpha = 0.3f))
+            .clickable(enabled = enabled, onClick = onClick)
+            .semantics { contentDescription = if (back) "Back 10 seconds" else "Forward 10 seconds" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Icons.Filled.Refresh, contentDescription = null, tint = Color.White,
+            modifier = Modifier.size(32.dp).graphicsLayer { scaleX = if (back) -1f else 1f },
+        )
+        Text("10", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
     }
 }
 

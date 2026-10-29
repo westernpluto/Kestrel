@@ -47,6 +47,13 @@ actor LowLatencySession: PlaylistSource {
   private(set) var route: StreamRoute = .twitch
   /// Index i is served as `v/i.m3u8` (portrait renditions removed).
   private(set) var variants: [HLSVariant] = []
+  /// Playing from Twitch's playlist server near the viewer instead of the one near the ad-free
+  /// server: the ad-free server's addresses, to go back to (see `NearbyPlaylists`).
+  private var farVariants: [HLSVariant]?
+  /// The playlist server in use.
+  private(set) var servingHost: String?
+  /// Whether that's Twitch's server near the viewer, used instead of the ad-free server's.
+  var servingNearby: Bool { farVariants != nil }
   private var lastServed: [Int: String] = [:]
 
   private var inBreak = false
@@ -113,26 +120,92 @@ actor LowLatencySession: PlaylistSource {
     guard let first = found.firstIndex(where: { !$0.isAudioOnly }) else { throw StreamSession.StartError.noVariants }
     variants = found
     masterText = lines.joined(separator: "\n") + "\n"
-    // Ask for the first rendition's playlist now, while the player is still being set up: the
-    // connection to Twitch's playlist server is open by the time the player wants it, and its
-    // first playlist is (nearly) ready, so the video starts sooner.
-    let url = URL(string: found[first].uri)
-    warmed = (first, Task { await self.fetch(url) }, Date())
+    let farHost = URL(string: found[first].uri)?.host
+    servingHost = farHost
+    if case .adFreeServer = route, let near = fetched.nearbyHost, let farHost, near != farHost,
+      NearbyPlaylists.isTwitchPlaylistHost(farHost), NearbyPlaylists.worthTrying(near)
+    {
+      await tryNearby(near, far: farHost, first: first)
+    }
+    if warmed == nil {
+      // Ask for the first rendition's playlist now, while the player is still being set up: the
+      // connection to Twitch's playlist server is open by the time the player wants it, and its
+      // first playlist is (nearly) ready, so the video starts sooner.
+      let url = URL(string: variants[first].uri)
+      warmed = (first, Task { await self.fetch(url) }, Date())
+    }
     let labels = found.filter { !$0.isAudioOnly }.sorted { $0.height > $1.height }.map(\.label)
-    let server = Self.serverName(found[first].uri).map { " via \($0)" } ?? ""
+    let server = servingHost.map { " via \(Self.serverName(host: $0))" } ?? ""
     log.add("Low-latency player: \(login) (Twitch offers \(labels.joined(separator: ", "))\(server))")
-    return found
+    return variants
+  }
+
+  /// Tries the stream's playlists on Twitch's server near the viewer (see `NearbyPlaylists`):
+  /// kept if that server hands over the first rendition's playlist, clean of ads.
+  private func tryNearby(_ near: String, far: String, first: Int) async {
+    let nearVariants = variants.map { variant -> HLSVariant in
+      var copy = variant
+      copy.uri = NearbyPlaylists.replacingHost(variant.uri, with: near)
+      return copy
+    }
+    let started = Date()
+    let probe = await fetch(URL(string: nearVariants[first].uri), timeout: 2)
+    let ms = Int(Date().timeIntervalSince(started) * 1000)
+    switch probe {
+    case .success(let result) where result.playlist.isClean && !result.playlist.regularSegments.isEmpty:
+      farVariants = variants
+      variants = nearVariants
+      servingHost = near
+      warmed = (first, Task { probe }, Date())
+      log.add(
+        "Playlists from Twitch's server near you (\(Self.serverName(host: near))) instead of the ad-free server's (\(Self.serverName(host: far))), checked in \(ms) ms"
+      )
+    case .success:
+      log.add("Twitch's server near you (\(Self.serverName(host: near))) showed an ad; staying on \(Self.serverName(host: far))")
+    case .failure(let status):
+      if status == 403 || status == 404 || status == 400 { NearbyPlaylists.refused(near) }
+      log.add("Twitch's server near you (\(Self.serverName(host: near))) didn't take this stream (HTTP \(status)); staying on \(Self.serverName(host: far))")
+    }
+  }
+
+  /// Back to the ad-free server's playlist server for the rest of the stream.
+  private func leaveNearby(_ reason: String) {
+    guard let far = farVariants else { return }
+    variants = far
+    farVariants = nil
+    servingHost = far.first.flatMap { URL(string: $0.uri)?.host }
+    log.add("Back to the ad-free server's playlist server (\(reason))")
+  }
+
+  /// The same stream under a new id, so a new address for the player (which starts over at the
+  /// live edge), without asking Twitch for it again.
+  func restarted() async -> LowLatencySession {
+    let copy = LowLatencySession(login: login, config: config, http: http, tokens: tokens, log: log, onUpdate: onUpdate)
+    await copy.adopt(masterText: masterText, variants: variants, farVariants: farVariants, route: route, servingHost: servingHost)
+    return copy
+  }
+
+  private func adopt(masterText: String, variants: [HLSVariant], farVariants: [HLSVariant]?, route: StreamRoute, servingHost: String?) {
+    self.masterText = masterText
+    self.variants = variants
+    self.farVariants = farVariants
+    self.route = route
+    self.servingHost = servingHost
+    if let first = variants.firstIndex(where: { !$0.isAudioOnly }) {
+      let url = URL(string: variants[first].uri)
+      warmed = (first, Task { await self.fetch(url) }, Date())
+    }
   }
 
   /// The first rendition's playlist, asked for at the start (see `start`).
   private var warmed: (index: Int, task: Task<FetchResult, Never>, startedAt: Date)?
 
-  /// Which of Twitch's playlist servers a playlist comes from (`fra05` from
-  /// `video-weaver.fra05.hls.ttvnw.net`), or its host.
-  static func serverName(_ uri: String) -> String? {
-    guard let host = URL(string: uri)?.host else { return nil }
+  /// Which of Twitch's playlist servers this is: `euc13` for `euc13.playlist.ttvnw.net`, `fra05`
+  /// for `video-weaver.fra05.hls.ttvnw.net`, else the host.
+  static func serverName(host: String) -> String {
     let parts = host.split(separator: ".")
     if parts.count > 2, parts[0].hasPrefix("video-weaver") { return String(parts[1]) }
+    if parts.count > 3, NearbyPlaylists.isTwitchPlaylistHost(host) { return String(parts[0]) }
     return host
   }
 
@@ -142,8 +215,8 @@ actor LowLatencySession: PlaylistSource {
 
   func mediaPlaylist(_ index: Int) async -> (status: Int, body: String) {
     guard index >= 0, index < variants.count else { return (404, "") }
-    let target = variants[index]
-    let fetched: FetchResult
+    var target = variants[index]
+    var fetched: FetchResult
     if let warm = warmed, warm.index == index, Date().timeIntervalSince(warm.startedAt) < 1 {
       // The player's first request, while the early one is in flight or only just back.
       warmed = nil
@@ -151,6 +224,22 @@ actor LowLatencySession: PlaylistSource {
     } else {
       warmed = nil
       fetched = await fetch(URL(string: target.uri))
+    }
+    // On Twitch's server near the viewer: if it turns the stream away or shows an ad, go back to
+    // the ad-free server's for good.
+    if servingNearby {
+      var problem: String?
+      switch fetched {
+      case .failure(let status) where status == 403 || status == 404 || status == 400: problem = "HTTP \(status)"
+      case .success(let result) where !result.playlist.isClean: problem = "it showed an ad"
+      default: break
+      }
+      if let problem, servingNearby, index < variants.count {
+        if problem.hasPrefix("HTTP"), let host = servingHost { NearbyPlaylists.refused(host) }
+        leaveNearby("the one near you: \(problem)")
+        target = variants[index]
+        fetched = await fetch(URL(string: target.uri))
+      }
     }
     let main: (text: String, url: URL, playlist: HLSMediaPlaylist)
     switch fetched {
@@ -396,10 +485,10 @@ actor LowLatencySession: PlaylistSource {
     case failure(Int)
   }
 
-  private nonisolated func fetch(_ url: URL?) async -> FetchResult {
+  private nonisolated func fetch(_ url: URL?, timeout: TimeInterval = 5) async -> FetchResult {
     guard let url else { return .failure(404) }
     do {
-      let (data, response) = try await http.data(for: Usher.playlistRequest(url, timeout: 5))
+      let (data, response) = try await http.data(for: Usher.playlistRequest(url, timeout: timeout))
       guard response.statusCode == 200 else { return .failure(response.statusCode) }
       guard HLS.looksLikePlaylist(data), let text = String(data: data, encoding: .utf8) else { return .failure(502) }
       let base = response.url ?? url

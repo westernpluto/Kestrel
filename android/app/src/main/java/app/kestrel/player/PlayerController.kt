@@ -49,6 +49,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /** What's playing. */
@@ -522,6 +523,22 @@ class PlayerController(val target: PlaybackTarget) {
     fun startOver() {
         resumedAt = null
         seek(0.0)
+    }
+
+    /**
+     * Ten-second skips: back through a VOD or the broadcast (from live, into the recording, which
+     * runs a little behind); forward while there's somewhere to go.
+     */
+    val canSkipBack: Boolean get() = if (isLive) isRewinding || (rewind != null && broadcastElapsed > 60) else duration > 0
+    val canSkipForward: Boolean get() = if (isLive) isRewinding else duration > 0
+
+    fun skip(by: Double) {
+        when {
+            // Forward to within the last stretch returns to live.
+            isRewinding -> seekBroadcast(max(0.0, rewindPosition + by))
+            isLive -> if (by < 0 && rewind != null) seekBroadcast(broadcastElapsed - 30 + by)
+            duration > 0 -> seek(min(max(0.0, position + by), max(0.0, duration - 1)))
+        }
     }
 
     fun seek(seconds: Double) {

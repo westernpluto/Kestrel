@@ -31,25 +31,57 @@ extension AdState {
   }
 }
 
-/// Twitch-style stats in the corner of the video.
+/// Twitch-style stats in the corner of the video. On a small video it switches to columns and
+/// smaller type so it never covers the controls (on iPhone Duo's outer screen, a single column was
+/// taller than the video and pushed the gear, where it's turned off, out of reach).
 struct StatsOverlay: View {
   var lines: [StatLine]
+  /// Shows a close button.
+  var close: (() -> Void)? = nil
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 1) {
-      ForEach(lines) { line in
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-          Text(line.label).foregroundColor(.white.opacity(0.65))
-          Text(line.value).foregroundColor(.white)
+    ViewThatFits {
+      panel(columns: 1, size: 10)
+      panel(columns: 2, size: 9)
+      panel(columns: 2, size: 7.5)
+      panel(columns: 3, size: 7)
+    }
+  }
+
+  private func panel(columns: Int, size: CGFloat) -> some View {
+    let perColumn = max(1, Int((Double(lines.count) / Double(columns)).rounded(.up)))
+    let groups = stride(from: 0, to: lines.count, by: perColumn).map { Array(lines[$0..<min($0 + perColumn, lines.count)]) }
+    return HStack(alignment: .top, spacing: 12) {
+      ForEach(groups.indices, id: \.self) { index in
+        VStack(alignment: .leading, spacing: 1) {
+          ForEach(groups[index]) { line in
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+              Text(line.label).foregroundColor(.white.opacity(0.65))
+              Text(line.value).foregroundColor(.white)
+            }
+          }
         }
       }
     }
-    .font(.system(size: 10, design: .monospaced))
+    .font(.system(size: size, design: .monospaced))
     .lineLimit(1)
-    .padding(6)
-    .background(Color.black.opacity(0.62), in: RoundedRectangle(cornerRadius: 6))
-    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    .padding(6)
+    .fixedSize()
     .allowsHitTesting(false)
+    .padding(6)
+    .padding(.trailing, close == nil ? 0 : 26)
+    .background(Color.black.opacity(0.62), in: RoundedRectangle(cornerRadius: 6))
+    .overlay(alignment: .topTrailing) {
+      if let close {
+        Button(action: close) {
+          Image(systemName: "xmark")
+            .font(.system(size: 11, weight: .bold))
+            .foregroundColor(.white.opacity(0.85))
+            .frame(width: 32, height: 32)
+            .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Hide video stats")
+      }
+    }
+    .padding(6)
   }
 }

@@ -44,6 +44,9 @@ enum MasterPlaylistFetch {
     var text: String
     var url: URL
     var route: StreamRoute
+    /// Through an ad-free server: Twitch's playlist server near the viewer, to try instead of the
+    /// one near the ad-free server (see `NearbyPlaylists`).
+    var nearbyHost: String?
   }
 
   /// - Parameter checkAccountFirst: signed in: ask Twitch first and skip the ad-free servers when
@@ -58,14 +61,34 @@ enum MasterPlaylistFetch {
       if let token, let reason = token.adFreeReason {
         log.add("Twitch shows you no ads on this channel (\(reason)): playing straight from Twitch")
         let (text, url) = try await usher(login: login, token: token, codecs: codecs, lowLatency: lowLatency, http: http)
+        NearbyPlaylists.learn(fromMaster: text, base: url)
         return Result(text: text, url: url, route: .twitchAdFree(reason))
       }
     }
-    if !proxies.isEmpty,
-      let proxied = await AdFreeProxy.fetchMaster(
+    if !proxies.isEmpty {
+      // Meanwhile, unless it's known already: which playlist server Twitch would use for this
+      // viewer directly (asked in parallel, so it costs no time).
+      let known = token
+      var probe: Task<String?, Never>?
+      if NearbyPlaylists.freshHost == nil {
+        probe = Task { () -> String? in
+          var direct = known
+          if direct == nil { direct = try? await tokens.streamToken(login: login, playerType: playerType, platform: "web") }
+          guard let direct,
+            let master = try? await usher(login: login, token: direct, codecs: codecs, lowLatency: lowLatency, http: http)
+          else { return nil }
+          return NearbyPlaylists.learn(fromMaster: master.0, base: master.1)
+        }
+      }
+      if let proxied = await AdFreeProxy.fetchMaster(
         login: login, codecs: codecs, lowLatency: lowLatency, hosts: proxies, http: http, log: log)
-    {
-      return Result(text: proxied.text, url: proxied.url, route: .adFreeServer(proxied.host))
+      {
+        var nearby = NearbyPlaylists.freshHost
+        if nearby == nil, let probe { nearby = await NearbyPlaylists.value(of: probe, waitingUpTo: 0.7) }
+        return Result(
+          text: proxied.text, url: proxied.url, route: .adFreeServer(proxied.host), nearbyHost: nearby ?? NearbyPlaylists.cachedHost)
+      }
+      probe?.cancel()
     }
     let direct: PlaybackToken
     if let token {
@@ -75,6 +98,7 @@ enum MasterPlaylistFetch {
     }
     log.add(direct.summary)
     let (text, url) = try await usher(login: login, token: direct, codecs: codecs, lowLatency: lowLatency, http: http)
+    NearbyPlaylists.learn(fromMaster: text, base: url)
     return Result(text: text, url: url, route: .twitch)
   }
 
@@ -87,6 +111,120 @@ enum MasterPlaylistFetch {
       throw response.statusCode == 404 ? StreamSession.StartError.offline : StreamSession.StartError.usher(response.statusCode)
     }
     return (text, response.url ?? url)
+  }
+}
+
+/// Twitch's playlist servers near the viewer.
+///
+/// An ad-free server asks Twitch for the stream from another country, so Twitch hands out a
+/// playlist server near *it* (Frankfurt, say), and that server lists video from servers near it
+/// too. For a viewer in America that adds delay, and one connection across the ocean rarely
+/// carries more than a megabit or two on mobile data, so auto quality sinks and stalls. The
+/// playlist's address carries the stream's ad-free session, so the same address is tried on the
+/// playlist server Twitch picks for this viewer when asked directly; if that server won't take
+/// it, nothing changes.
+enum NearbyPlaylists {
+  private static let lock = NSLock()
+  private static let hostKey = "kestrel.nearbyPlaylistHost"
+  private static let dateKey = "kestrel.nearbyPlaylistHostDate"
+  /// Asked again after this long (the viewer may have moved).
+  static let freshFor: TimeInterval = 30 * 60
+
+  /// The last nearby playlist server seen, however old.
+  static var cachedHost: String? {
+    lock.lock()
+    defer { lock.unlock() }
+    return UserDefaults.standard.string(forKey: hostKey)
+  }
+
+  /// The last nearby playlist server seen, if seen recently.
+  static var freshHost: String? {
+    lock.lock()
+    defer { lock.unlock() }
+    let seen = UserDefaults.standard.double(forKey: dateKey)
+    guard seen > 0, Date().timeIntervalSince1970 - seen < freshFor else { return nil }
+    return UserDefaults.standard.string(forKey: hostKey)
+  }
+
+  /// Notes the playlist server of a master playlist asked for directly (so it's near the viewer).
+  @discardableResult
+  static func learn(fromMaster text: String, base: URL?) -> String? {
+    guard let host = host(inMaster: text, base: base) else { return nil }
+    lock.lock()
+    UserDefaults.standard.set(host, forKey: hostKey)
+    UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: dateKey)
+    lock.unlock()
+    return host
+  }
+
+  /// The playlist server a master playlist's renditions are on, if it's one of Twitch's.
+  static func host(inMaster text: String, base: URL?) -> String? {
+    let master = HLSMaster.parse(text, base: base)
+    guard let uri = master.variants.first(where: { !$0.isAudioOnly })?.uri ?? master.variants.first?.uri,
+      let host = URL(string: uri)?.host, isTwitchPlaylistHost(host)
+    else { return nil }
+    return host
+  }
+
+  static func isTwitchPlaylistHost(_ host: String) -> Bool {
+    let host = host.lowercased()
+    return host.hasSuffix(".playlist.ttvnw.net") || host.hasSuffix(".hls.ttvnw.net")
+      || host.hasSuffix(".playlist.live-video.net")
+  }
+
+  private static let refusedHostKey = "kestrel.nearbyPlaylistRefusedHost"
+  private static let refusedDateKey = "kestrel.nearbyPlaylistRefusedDate"
+  /// A server that turned a stream away isn't asked again for this long.
+  static let refusalLasts: TimeInterval = 6 * 60 * 60
+
+  /// That server turned an ad-free server's playlist away: don't keep asking it.
+  static func refused(_ host: String) {
+    lock.lock()
+    UserDefaults.standard.set(host, forKey: refusedHostKey)
+    UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: refusedDateKey)
+    lock.unlock()
+  }
+
+  /// Whether to try that server (it hasn't turned a stream away lately).
+  static func worthTrying(_ host: String) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard UserDefaults.standard.string(forKey: refusedHostKey) == host else { return true }
+    return Date().timeIntervalSince1970 - UserDefaults.standard.double(forKey: refusedDateKey) > refusalLasts
+  }
+
+  /// The same address on another server.
+  static func replacingHost(_ uri: String, with host: String) -> String {
+    guard var components = URLComponents(string: uri) else { return uri }
+    components.host = host
+    return components.string ?? uri
+  }
+
+  /// A task's result, or nil if it isn't ready within `seconds`.
+  static func value(of task: Task<String?, Never>, waitingUpTo seconds: TimeInterval) async -> String? {
+    let signal = OneShotSignal()
+    let box = ResultBox()
+    Task {
+      box.set(await task.value)
+      signal.fire()
+    }
+    await signal.wait(timeout: seconds)
+    return box.get()
+  }
+
+  private final class ResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: String?
+    func set(_ newValue: String?) {
+      lock.lock()
+      value = newValue
+      lock.unlock()
+    }
+    func get() -> String? {
+      lock.lock()
+      defer { lock.unlock() }
+      return value
+    }
   }
 }
 

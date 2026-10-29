@@ -52,6 +52,29 @@ enum AdBlocking: Hashable {
   }
 }
 
+/// What playback has learned about the connection, kept from one stream to the next.
+enum PlaybackMemory {
+  private static let defaults = UserDefaults.standard
+
+  /// The margin of buffered video the last live stream ended up needing (see `LiveCatchUp`).
+  static var liveMargin: Double? {
+    get {
+      let value = defaults.double(forKey: "kestrel.liveMargin")
+      return value > 0 ? value : nil
+    }
+    set { defaults.set(newValue ?? 0, forKey: "kestrel.liveMargin") }
+  }
+
+  /// The bitrate of the quality Auto last played smoothly: where Auto starts next time.
+  static var autoBitrate: Int? {
+    get {
+      let value = defaults.integer(forKey: "kestrel.autoBitrate")
+      return value > 0 ? value : nil
+    }
+    set { defaults.set(newValue ?? 0, forKey: "kestrel.autoBitrate") }
+  }
+}
+
 final class AppSettings: ObservableObject {
   static let shared = AppSettings()
   private let defaults = UserDefaults.standard
@@ -61,6 +84,8 @@ final class AppSettings: ObservableObject {
   @Published var backgroundAudio: Bool { didSet { defaults.set(backgroundAudio, forKey: "backgroundAudio") } }
   @Published var showVideoStats: Bool { didSet { defaults.set(showVideoStats, forKey: "showVideoStats") } }
   @Published var chatFontSize: Double { didSet { defaults.set(chatFontSize, forKey: "chatFontSize") } }
+  /// Live streams start on Auto quality (once Auto has been picked) instead of the best quality.
+  @Published var autoQuality: Bool { didSet { defaults.set(autoQuality, forKey: "autoQuality") } }
   // The user's own HTTP proxy (AdBlocking.customProxy).
   @Published var proxyHost: String { didSet { defaults.set(proxyHost, forKey: "proxyHost"); applyProxy() } }
   @Published var proxyPort: String { didSet { defaults.set(proxyPort, forKey: "proxyPort"); applyProxy() } }
@@ -90,6 +115,7 @@ final class AppSettings: ObservableObject {
     backgroundAudio = defaults.bool(forKey: "backgroundAudio")
     showVideoStats = defaults.bool(forKey: "showVideoStats")
     chatFontSize = defaults.double(forKey: "chatFontSize")
+    autoQuality = defaults.bool(forKey: "autoQuality")
     proxyHost = defaults.string(forKey: "proxyHost") ?? ""
     proxyPort = defaults.string(forKey: "proxyPort") ?? ""
     proxyUsername = defaults.string(forKey: "proxyUsername") ?? ""

@@ -1076,15 +1076,55 @@ func testLiveCatchUp() {
   let before = catchUp.targetBuffer
   catchUp.stalled(now: t1)
   check(catchUp.targetBuffer > before)
-  check(catchUp.update(buffer: 3, latency: 4, playing: true, now: t1.addingTimeInterval(5)) == 1)
-  check(catchUp.update(buffer: 3, latency: 4, playing: true, now: t1.addingTimeInterval(9)) == LiveCatchUp.rates.fast)
+  check(catchUp.update(buffer: 3, latency: 4, playing: true, now: t1.addingTimeInterval(9)) == 1)
+  check(catchUp.update(buffer: 3, latency: 4, playing: true, now: t1.addingTimeInterval(13)) == LiveCatchUp.rates.fast)
+  // A connection with little to spare: gentle at most.
+  check(catchUp.update(buffer: 3, latency: 4, playing: true, maxRate: LiveCatchUp.rates.gentle, now: t1.addingTimeInterval(13)) == LiveCatchUp.rates.gentle)
+  check(catchUp.update(buffer: 3, latency: 4, playing: true, maxRate: 1, now: t1.addingTimeInterval(13)) == 1)
+  // Starting from the last stream's margin.
+  check(LiveCatchUp(targetBuffer: 1.9).targetBuffer == 1.9)
+  check(LiveCatchUp(targetBuffer: 9).targetBuffer == LiveCatchUp.maxBuffer)
   // Smooth for long enough: the margin creeps back down, never under the minimum.
-  var later = t1.addingTimeInterval(9)
+  var later = t1.addingTimeInterval(13)
   for _ in 0..<40 {
     later = later.addingTimeInterval(91)
     catchUp.update(buffer: 1, latency: 2, playing: true, now: later)
   }
   check(abs(catchUp.targetBuffer - LiveCatchUp.minBuffer) < 0.001)
+}
+
+func testSteadyAutoQuality() {
+  let t0 = Date(timeIntervalSince1970: 2_000_000)
+  var auto = SteadyAutoQuality(count: 4)  // 1080p, 720p, 480p, 360p
+  auto.switched(to: 2, now: t0)
+  check(auto.cap == nil)
+  // Up on a burst of bandwidth, straight back down: 720p is held off.
+  auto.switched(to: 1, now: t0.addingTimeInterval(5))
+  check(auto.switched(to: 2, now: t0.addingTimeInterval(12)))
+  check(auto.cap == 2)
+  // Not lifted before the hold is over; then one step at a time.
+  check(!auto.tick(now: t0.addingTimeInterval(30)))
+  check(auto.tick(now: t0.addingTimeInterval(43)))
+  check(auto.cap == 1)
+  check(auto.tick(now: t0.addingTimeInterval(74)))
+  check(auto.cap == nil)
+  // 720p stalls again: held off twice as long this time.
+  auto.switched(to: 1, now: t0.addingTimeInterval(80))
+  check(auto.stalled(now: t0.addingTimeInterval(90)))
+  check(auto.cap == 2)
+  check(!auto.tick(now: t0.addingTimeInterval(140)))
+  check(auto.tick(now: t0.addingTimeInterval(151)))
+  // The lowest quality can't be held off.
+  var low = SteadyAutoQuality(count: 2)
+  low.switched(to: 1, now: t0)
+  check(!low.stalled(now: t0.addingTimeInterval(1)))
+  check(low.cap == nil)
+  // Smooth for a minute: worth starting at next time (reported once).
+  var steady = SteadyAutoQuality(count: 3)
+  steady.switched(to: 1, now: t0)
+  check(steady.steadyRank(now: t0.addingTimeInterval(30)) == nil)
+  check(steady.steadyRank(now: t0.addingTimeInterval(61)) == 1)
+  check(steady.steadyRank(now: t0.addingTimeInterval(90)) == nil)
 }
 
 func testAdFreeProxy() {
@@ -1139,6 +1179,7 @@ testMasterParsing()
 testFullWindowAdDetection()
 testLowLatencySession()
 testLiveCatchUp()
+testSteadyAutoQuality()
 testMediaParsing()
 testAdTimeline()
 testTimelineAndRender()

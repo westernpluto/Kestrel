@@ -613,10 +613,11 @@ final class PlayerModel: ObservableObject {
     }
   }
 
-  /// The lock screen's skip buttons.
+  /// Ten seconds back or forward (the player's skip buttons, the lock screen's).
   func skip(by seconds: Double) {
     if isRewinding {
-      seekBroadcast(to: rewindPosition + seconds)
+      // Forward to within the last stretch returns to live.
+      seekBroadcast(to: max(0, rewindPosition + seconds))
     } else if isLive {
       if seconds < 0, rewind != nil { seekBroadcast(to: broadcastElapsed - 30 + seconds) }
     } else {
@@ -680,6 +681,11 @@ final class PlayerModel: ObservableObject {
       lowLatency?.setFill(fill)
     #endif
   }
+
+  /// Ten-second skips (`skip(by:)`): back through a VOD or the broadcast (from live, into the
+  /// recording, which runs a little behind); forward while there's somewhere to go.
+  var canSkipBack: Bool { isLive ? isRewinding || (rewind != nil && broadcastElapsed > 60) : duration > 0 }
+  var canSkipForward: Bool { isLive ? isRewinding : duration > 0 }
 
   func seek(to seconds: Double) {
     position = seconds

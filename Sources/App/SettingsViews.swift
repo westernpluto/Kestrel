@@ -51,7 +51,7 @@ struct SettingsView: View {
         Text("Playback")
       } footer: {
         Text(
-          "Low latency keeps streams as close to live as your connection allows: when one falls behind, it plays slightly faster for a few seconds to catch up. Streams always start at the highest quality. Quality and video stats are in the player's gear menu."
+          "Low latency keeps streams as close to live as your connection allows: when one falls behind, it plays slightly faster for a few seconds to catch up. Streams start at the highest quality; pick Auto in the player's gear menu and they start on Auto from then on, which settles on a quality your connection keeps up with instead of bouncing between them. Video stats are in the gear menu too."
         )
       }
 
@@ -156,7 +156,7 @@ struct AdBlockingView: View {
         choice(.customProxy, title: "My own proxy", detail: "An HTTP proxy in a country without Twitch ads")
         choice(.basic, title: "Basic", detail: "No server: skip ad breaks Kestrel can see, hide the rest")
       } footer: {
-        Text("Ad-free servers ask Twitch for the stream from a country where Twitch doesn't run ads (the TTV LOL PRO v1 servers). Only the playlist request goes through them; the video comes straight from Twitch at full quality, but from Twitch's servers near that country, which can add a little delay when it's far from you (Basic uses the ones nearest you; video stats show which). Applies to the next stream you open.")
+        Text("Ad-free servers ask Twitch for the stream from a country where Twitch doesn't run ads (the TTV LOL PRO v1 servers). Only the playlist request goes through them; the video comes straight from Twitch at full quality. Twitch hands out servers near the ad-free server, so Kestrel moves the stream to Twitch's servers near you when they accept it (video stats show which are used: near you, or the ad-free server's, which adds delay and can limit quality when it's far away). Applies to the next stream you open.")
       }
 
       Section {

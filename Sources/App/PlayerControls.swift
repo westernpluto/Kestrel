@@ -18,6 +18,9 @@ struct PlayerVideoArea: View {
   var minimized: Bool = false
   /// Landscape chat is on the left (swipes to show and hide it are mirrored).
   var chatOnLeft: Bool = false
+  /// A layout choice for the gear menu, where one applies.
+  var layoutToggle: LayoutToggle? = nil
+  var setLayoutToggle: (Bool) -> Void = { _ in }
   var toggleChat: () -> Void
   var minimize: () -> Void
   /// Full screen: on a phone the player turns; in a large window the video takes the whole window.
@@ -51,16 +54,24 @@ struct PlayerVideoArea: View {
         .animation(.easeInOut(duration: 0.25), value: model.phase)
         .animation(.easeInOut(duration: 0.2), value: model.coveringAd)
       if settings.showVideoStats && !model.stats.isEmpty && chromeVisible {
-        StatsOverlay(lines: model.stats)
-          .padding(.top, controlsShown ? 44 : 0)
-          .padding(.leading, controlInsets.leading)
-          .padding(.top, controlInsets.top)
+        // An overlay, so its size never changes the video area's (it used to grow it and push
+        // the controls off the top and bottom of a small video).
+        Color.clear
+          .allowsHitTesting(false)
+          .overlay(alignment: .topLeading) {
+            StatsOverlay(lines: model.stats, close: { settings.showVideoStats = false })
+              .padding(.top, controlsShown ? 44 : 0)
+              .padding(.leading, controlInsets.leading)
+              .padding(.top, controlInsets.top)
+          }
+          .clipped()
           .transition(.opacity)
       }
       PlayerControls(
         model: model, landscape: landscape, chatOpen: chatOpen, visible: controlsShown && chromeVisible && !pulling,
-        insets: controlInsets, toggleChat: toggleChat, minimize: minimize,
-        enterFullScreen: enterFullScreen, exitFullScreen: exitFullScreen, interacted: { scheduleHide(after: $0) })
+        insets: controlInsets, layoutToggle: layoutToggle, setLayoutToggle: setLayoutToggle, toggleChat: toggleChat,
+        minimize: minimize, enterFullScreen: enterFullScreen, exitFullScreen: exitFullScreen,
+        interacted: { scheduleHide(after: $0) })
       if let resumed = model.resumedAt, chromeVisible {
         resumeNotice(resumed)
           .padding(.leading, controlInsets.leading + 8)
@@ -263,6 +274,8 @@ struct PlayerControls: View {
   var chatOpen: Bool
   var visible: Bool
   var insets: EdgeInsets
+  var layoutToggle: LayoutToggle? = nil
+  var setLayoutToggle: (Bool) -> Void = { _ in }
   var toggleChat: () -> Void
   var minimize: () -> Void
   var enterFullScreen: () -> Void
@@ -288,17 +301,27 @@ struct PlayerControls: View {
       .padding(insets)
       .animation(.easeInOut(duration: 0.15), value: scrubbing)
       if model.phase == .playing && !model.coveringAd && !scrubbing {
-        Button {
-          model.togglePause()
-          interacted(3.5)
-        } label: {
-          Image(systemName: model.isPaused ? "play.fill" : "pause.fill")
-            .font(.system(size: landscape ? 34 : 28, weight: .semibold))
-            .frame(width: 64, height: 64)
-            .background(.black.opacity(0.35), in: Circle())
+        let skips = model.canSkipBack || model.canSkipForward
+        HStack(spacing: landscape ? 44 : 28) {
+          if skips {
+            skipButton(-10).opacity(model.canSkipBack ? 1 : 0).disabled(!model.canSkipBack)
+          }
+          Button {
+            model.togglePause()
+            interacted(3.5)
+          } label: {
+            Image(systemName: model.isPaused ? "play.fill" : "pause.fill")
+              .font(.system(size: landscape ? 34 : 28, weight: .semibold))
+              .frame(width: 64, height: 64)
+              .background(.black.opacity(0.35), in: Circle())
+          }
+          .buttonStyle(PressableStyle(scale: 0.88))
+          .accessibilityLabel(model.isPaused ? "Play" : "Pause")
+          if skips {
+            // Kept in place (invisible) when there's nowhere to go, so pause stays centred.
+            skipButton(10).opacity(model.canSkipForward ? 1 : 0).disabled(!model.canSkipForward)
+          }
         }
-        .buttonStyle(PressableStyle(scale: 0.88))
-        .accessibilityLabel(model.isPaused ? "Play" : "Pause")
       }
     }
     .foregroundColor(.white)
@@ -344,9 +367,11 @@ struct PlayerControls: View {
       showLowLatency: model.isLive && model.canToggleLowLatency && !model.isRewinding,
       lowLatency: settings.lowLatency,
       showStats: settings.showVideoStats,
+      layoutToggle: layoutToggle,
       select: { [model] in model.selectQuality($0) },
       setLowLatency: { [model] in model.setLowLatency($0) },
       setStats: { [settings] in settings.showVideoStats = $0 },
+      setLayoutToggle: setLayoutToggle,
       opened: { [interacted] in interacted(12) }
     )
     .equatable()
@@ -465,6 +490,21 @@ struct PlayerControls: View {
     case .none:
       EmptyView()
     }
+  }
+
+  /// Ten seconds back or forward (VODs, and the broadcast while rewinding).
+  private func skipButton(_ seconds: Double) -> some View {
+    Button {
+      model.skip(by: seconds)
+      interacted(3.5)
+    } label: {
+      Image(systemName: seconds < 0 ? "gobackward.10" : "goforward.10")
+        .font(.system(size: landscape ? 25 : 21, weight: .semibold))
+        .frame(width: 50, height: 50)
+        .background(.black.opacity(0.3), in: Circle())
+    }
+    .buttonStyle(PressableStyle(scale: 0.88))
+    .accessibilityLabel(seconds < 0 ? "Back 10 seconds" : "Forward 10 seconds")
   }
 
   private func button(_ icon: String, label: String, action: @escaping () -> Void) -> some View {
@@ -819,20 +859,29 @@ struct WrapLayout: Layout {
   }
 }
 
+/// A layout choice offered in the gear menu where it applies (e.g. chat over the video).
+struct LayoutToggle: Equatable {
+  var title: String
+  var systemImage: String
+  var isOn: Bool
+}
+
 struct PlayerSettingsMenu: View, Equatable {
   var qualities: [PlayerModel.Quality]
   var selected: Int?
   var showLowLatency: Bool
   var lowLatency: Bool
   var showStats: Bool
+  var layoutToggle: LayoutToggle?
   var select: (PlayerModel.Quality) -> Void
   var setLowLatency: (Bool) -> Void
   var setStats: (Bool) -> Void
+  var setLayoutToggle: (Bool) -> Void
   var opened: () -> Void
 
   static func == (a: Self, b: Self) -> Bool {
     a.qualities == b.qualities && a.selected == b.selected && a.showLowLatency == b.showLowLatency
-      && a.lowLatency == b.lowLatency && a.showStats == b.showStats
+      && a.lowLatency == b.lowLatency && a.showStats == b.showStats && a.layoutToggle == b.layoutToggle
   }
 
   var body: some View {
@@ -855,6 +904,11 @@ struct PlayerSettingsMenu: View, Equatable {
       }
       Toggle(isOn: Binding(get: { showStats }, set: setStats)) {
         Label("Video stats", systemImage: "chart.bar.xaxis")
+      }
+      if let layoutToggle {
+        Toggle(isOn: Binding(get: { layoutToggle.isOn }, set: setLayoutToggle)) {
+          Label(layoutToggle.title, systemImage: layoutToggle.systemImage)
+        }
       }
     } label: {
       Image(systemName: "gearshape.fill")
