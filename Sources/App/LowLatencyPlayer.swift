@@ -57,6 +57,23 @@
     private var renderedFPS: Double?
     /// Paused while the viewer rewinds through the VOD.
     private var suspended = false
+    /// Plays a touch faster while more is buffered than needed (see `LiveCatchUp`).
+    private var catchUp = LiveCatchUp()
+    /// Played since the last load (buffering after that means the player ran dry).
+    private var playedSinceLoad = false
+    private var lastQualitySwitch = Date.distantPast
+    /// IVS documents `buffered` as what's left in the buffer, but has also behaved like the
+    /// buffer's end position: it's what's left once it's seen below the playhead.
+    private var bufferedIsRemaining = false
+    /// Kept across reloads, so going live again doesn't open new connections to Twitch.
+    private var http: (client: HTTPClient, proxy: HTTPProxy?)?
+    /// Twitch's playlist server for this stream (`fra05`).
+    private var videoServer: String?
+
+    /// Low latency: start playing with half a second in hand (the player's own default is a
+    /// second); `LiveCatchUp` keeps it from building up after that.
+    private static let lowLatencyStartBuffer = CMTime(seconds: 0.5, preferredTimescale: 1000)
+    private static let standardStartBuffer = CMTime(seconds: 2, preferredTimescale: 1000)
 
     /// Quality-menu IDs at or above this pick a rendition for the Apple player.
     static let applePlayerQualityBase = 1000
@@ -76,6 +93,7 @@
       player.setUserAgent(Browser.userAgent)
       player.setOrigin(URL(string: "https://player.twitch.tv"))
       player.setLiveLowLatencyEnabled(AppSettings.shared.lowLatency)
+      player.setInitialBufferDuration(AppSettings.shared.lowLatency ? Self.lowLatencyStartBuffer : Self.standardStartBuffer)
       player.setRebufferToLive(true)
       player.setNetworkRecoveryMode(.resume)
       player.autoQualityMode = false
@@ -127,7 +145,7 @@
           let token = try await TwitchAPI.shared.streamToken(login: login, playerType: "popout", platform: "web")
           guard !stopped else { return }
           localURL = nil
-          player.load(Usher.live(login: login, token: token, codecs: codecs, lowLatency: true))
+          startPlayback(Usher.live(login: login, token: token, codecs: codecs, lowLatency: true))
           return
         }
         let settings = AppSettings.shared
@@ -138,7 +156,7 @@
         config.adFreeProxies = model?.adFreeProxies ?? settings.adFreeProxyHosts
         config.checkAccountFirst = TwitchAuth.shared.session != nil
         let session = LowLatencySession(
-          login: login, config: config, http: settings.playbackClient(timeout: 8), tokens: TwitchAPI.shared
+          login: login, config: config, http: playbackHTTP(), tokens: TwitchAPI.shared
         ) { [weak self] update in
           guard let controller = self else { return }
           Task { @MainActor in controller.apply(update) }
@@ -158,17 +176,36 @@
         upstream = variants.filter { !$0.isAudioOnly }.sorted {
           ($0.height, $0.frameRate, $0.codecRank, $0.bandwidth) > ($1.height, $1.frameRate, $1.codecRank, $1.bandwidth)
         }
+        videoServer = variants.first.flatMap { LowLatencySession.serverName($0.uri) }
         adTimeline = AdTimeline()
         let url = try StreamProxy.shared.register(session)
         localURL = url
         lastReload = Date()
-        player.load(url)
+        startPlayback(url)
       } catch is CancellationError {
       } catch StreamSession.StartError.offline {
         model?.lowLatencyOffline()
       } catch {
         failed(error.localizedDescription, byPlayer: false)
       }
+    }
+
+    /// Loads into the player, at normal speed until it has settled.
+    private func startPlayback(_ url: URL) {
+      catchUp.restart()
+      playedSinceLoad = false
+      if player.playbackRate != 1 { player.playbackRate = 1 }
+      player.load(url)
+    }
+
+    /// One HTTP client for this stream's playlists, kept while the proxy setting stays the same.
+    private func playbackHTTP() -> HTTPClient {
+      let settings = AppSettings.shared
+      let proxy = settings.playbackProxy
+      if let http, http.proxy == proxy { return http.client }
+      let client = settings.playbackClient(timeout: 8)
+      http = (client, proxy)
+      return client
     }
 
     private func failed(_ message: String, byPlayer: Bool) {
@@ -203,7 +240,7 @@
       lastReload = Date()
       bufferingSince = nil
       ActivityLog.shared.add("Low-latency player: reloading (\(reason))")
-      if let localURL { player.load(localURL) } else { load() }
+      if let localURL { startPlayback(localURL) } else { load() }
     }
 
     // MARK: Player events (forwarded from the delegate proxy on the main queue)
@@ -218,7 +255,13 @@
         if !pausedForBackground { player.play() }
       case .buffering:
         model.isBuffering = true
+        // Ran dry mid-stream (not a start, a pause or a quality switch): keep a bigger margin.
+        if playedSinceLoad, !pausedForBackground, Date().timeIntervalSince(lastQualitySwitch) > 3 {
+          catchUp.stalled()
+          if player.playbackRate != 1 { player.playbackRate = 1 }
+        }
       case .playing:
+        playedSinceLoad = true
         model.isBuffering = false
         if model.phase != .playing { model.phase = .playing }
         model.liveResumed()
@@ -314,6 +357,7 @@
       let quality = menuQualities[index]
       player.autoQualityMode = false
       guard player.quality.map({ !$0.isEqual(to: quality) }) ?? true else { return }
+      lastQualitySwitch = Date()
       if smoothly {
         player.setQuality(quality, adaptive: true)
       } else {
@@ -348,6 +392,12 @@
       let latency = seconds.isFinite && seconds >= 0 ? seconds : nil
       model.setLatency(latency)
 
+      // Stay close to live: eat any extra buffer by playing a touch faster.
+      let catchingUp =
+        AppSettings.shared.lowLatency && player.isLiveLowLatency && player.state == .playing && !pausedForBackground
+      let rate = catchUp.update(buffer: bufferAhead, latency: latency, playing: catchingUp)
+      if player.playbackRate != rate { player.playbackRate = rate }
+
       // Stuck buffering (e.g. after a switch between copies of the stream): start again.
       if player.state == .buffering, !pausedForBackground, !detachedForBackground {
         if bufferingSince == nil { bufferingSince = Date() }
@@ -377,6 +427,16 @@
       if model.adState != shown { model.adState = shown }
     }
 
+    /// Seconds of video buffered ahead of what's showing.
+    private var bufferAhead: Double? {
+      let buffered = player.buffered.seconds
+      let position = player.position.seconds
+      guard buffered.isFinite, buffered >= 0 else { return nil }
+      guard position.isFinite else { return buffered }
+      if buffered + 0.5 < position { bufferedIsRemaining = true }
+      return bufferedIsRemaining ? buffered : max(0, buffered - position)
+    }
+
     /// Video stats for the overlay.
     func stats() -> [StatLine] {
       var lines = [StatLine(label: "Player", value: "Low latency (IVS \(player.version))")]
@@ -391,10 +451,15 @@
       if size.width > 0 { lines.append(StatLine(label: "Resolution", value: "\(Int(size.width))×\(Int(size.height))")) }
       lines.append(StatLine(label: "Bitrate", value: StatFormat.mbps(Double(player.videoBitrate))))
       lines.append(StatLine(label: "Bandwidth", value: StatFormat.mbps(Double(player.bandwidthEstimate))))
-      let ahead = player.buffered.seconds - player.position.seconds
-      lines.append(StatLine(label: "Buffer", value: StatFormat.seconds(ahead.isFinite ? max(0, ahead) : nil)))
+      lines.append(StatLine(label: "Buffer", value: StatFormat.seconds(bufferAhead)))
       let latency = player.liveLatency.seconds
       lines.append(StatLine(label: "Latency", value: StatFormat.seconds(latency.isFinite && latency >= 0 ? latency : nil)))
+      if AppSettings.shared.lowLatency {
+        let margin = String(format: "keeping %.1f s", catchUp.targetBuffer)
+        let speed = player.playbackRate > 1.001 ? String(format: "%.2f× · ", player.playbackRate) : "no · "
+        lines.append(StatLine(label: "Catching up", value: speed + margin))
+      }
+      if let videoServer { lines.append(StatLine(label: "Video server", value: videoServer)) }
       lines.append(StatLine(label: "Frames", value: "\(player.videoFramesDecoded) decoded · \(player.videoFramesDropped) dropped"))
       lines.append(StatLine(label: "Ads", value: adState.statsText))
       lines.append(StatLine(label: "Playlists", value: localURL == nil ? "Twitch direct (no ad filtering)" : "Kestrel filter"))
@@ -417,9 +482,16 @@
       }
     }
 
-    /// Reloads at the live edge.
+    /// Reloads at the live edge: on the same playlists while they're flowing (quick, over open
+    /// connections), else with a fresh token.
     func goLive() {
-      load()
+      if let localURL, session != nil, player.state == .playing || player.state == .buffering {
+        lastReload = Date()
+        bufferingSince = nil
+        startPlayback(localURL)
+      } else {
+        load()
+      }
     }
 
     /// The viewer is watching the VOD (rewinding): stop the live stream for now.
@@ -442,6 +514,7 @@
     /// Twitch's low-latency mode on or off (takes a quick reload).
     func setLowLatency(_ enabled: Bool) {
       player.setLiveLowLatencyEnabled(enabled)
+      player.setInitialBufferDuration(enabled ? Self.lowLatencyStartBuffer : Self.standardStartBuffer)
       lastReload = .distantPast
       reload(reason: enabled ? "low latency on" : "low latency off")
     }
@@ -498,6 +571,7 @@
         let audio = menuQualities.first(where: { $0.width == 0 })
       else { return }
       audioOnlyForBackground = true
+      lastQualitySwitch = Date()
       player.autoQualityMode = false
       player.quality = audio
     }

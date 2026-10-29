@@ -110,12 +110,30 @@ actor LowLatencySession: PlaylistSource {
         lines.append(LowLatencyPlaylist.absolutizeTag(line, base: base))
       }
     }
-    guard found.contains(where: { !$0.isAudioOnly }) else { throw StreamSession.StartError.noVariants }
+    guard let first = found.firstIndex(where: { !$0.isAudioOnly }) else { throw StreamSession.StartError.noVariants }
     variants = found
     masterText = lines.joined(separator: "\n") + "\n"
+    // Ask for the first rendition's playlist now, while the player is still being set up: the
+    // connection to Twitch's playlist server is open by the time the player wants it, and its
+    // first playlist is (nearly) ready, so the video starts sooner.
+    let url = URL(string: found[first].uri)
+    warmed = (first, Task { await self.fetch(url) }, Date())
     let labels = found.filter { !$0.isAudioOnly }.sorted { $0.height > $1.height }.map(\.label)
-    log.add("Low-latency player: \(login) (Twitch offers \(labels.joined(separator: ", ")))")
+    let server = Self.serverName(found[first].uri).map { " via \($0)" } ?? ""
+    log.add("Low-latency player: \(login) (Twitch offers \(labels.joined(separator: ", "))\(server))")
     return found
+  }
+
+  /// The first rendition's playlist, asked for at the start (see `start`).
+  private var warmed: (index: Int, task: Task<FetchResult, Never>, startedAt: Date)?
+
+  /// Which of Twitch's playlist servers a playlist comes from (`fra05` from
+  /// `video-weaver.fra05.hls.ttvnw.net`), or its host.
+  static func serverName(_ uri: String) -> String? {
+    guard let host = URL(string: uri)?.host else { return nil }
+    let parts = host.split(separator: ".")
+    if parts.count > 2, parts[0].hasPrefix("video-weaver") { return String(parts[1]) }
+    return host
   }
 
   func masterPlaylist(only: Int?) -> String { masterText }
@@ -125,8 +143,17 @@ actor LowLatencySession: PlaylistSource {
   func mediaPlaylist(_ index: Int) async -> (status: Int, body: String) {
     guard index >= 0, index < variants.count else { return (404, "") }
     let target = variants[index]
+    let fetched: FetchResult
+    if let warm = warmed, warm.index == index, Date().timeIntervalSince(warm.startedAt) < 1 {
+      // The player's first request, while the early one is in flight or only just back.
+      warmed = nil
+      fetched = await warm.task.value
+    } else {
+      warmed = nil
+      fetched = await fetch(URL(string: target.uri))
+    }
     let main: (text: String, url: URL, playlist: HLSMediaPlaylist)
-    switch await fetch(URL(string: target.uri)) {
+    switch fetched {
     case .success(let result):
       main = result
     case .failure(let status):

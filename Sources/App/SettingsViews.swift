@@ -50,7 +50,9 @@ struct SettingsView: View {
       } header: {
         Text("Playback")
       } footer: {
-        Text("Streams always start at the highest quality. Quality and video stats are in the player's gear menu.")
+        Text(
+          "Low latency keeps streams as close to live as your connection allows: when one falls behind, it plays slightly faster for a few seconds to catch up. Streams always start at the highest quality. Quality and video stats are in the player's gear menu."
+        )
       }
 
       Section {
@@ -154,7 +156,7 @@ struct AdBlockingView: View {
         choice(.customProxy, title: "My own proxy", detail: "An HTTP proxy in a country without Twitch ads")
         choice(.basic, title: "Basic", detail: "No server: skip ad breaks Kestrel can see, hide the rest")
       } footer: {
-        Text("Ad-free servers ask Twitch for the stream from a country where Twitch doesn't run ads (the TTV LOL PRO v1 servers). Only the playlist request goes through them; the video comes straight from Twitch at full quality. Applies to the next stream you open.")
+        Text("Ad-free servers ask Twitch for the stream from a country where Twitch doesn't run ads (the TTV LOL PRO v1 servers). Only the playlist request goes through them; the video comes straight from Twitch at full quality, but from Twitch's servers near that country, which can add a little delay when it's far from you (Basic uses the ones nearest you; video stats show which). Applies to the next stream you open.")
       }
 
       Section {

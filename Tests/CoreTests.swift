@@ -1054,6 +1054,39 @@ func testVODComments() {
   check(comment?.message.badges == ["subscriber/12"] && comment?.message.color == "#FF0000", "badges and color")
 }
 
+func testLiveCatchUp() {
+  let t0 = Date(timeIntervalSince1970: 1_000_000)
+  var catchUp = LiveCatchUp(now: t0)
+  // Settling after a start: normal speed.
+  check(catchUp.update(buffer: 2.5, latency: 3.5, playing: true, now: t0) == 1)
+  let t1 = t0.addingTimeInterval(2)
+  // Well behind: fast; then medium; then gentle down to the margin.
+  check(catchUp.update(buffer: 2.6, latency: 3.6, playing: true, now: t1) == LiveCatchUp.rates.fast)
+  check(catchUp.update(buffer: 2.0, latency: 3.0, playing: true, now: t1) == LiveCatchUp.rates.medium)
+  check(catchUp.update(buffer: 1.2, latency: 2.2, playing: true, now: t1) == LiveCatchUp.rates.gentle)
+  check(catchUp.update(buffer: 1.0, latency: 2.0, playing: true, now: t1) == LiveCatchUp.rates.gentle, "keeps going to the margin")
+  check(catchUp.update(buffer: 0.92, latency: 1.92, playing: true, now: t1) == 1)
+  // A little over the margin doesn't start it again.
+  check(catchUp.update(buffer: 1.05, latency: 2.05, playing: true, now: t1) == 1)
+  // Paused or buffering: normal speed.
+  check(catchUp.update(buffer: 3, latency: 4, playing: false, now: t1) == 1)
+  // Close to live already: leave it.
+  check(catchUp.update(buffer: 1.3, latency: 1.3, playing: true, now: t1) == 1)
+  // A stall: bigger margin, then a pause before catching up again.
+  let before = catchUp.targetBuffer
+  catchUp.stalled(now: t1)
+  check(catchUp.targetBuffer > before)
+  check(catchUp.update(buffer: 3, latency: 4, playing: true, now: t1.addingTimeInterval(5)) == 1)
+  check(catchUp.update(buffer: 3, latency: 4, playing: true, now: t1.addingTimeInterval(9)) == LiveCatchUp.rates.fast)
+  // Smooth for long enough: the margin creeps back down, never under the minimum.
+  var later = t1.addingTimeInterval(9)
+  for _ in 0..<40 {
+    later = later.addingTimeInterval(91)
+    catchUp.update(buffer: 1, latency: 2, playing: true, now: later)
+  }
+  check(abs(catchUp.targetBuffer - LiveCatchUp.minBuffer) < 0.001)
+}
+
 func testAdFreeProxy() {
   let url = AdFreeProxy.masterURL(host: "eu.luminous.dev", login: "SomeOne", codecs: "h265,h264", lowLatency: true)!
   check(url.absoluteString.hasPrefix("https://eu.luminous.dev/live/someone?") && url.query!.contains("fast_bread=true"), "\(url)")
@@ -1105,6 +1138,7 @@ testDates()
 testMasterParsing()
 testFullWindowAdDetection()
 testLowLatencySession()
+testLiveCatchUp()
 testMediaParsing()
 testAdTimeline()
 testTimelineAndRender()
