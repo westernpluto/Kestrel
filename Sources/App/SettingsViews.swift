@@ -47,6 +47,11 @@ struct SettingsView: View {
           LabeledContent("Ad blocking", value: settings.adBlocking.shortTitle)
         }
         Toggle("Background audio", isOn: $settings.backgroundAudio)
+        NavigationLink {
+          RecordingsView()
+        } label: {
+          Label("Recordings", systemImage: "record.circle")
+        }
       } header: {
         Text("Playback")
       } footer: {

@@ -85,6 +85,7 @@ struct ChannelView: View {
         }
       }
       Spacer()
+      AutoRecordButton(channel: current)
       FollowButton(channel: current, font: .title2, tint: .primary)
     }
   }

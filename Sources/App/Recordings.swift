@@ -66,14 +66,20 @@ final class RecordingStore: ObservableObject {
   func isRecording(_ login: String) -> Bool { recording(of: login) != nil }
 
   /// - Parameter maxHeight: the highest rendition to record (lines, e.g. 720); nil for the best.
-  func start(channel: Channel, stream: LiveStream?, maxHeight: Int?) {
-    guard !channel.login.isEmpty, !isRecording(channel.login) else { return }
+  /// - Parameters:
+  ///   - maxHeight: the highest rendition to record (lines, e.g. 720); nil for the best.
+  ///   - streamID: the broadcast (so a recording stopped by hand isn't started again for it).
+  ///   - automatic: started because the channel went live (see AutoRecorder).
+  /// - Returns: the recording's id.
+  @discardableResult
+  func start(channel: Channel, stream: LiveStream?, maxHeight: Int?, streamID: String? = nil, automatic: Bool = false) -> String? {
+    guard !channel.login.isEmpty, !isRecording(channel.login) else { return nil }
     let login = channel.login.lowercased()
     let id = "\(login)-\(Int(Date().timeIntervalSince1970))"
     let info = RecordingInfo(
       id: id, login: login, channelName: channel.name, channelID: channel.id, profileImageURL: channel.profileImageURL,
       title: stream?.title, category: stream?.category?.name, quality: "", startedAt: Date(), endedAt: nil, duration: 0,
-      bytes: 0, gaps: 0, endReason: nil)
+      bytes: 0, gaps: 0, endReason: nil, streamID: streamID ?? stream?.id, automatic: automatic)
     let settings = AppSettings.shared
     var config = LowLatencyConfig()
     config.adFreeProxies = settings.adFreeProxyHosts
@@ -90,11 +96,20 @@ final class RecordingStore: ObservableObject {
     recordings.insert(info, at: 0)
     keepAwake()
     Task { await recorder.start() }
+    return id
   }
 
+  /// Stopped by hand.
   func stop(_ id: String) {
     guard let recorder = recorders[id] else { return }
-    Task { await recorder.stop() }
+    Task { await recorder.stop(byUser: true) }
+  }
+
+  var hasActive: Bool { !active.isEmpty }
+
+  /// A recording of that broadcast was stopped by hand (so it isn't started again by itself).
+  func wasStoppedByUser(streamID: String) -> Bool {
+    recordings.contains { $0.streamID == streamID && $0.stoppedByUser == true }
   }
 
   func delete(_ info: RecordingInfo) {
@@ -112,12 +127,25 @@ final class RecordingStore: ObservableObject {
   private func update(_ status: RecorderStatus) {
     if let index = recordings.firstIndex(where: { $0.id == status.info.id }) { recordings[index] = status.info }
     if status.state == .ended {
+      let wasActive = active[status.info.id] != nil
       active[status.info.id] = nil
       recorders[status.info.id] = nil
+      if wasActive, status.info.automatic == true, status.info.duration > 0 { notifyFinished(status.info) }
+      // Nothing left to keep running for in the background.
+      AutoRecorder.shared.updateKeepAlive()
     } else if active[status.info.id] != status.state {
       active[status.info.id] = status.state
     }
     keepAwake()
+  }
+
+  private func notifyFinished(_ info: RecordingInfo) {
+    let content = UNMutableNotificationContent()
+    content.title = "Recorded \(info.channelName)"
+    content.body = "\(Format.duration(Int(info.duration))) saved (\(info.endReason?.lowercased() ?? "ended")). Tap to watch."
+    content.threadIdentifier = "recordings"
+    content.userInfo = ["recordingID": info.id]
+    UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "rec-end-\(info.id)", content: content, trigger: nil))
   }
 
   /// While recording, the screen stays on in the foreground, so a phone left open on a stand
@@ -132,12 +160,14 @@ final class RecordingStore: ObservableObject {
   /// background audio). Otherwise it gives a little time, then pauses Kestrel, and the recording
   /// with it until Kestrel is opened again: say so.
   private func enteredBackground() {
-    guard !active.isEmpty, backgroundTask == .invalid else { return }
+    // Running in the background silently (see AutoRecorder) keeps the recording going.
+    AutoRecorder.shared.updateKeepAlive()
+    guard !active.isEmpty, !BackgroundKeepAlive.shared.running, backgroundTask == .invalid else { return }
     backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Recording") { [weak self] in
       guard let store = self else { return }
       Task { @MainActor in
         // With a stream playing, its sound keeps Kestrel going; otherwise it's about to pause.
-        if AppModel.shared.playing == nil { store.notifyPaused() }
+        if AppModel.shared.playing == nil, !BackgroundKeepAlive.shared.running { store.notifyPaused() }
         store.endBackgroundTask()
       }
     }
@@ -153,8 +183,44 @@ final class RecordingStore: ObservableObject {
     guard !active.isEmpty else { return }
     let content = UNMutableNotificationContent()
     content.title = "Recording paused"
-    content.body = "iOS pauses Kestrel in the background unless a stream is playing. Open Kestrel to carry on recording."
+    content.body = "iOS pauses Kestrel in the background unless a stream is playing (or Run in the background is on, under Recordings). Open Kestrel to carry on recording."
     UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "recording-paused", content: content, trigger: nil))
+  }
+}
+
+/// On a channel's page: record them whenever they go live (see AutoRecorder).
+struct AutoRecordButton: View {
+  let channel: Channel
+  var font: Font = .title2
+  @ObservedObject private var auto = AutoRecorder.shared
+
+  static let heights = [1080, 720, 480, 360]
+
+  var body: some View {
+    let rule = auto.rule(for: channel.login)
+    Menu {
+      if let rule {
+        Text("Recording whenever they go live (\(rule.qualityLabel))")
+        Button(role: .destructive) {
+          auto.unschedule(channel.login)
+        } label: {
+          Label("Stop recording when live", systemImage: "record.circle")
+        }
+      } else {
+        Section("Record whenever they go live, even with Kestrel closed") {
+          ForEach(Self.heights, id: \.self) { height in
+            Button("\(height)p · \(RecordQuality.sizePerHour("\(height)p"))") { auto.schedule(channel, maxHeight: height) }
+          }
+        }
+      }
+    } label: {
+      Image(systemName: rule == nil ? "record.circle" : "record.circle.fill")
+        .font(font)
+        .foregroundColor(rule == nil ? .primary : .liveRed)
+        .frame(minWidth: 36, minHeight: 36)
+        .contentShape(Rectangle())
+    }
+    .accessibilityLabel(rule == nil ? "Record when live" : "Recording when live")
   }
 }
 
@@ -162,12 +228,48 @@ final class RecordingStore: ObservableObject {
 
 struct RecordingsView: View {
   @ObservedObject private var store = RecordingStore.shared
+  @ObservedObject private var auto = AutoRecorder.shared
   @EnvironmentObject private var app: AppModel
   @State private var playing: RecordingInfo? = nil
 
   var body: some View {
     List {
       Section {
+        if auto.rules.isEmpty {
+          Text("Tap ⏺ on a channel's page, or Record in the player's gear menu, to record a channel whenever it goes live.")
+            .font(.subheadline).foregroundColor(.secondary)
+        }
+        ForEach(auto.rules) { rule in
+          HStack(spacing: 12) {
+            Avatar(url: rule.profileImageURL, size: 36)
+            VStack(alignment: .leading, spacing: 2) {
+              Text(rule.name).font(.headline)
+              Text(store.isRecording(rule.login) ? "Live: recording now" : "Whenever they go live · \(rule.qualityLabel)")
+                .font(.caption).foregroundColor(store.isRecording(rule.login) ? .liveRed : .secondary)
+            }
+          }
+          .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+              auto.unschedule(rule.login)
+            } label: {
+              Label("Remove", systemImage: "trash")
+            }
+          }
+        }
+        Toggle("Run in the background", isOn: $auto.runInBackground)
+      } header: {
+        Text("Record when live")
+      } footer: {
+        Text(
+          "Kestrel checks these channels about every minute and starts recording as soon as one goes live, then lets you know (and again when it's done). To do that with the phone locked and Kestrel closed, Run in the background keeps it running by playing silence, mixed in with your other audio; Apple allows that only for apps you install yourself, not App Store apps. It uses some battery while channels are scheduled, and data while recording. If Kestrel is swiped away or the phone restarts, it can't record until it's opened again (iOS may still check now and then and pick it up)."
+        )
+      }
+
+      Section {
+        if store.recordings.isEmpty {
+          Text("No recordings yet. Record a live stream from the player's gear menu, or schedule a channel above.")
+            .font(.subheadline).foregroundColor(.secondary)
+        }
         ForEach(store.recordings) { info in
           Button {
             play(info)
@@ -191,21 +293,16 @@ struct RecordingsView: View {
             }
           }
         }
+      } header: {
+        Text("Recordings")
       } footer: {
         if !store.recordings.isEmpty {
           Text(
-            "\(Self.size(store.totalBytes)) on this iPhone. Recordings keep going while Kestrel is open (the screen stays on) or playing a stream in the background or Picture in Picture. Swipe left to stop or delete."
+            "\(Self.size(store.totalBytes)) on this iPhone. Tap one to watch from the start (or where you left off), even while it's still recording. Swipe left to stop or delete."
           )
         }
       }
       MiniPlayerSpacer()
-    }
-    .overlay {
-      if store.recordings.isEmpty {
-        EmptyState(
-          systemImage: "record.circle", title: "No recordings",
-          message: "Record a live stream from the player's gear menu to watch it later, from the start.")
-      }
     }
     .navigationTitle("Recordings")
     .onAppear { store.reload() }
@@ -300,6 +397,20 @@ struct RecordingPlayerScreen: View {
           }
         }
         Spacer(minLength: 8)
+        if recording {
+          // Caught up: on to the stream itself.
+          Button {
+            let channel = Channel(
+              id: info.channelID ?? "", login: info.login, displayName: info.channelName, profileImageURL: info.profileImageURL)
+            dismiss()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { AppModel.shared.playing = .live(channel) }
+          } label: {
+            Text("Watch live").font(.subheadline.weight(.semibold))
+              .padding(.horizontal, 12).padding(.vertical, 7)
+              .background(Color.liveRed, in: Capsule())
+          }
+          .accessibilityHint("Closes the recording and opens the live stream")
+        }
         Button {
           dismiss()
         } label: {

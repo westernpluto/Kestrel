@@ -33,6 +33,12 @@ struct RecordingInfo: Codable, Sendable, Identifiable, Equatable {
   var gaps: Int
   /// Why it ended ("Stopped", "The stream ended", …).
   var endReason: String?
+  /// The broadcast recorded.
+  var streamID: String? = nil
+  /// Started by itself when the channel went live.
+  var automatic: Bool? = nil
+  /// Stopped by hand (not started again for the same broadcast).
+  var stoppedByUser: Bool? = nil
 }
 
 struct RecorderStatus: Sendable, Equatable {
@@ -105,7 +111,8 @@ actor StreamRecorder {
     task = Task { [weak self] in await self?.run() }
   }
 
-  func stop(reason: String = "Stopped") {
+  func stop(reason: String = "Stopped", byUser: Bool = false) {
+    if byUser { info.stoppedByUser = true }
     task?.cancel()
     finish(reason)
   }

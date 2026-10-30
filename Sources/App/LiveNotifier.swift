@@ -219,7 +219,15 @@ extension LiveNotifier: UNUserNotificationCenterDelegate {
     withCompletionHandler completionHandler: @escaping () -> Void
   ) {
     let info = response.notification.request.content.userInfo
-    if let id = info["channelID"] as? String, let login = info["login"] as? String {
+    if info["recordingID"] is String {
+      // A recording started or finished: the recordings list.
+      DispatchQueue.main.async {
+        let app = AppModel.shared
+        app.playerMinimized = app.playing != nil
+        app.tab = .following
+        app.push(.recordings)
+      }
+    } else if let id = info["channelID"] as? String, let login = info["login"] as? String {
       let avatar = (info["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 }
       let channel = Channel(id: id, login: login, displayName: info["displayName"] as? String ?? login, profileImageURL: avatar)
       DispatchQueue.main.async { AppModel.shared.playing = .live(channel) }

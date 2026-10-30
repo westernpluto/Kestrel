@@ -28,8 +28,12 @@ struct KestrelApp: App {
     }
     .onChange(of: scenePhase) { phase in
       switch phase {
-      case .active: LiveNotifier.shared.appBecameActive()
-      case .background: LiveNotifier.shared.appEnteredBackground()
+      case .active:
+        LiveNotifier.shared.appBecameActive()
+        AutoRecorder.shared.appBecameActive()
+      case .background:
+        LiveNotifier.shared.appEnteredBackground()
+        AutoRecorder.shared.appEnteredBackground()
       default: break
       }
     }
@@ -271,6 +275,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
   func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
     // Go-live alerts: background checks and taps on the notifications.
     LiveNotifier.register()
+    AutoRecorder.register()
     return true
   }
 

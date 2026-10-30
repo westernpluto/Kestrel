@@ -330,6 +330,7 @@ struct PlayerControls: View {
   var interacted: (Double) -> Void
   @EnvironmentObject private var settings: AppSettings
   @ObservedObject private var recordings = RecordingStore.shared
+  @ObservedObject private var autoRecorder = AutoRecorder.shared
   /// While dragging the seek bar everything else steps aside for the preview.
   @State private var scrubbing = false
 
@@ -419,6 +420,7 @@ struct PlayerControls: View {
       layoutToggle: layoutToggle,
       recordOptions: canRecord ? RecordQuality.options(from: model.qualities.map(\.label)) : [],
       recording: canRecord ? recordings.isRecording(login) : nil,
+      autoRecord: autoRecorder.rule(for: login) != nil,
       upscale: settings.upscale,
       select: { [model] in model.selectQuality($0) },
       setLowLatency: { [model] in model.setLowLatency($0) },
@@ -431,6 +433,10 @@ struct PlayerControls: View {
       stopRecording: { [recordings] in
         if let current = recordings.recording(of: login) { recordings.stop(current.id) }
       },
+      scheduleRecording: { [model, autoRecorder] (height: Int) in
+        if let channel = model.channel { autoRecorder.schedule(channel, maxHeight: height) }
+      },
+      unscheduleRecording: { [autoRecorder] in autoRecorder.unschedule(login) },
       setUpscale: { [settings] in settings.upscale = $0 },
       opened: { [interacted] in interacted(12) }
     )
@@ -981,6 +987,8 @@ struct PlayerSettingsMenu: View, Equatable {
   var recordOptions: [String]
   /// Recording this stream (nil: recording isn't offered here).
   var recording: Bool?
+  /// This channel is recorded whenever it goes live (see AutoRecorder).
+  var autoRecord: Bool
   var upscale: Bool
   var select: (PlayerModel.Quality) -> Void
   var setLowLatency: (Bool) -> Void
@@ -988,13 +996,16 @@ struct PlayerSettingsMenu: View, Equatable {
   var setLayoutToggle: (Bool) -> Void
   var startRecording: (String) -> Void
   var stopRecording: () -> Void
+  var scheduleRecording: (Int) -> Void
+  var unscheduleRecording: () -> Void
   var setUpscale: (Bool) -> Void
   var opened: () -> Void
 
   static func == (a: Self, b: Self) -> Bool {
     a.qualities == b.qualities && a.selected == b.selected && a.showLowLatency == b.showLowLatency
       && a.lowLatency == b.lowLatency && a.showStats == b.showStats && a.layoutToggle == b.layoutToggle
-      && a.recordOptions == b.recordOptions && a.recording == b.recording && a.upscale == b.upscale
+      && a.recordOptions == b.recordOptions && a.recording == b.recording && a.autoRecord == b.autoRecord
+      && a.upscale == b.upscale
   }
 
   var body: some View {
@@ -1027,20 +1038,31 @@ struct PlayerSettingsMenu: View, Equatable {
         }
       }
       if let recording {
-        if recording {
-          Button(role: .destructive, action: stopRecording) {
-            Label("Stop recording", systemImage: "stop.circle")
-          }
-        } else if !recordOptions.isEmpty {
-          Menu {
-            Section("Saved on this iPhone, to watch from the start") {
+        Menu {
+          if recording {
+            Button(role: .destructive, action: stopRecording) {
+              Label("Stop recording", systemImage: "stop.circle")
+            }
+          } else if !recordOptions.isEmpty {
+            Section("Now, saved on this iPhone to watch from the start") {
               ForEach(recordOptions, id: \.self) { label in
                 Button("\(label) · \(RecordQuality.sizePerHour(label))") { startRecording(label) }
               }
             }
-          } label: {
-            Label("Record", systemImage: "record.circle")
           }
+          if autoRecord {
+            Button(action: unscheduleRecording) {
+              Label("Stop recording when they go live", systemImage: "calendar.badge.minus")
+            }
+          } else {
+            Section("Whenever they go live, even with Kestrel closed") {
+              ForEach(AutoRecordButton.heights, id: \.self) { height in
+                Button("\(height)p · \(RecordQuality.sizePerHour("\(height)p"))") { scheduleRecording(height) }
+              }
+            }
+          }
+        } label: {
+          Label(recording ? "Recording" : "Record", systemImage: recording ? "record.circle.fill" : "record.circle")
         }
       }
     } label: {

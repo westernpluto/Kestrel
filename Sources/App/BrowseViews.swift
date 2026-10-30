@@ -452,6 +452,7 @@ struct FollowingView: View {
   @EnvironmentObject private var app: AppModel
   @ObservedObject private var store = FollowingStore.shared
   @ObservedObject private var recordings = RecordingStore.shared
+  @ObservedObject private var auto = AutoRecorder.shared
   @ObservedObject private var account = TwitchAccount.shared
   @State private var showLogin = false
   @State private var showOffline = true
@@ -459,7 +460,7 @@ struct FollowingView: View {
   var body: some View {
     FeedList(refresh: { [store] in await store.refresh(force: true) }) {
       if account.session == nil { signInCard.feedRow(top: 8) }
-      if !recordings.recordings.isEmpty { recordingsRow.feedRow(top: 8, bottom: 2) }
+      if !recordings.recordings.isEmpty || !auto.rules.isEmpty { recordingsRow.feedRow(top: 8, bottom: 2) }
       if let error = store.error {
         ErrorBanner(message: error) { Task { await store.refresh() } }.feedRow()
       }
