@@ -76,15 +76,7 @@ struct PlayerVideoArea: View {
       PlayerControls(
         model: model, landscape: landscape, chatOpen: chatOpen, visible: controlsShown && chromeVisible && !pulling,
         insets: controlInsets, viewersShownElsewhere: viewersShownElsewhere, layoutToggle: layoutToggle,
-        setLayoutToggle: setLayoutToggle,
-      startRecording: { [model, recordings] label in
-        guard let channel = model.channel else { return }
-        recordings.start(channel: channel, stream: model.stream, maxHeight: RecordQuality.height(label))
-      },
-      stopRecording: { [recordings] in
-        if let current = recordings.recording(of: login) { recordings.stop(current.id) }
-      },
-      setUpscale: { [settings] in settings.upscale = $0 }, toggleChat: toggleChat,
+        setLayoutToggle: setLayoutToggle, toggleChat: toggleChat,
         minimize: minimize, enterFullScreen: enterFullScreen, exitFullScreen: exitFullScreen,
         interacted: { scheduleHide(after: $0) })
       if let resumed = model.resumedAt, chromeVisible {
@@ -432,6 +424,14 @@ struct PlayerControls: View {
       setLowLatency: { [model] in model.setLowLatency($0) },
       setStats: { [settings] in settings.showVideoStats = $0 },
       setLayoutToggle: setLayoutToggle,
+      startRecording: { [model, recordings] (label: String) in
+        guard let channel = model.channel else { return }
+        recordings.start(channel: channel, stream: model.stream, maxHeight: RecordQuality.height(label))
+      },
+      stopRecording: { [recordings] in
+        if let current = recordings.recording(of: login) { recordings.stop(current.id) }
+      },
+      setUpscale: { [settings] in settings.upscale = $0 },
       opened: { [interacted] in interacted(12) }
     )
     .equatable()

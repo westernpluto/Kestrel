@@ -76,13 +76,6 @@ enum HLSDate {
     return f
   }()
 
-  /// `2026-10-21T07:00:04.123Z`.
-  static func format(_ date: Date) -> String {
-    lock.lock()
-    defer { lock.unlock() }
-    return fractional.string(from: date)
-  }
-
   private static func fallback(_ s: String) -> Date? {
     lock.lock()
     defer { lock.unlock() }
