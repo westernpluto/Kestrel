@@ -52,6 +52,10 @@ struct PlayerVideoArea: View {
         .simultaneousGesture(zoom)
         // Keyed to the minimized state, not the animation, so a pull in progress keeps its touch.
         .allowsHitTesting(!minimized)
+      if let audioOnly = model.audioOnly, model.phase == .playing, !model.coveringAd {
+        AudioOnlyCard(state: audioOnly, compact: !landscape && !chatOpen)
+          .transition(.opacity)
+      }
       statusOverlay
         .animation(.easeInOut(duration: 0.25), value: model.phase)
         .animation(.easeInOut(duration: 0.2), value: model.coveringAd)
@@ -72,7 +76,15 @@ struct PlayerVideoArea: View {
       PlayerControls(
         model: model, landscape: landscape, chatOpen: chatOpen, visible: controlsShown && chromeVisible && !pulling,
         insets: controlInsets, viewersShownElsewhere: viewersShownElsewhere, layoutToggle: layoutToggle,
-        setLayoutToggle: setLayoutToggle, toggleChat: toggleChat,
+        setLayoutToggle: setLayoutToggle,
+      startRecording: { [model, recordings] label in
+        guard let channel = model.channel else { return }
+        recordings.start(channel: channel, stream: model.stream, maxHeight: RecordQuality.height(label))
+      },
+      stopRecording: { [recordings] in
+        if let current = recordings.recording(of: login) { recordings.stop(current.id) }
+      },
+      setUpscale: { [settings] in settings.upscale = $0 }, toggleChat: toggleChat,
         minimize: minimize, enterFullScreen: enterFullScreen, exitFullScreen: exitFullScreen,
         interacted: { scheduleHide(after: $0) })
       if let resumed = model.resumedAt, chromeVisible {
@@ -137,6 +149,10 @@ struct PlayerVideoArea: View {
         ApplePlayerSurface(model: model, role: .rewind, fill: model.fillsScreen)
           .opacity((model.isRewinding || model.rewindLinger) && model.rewindShowing ? 1 : 0)
           .animation(.easeInOut(duration: 0.25), value: model.rewindShowing)
+      }
+      // Upscaled with MetalFX, over the regular picture (which shows whenever it's not needed).
+      if settings.upscale, model.audioOnly == nil {
+        UpscaledVideoView(source: model.upscaleSource, fill: model.fillsScreen)
       }
     }
     .opacity(model.phase == .playing ? 1 : 0)
@@ -269,6 +285,40 @@ struct PlayerVideoArea: View {
   }
 }
 
+/// In place of the frozen picture while only the sound is playing.
+struct AudioOnlyCard: View {
+  var state: PlayerModel.AudioOnly
+  var compact: Bool
+
+  var body: some View {
+    ZStack {
+      Color.black
+      VStack(spacing: 8) {
+        Image(systemName: "waveform")
+          .font(.system(size: compact ? 28 : 36, weight: .semibold))
+          .foregroundColor(.accentTeal)
+          .symbolRenderingMode(.hierarchical)
+        Text("Audio only").font(.headline)
+        HStack(spacing: 6) {
+          if state == .returning { ProgressView().tint(.white).scaleEffect(0.7) }
+          Text(
+            state == .chosen
+              ? "Pick a video quality in the gear menu to bring the picture back"
+              : "Bringing the picture back…"
+          )
+        }
+        .font(.footnote)
+        .foregroundColor(.white.opacity(0.7))
+        .multilineTextAlignment(.center)
+      }
+      .foregroundColor(.white)
+      .padding(.horizontal, 24)
+    }
+    .allowsHitTesting(false)
+    .accessibilityElement(children: .combine)
+  }
+}
+
 // MARK: - Controls
 
 struct PlayerControls: View {
@@ -287,6 +337,7 @@ struct PlayerControls: View {
   /// Keeps the controls up for this many more seconds.
   var interacted: (Double) -> Void
   @EnvironmentObject private var settings: AppSettings
+  @ObservedObject private var recordings = RecordingStore.shared
   /// While dragging the seek bar everything else steps aside for the preview.
   @State private var scrubbing = false
 
@@ -365,6 +416,8 @@ struct PlayerControls: View {
   /// made its text flicker.)
   private var settingsMenu: some View {
     let qualities = model.menuQualities
+    let login = model.channel?.login ?? ""
+    let canRecord = model.isLive && !model.isRewinding && !login.isEmpty
     return PlayerSettingsMenu(
       qualities: qualities,
       selected: model.menuSelectedQuality,
@@ -372,6 +425,9 @@ struct PlayerControls: View {
       lowLatency: settings.lowLatency,
       showStats: settings.showVideoStats,
       layoutToggle: layoutToggle,
+      recordOptions: canRecord ? RecordQuality.options(from: model.qualities.map(\.label)) : [],
+      recording: canRecord ? recordings.isRecording(login) : nil,
+      upscale: settings.upscale,
       select: { [model] in model.selectQuality($0) },
       setLowLatency: { [model] in model.setLowLatency($0) },
       setStats: { [settings] in settings.showVideoStats = $0 },
@@ -387,6 +443,11 @@ struct PlayerControls: View {
       HStack(spacing: 10) {
         if model.isLive {
           liveButton
+          if let login = model.channel?.login, recordings.isRecording(login) {
+            Label("REC", systemImage: "record.circle.fill")
+              .font(.caption2.weight(.heavy)).foregroundColor(.liveRed).labelStyle(.titleAndIcon)
+              .accessibilityLabel("Recording")
+          }
           if !viewersShownElsewhere, let viewers = model.stream?.viewers {
             Label(Format.viewers(viewers), systemImage: "person.fill").font(.caption.monospacedDigit())
               .labelStyle(.titleAndIcon).foregroundColor(.white.opacity(0.85))
@@ -871,6 +932,37 @@ struct WrapLayout: Layout {
   }
 }
 
+/// The qualities a recording can be made at (from the quality menu's labels).
+enum RecordQuality {
+  /// One per height, best first: "1080p60", "720p60", "480p"…
+  static func options(from labels: [String]) -> [String] {
+    var seen = Set<Int>()
+    var out: [String] = []
+    for label in labels where !label.contains("·") {
+      guard let lines = height(label), !seen.contains(lines) else { continue }
+      seen.insert(lines)
+      out.append(label)
+    }
+    return out
+  }
+
+  /// 720 for "720p60".
+  static func height(_ label: String) -> Int? {
+    Int(label.prefix { $0.isNumber })
+  }
+
+  /// Roughly how much a recording at that quality takes per hour.
+  static func sizePerHour(_ label: String) -> String {
+    switch height(label) ?? 0 {
+    case 1080...: return "≈3 GB/h"
+    case 720...: return "≈1.5 GB/h"
+    case 480...: return "≈0.6 GB/h"
+    case 360...: return "≈0.3 GB/h"
+    default: return "≈0.1 GB/h"
+    }
+  }
+}
+
 /// A layout choice offered in the gear menu where it applies (e.g. chat over the video).
 struct LayoutToggle: Equatable {
   var title: String
@@ -885,15 +977,24 @@ struct PlayerSettingsMenu: View, Equatable {
   var lowLatency: Bool
   var showStats: Bool
   var layoutToggle: LayoutToggle?
+  /// Qualities a recording can be made at (empty: none offered).
+  var recordOptions: [String]
+  /// Recording this stream (nil: recording isn't offered here).
+  var recording: Bool?
+  var upscale: Bool
   var select: (PlayerModel.Quality) -> Void
   var setLowLatency: (Bool) -> Void
   var setStats: (Bool) -> Void
   var setLayoutToggle: (Bool) -> Void
+  var startRecording: (String) -> Void
+  var stopRecording: () -> Void
+  var setUpscale: (Bool) -> Void
   var opened: () -> Void
 
   static func == (a: Self, b: Self) -> Bool {
     a.qualities == b.qualities && a.selected == b.selected && a.showLowLatency == b.showLowLatency
       && a.lowLatency == b.lowLatency && a.showStats == b.showStats && a.layoutToggle == b.layoutToggle
+      && a.recordOptions == b.recordOptions && a.recording == b.recording && a.upscale == b.upscale
   }
 
   var body: some View {
@@ -917,9 +1018,29 @@ struct PlayerSettingsMenu: View, Equatable {
       Toggle(isOn: Binding(get: { showStats }, set: setStats)) {
         Label("Video stats", systemImage: "chart.bar.xaxis")
       }
+      Toggle(isOn: Binding(get: { upscale }, set: setUpscale)) {
+        Label("Upscale (MetalFX)", systemImage: "wand.and.stars")
+      }
       if let layoutToggle {
         Toggle(isOn: Binding(get: { layoutToggle.isOn }, set: setLayoutToggle)) {
           Label(layoutToggle.title, systemImage: layoutToggle.systemImage)
+        }
+      }
+      if let recording {
+        if recording {
+          Button(role: .destructive, action: stopRecording) {
+            Label("Stop recording", systemImage: "stop.circle")
+          }
+        } else if !recordOptions.isEmpty {
+          Menu {
+            Section("Saved on this iPhone, to watch from the start") {
+              ForEach(recordOptions, id: \.self) { label in
+                Button("\(label) · \(RecordQuality.sizePerHour(label))") { startRecording(label) }
+              }
+            }
+          } label: {
+            Label("Record", systemImage: "record.circle")
+          }
         }
       }
     } label: {

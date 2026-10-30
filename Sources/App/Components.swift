@@ -448,6 +448,7 @@ struct AppDestinations: ViewModifier {
         switch route {
         case .channel(let channel): ChannelView(channel: channel).miniPlayerRoom()
         case .category(let category): CategoryView(category: category).miniPlayerRoom()
+        case .recordings: RecordingsView().miniPlayerRoom()
         }
       }
   }

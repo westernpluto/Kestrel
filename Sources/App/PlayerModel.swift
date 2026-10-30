@@ -36,6 +36,26 @@ final class PlayerModel: ObservableObject {
   /// Zoomed to fill the screen (crops the sides) instead of fitting.
   @Published var fillsScreen = false
   @Published private(set) var pictureInPictureActive = false
+  /// Playing the audio-only rendition (the picture would only freeze, so the player says so).
+  enum AudioOnly: Equatable {
+    /// Picked in the quality menu.
+    case chosen
+    /// Switched to in the background; the picture is on its way back.
+    case returning
+  }
+  @Published var audioOnly: AudioOnly?
+
+  /// Where the MetalFX upscaler takes the picture from (see VideoUpscaler): the VOD while
+  /// rewinding, else the player in use.
+  var upscaleSource: UpscaleFrameSource? {
+    if (isRewinding || rewindLinger) && rewindShowing { return rewindFrames }
+    #if canImport(AmazonIVSPlayer)
+      if let lowLatency { return lowLatency.displayedFrames }
+    #endif
+    return mainFrames
+  }
+  private lazy var mainFrames = PlayerItemFrames(player: player)
+  private lazy var rewindFrames = PlayerItemFrames(player: rewindPlayer)
   // VOD position, for the seek bar.
   @Published var position: Double = 0
   @Published private(set) var duration: Double = 0
@@ -846,13 +866,13 @@ final class PlayerModel: ObservableObject {
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
         lowLatency.tick()
-        if wantsStats { stats = lowLatency.stats() }
+        if wantsStats { stats = lowLatency.stats() + upscaleStats }
         if isPaused != lowLatency.isPaused { isPaused = lowLatency.isPaused }
         if pictureInPictureActive != lowLatency.pictureInPictureActive { pictureInPictureActive = lowLatency.pictureInPictureActive }
         return
       }
     #endif
-    if wantsStats { stats = appleStats() }
+    if wantsStats { stats = appleStats() + upscaleStats }
     // Only once the item is ready and not mid-start or mid-seek: before that the player reports
     // "paused" while it loads, which used to stop VODs from ever starting.
     if pendingStart == nil, !seeking, player.currentItem?.status == .readyToPlay, phase == .playing {
@@ -904,6 +924,10 @@ final class PlayerModel: ObservableObject {
       ActivityLog.shared.add(String(format: "%.0f s behind live, jumping ahead", latency))
       goLive()
     }
+  }
+
+  private var upscaleStats: [StatLine] {
+    AppSettings.shared.upscale ? [StatLine(label: "Upscaling", value: UpscaleMonitor.status)] : []
   }
 
   /// Video stats for the Apple player.

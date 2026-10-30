@@ -79,7 +79,84 @@ struct RootView: View {
     }
     .animation(.spring(response: 0.42, dampingFraction: 0.88), value: app.playing?.id)
     .background(WindowSizeReporter())
+    .background(KeyboardDismisser())
   }
+}
+
+/// A tap anywhere outside the message box puts the keyboard away, wherever it lands (before, only
+/// taps on chat or the video did). It watches taps on the whole window without taking them, so
+/// whatever was tapped still gets the tap. Taps on the message box's row (the box, emoji and send
+/// buttons, and the suggestions above it) keep the keyboard up.
+struct KeyboardDismisser: UIViewRepresentable {
+  func makeUIView(context: Context) -> DismisserView {
+    let view = DismisserView()
+    view.isUserInteractionEnabled = false
+    return view
+  }
+
+  func updateUIView(_ view: DismisserView, context: Context) {}
+
+  final class DismisserView: UIView, UIGestureRecognizerDelegate {
+    private weak var installedOn: UIWindow?
+    private lazy var tap: UITapGestureRecognizer = {
+      let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
+      tap.cancelsTouchesInView = false
+      tap.delaysTouchesBegan = false
+      tap.delaysTouchesEnded = false
+      tap.delegate = self
+      return tap
+    }()
+
+    override func didMoveToWindow() {
+      super.didMoveToWindow()
+      guard let window, window !== installedOn else { return }
+      installedOn?.removeGestureRecognizer(tap)
+      window.addGestureRecognizer(tap)
+      installedOn = window
+    }
+
+    @objc private func tapped(_ recognizer: UITapGestureRecognizer) {
+      guard let window = installedOn, let editor = FirstResponder.current as? UIView, editor.window === window else { return }
+      let point = recognizer.location(in: window)
+      let field = editor.convert(editor.bounds, to: window)
+      if point.y >= field.minY - 56, point.y <= field.maxY + 14 { return }
+      window.endEditing(true)
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+      true
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+      // Only while typing, and not on the text itself (moving the cursor).
+      guard FirstResponder.current is UIView else { return false }
+      var view = touch.view
+      while let current = view {
+        if current is UITextView || current is UITextField { return false }
+        view = current.superview
+      }
+      return true
+    }
+  }
+}
+
+/// Whatever has the keyboard right now (found by asking the responder chain).
+enum FirstResponder {
+  private final class Finder: NSObject {
+    static weak var found: UIResponder?
+  }
+
+  static var current: UIResponder? {
+    Finder.found = nil
+    UIApplication.shared.sendAction(#selector(UIResponder.kestrelReportFirstResponder), to: nil, from: nil, for: nil)
+    return Finder.found
+  }
+
+  fileprivate static func report(_ responder: UIResponder) { Finder.found = responder }
+}
+
+extension UIResponder {
+  @objc fileprivate func kestrelReportFirstResponder() { FirstResponder.report(self) }
 }
 
 /// Tells the orientation lock how big the window is: it changes when iPhone Duo is opened or

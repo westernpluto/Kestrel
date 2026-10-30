@@ -451,6 +451,7 @@ struct FollowingView: View {
   @EnvironmentObject private var favorites: FavoritesStore
   @EnvironmentObject private var app: AppModel
   @ObservedObject private var store = FollowingStore.shared
+  @ObservedObject private var recordings = RecordingStore.shared
   @ObservedObject private var account = TwitchAccount.shared
   @State private var showLogin = false
   @State private var showOffline = true
@@ -458,6 +459,7 @@ struct FollowingView: View {
   var body: some View {
     FeedList(refresh: { [store] in await store.refresh(force: true) }) {
       if account.session == nil { signInCard.feedRow(top: 8) }
+      if !recordings.recordings.isEmpty { recordingsRow.feedRow(top: 8, bottom: 2) }
       if let error = store.error {
         ErrorBanner(message: error) { Task { await store.refresh() } }.feedRow()
       }
@@ -512,6 +514,32 @@ struct FollowingView: View {
   /// Reload when the account or the hearted channels change.
   private var refreshKey: String {
     (account.session?.login ?? "-") + "|" + favorites.channels.map(\.id).joined(separator: ",")
+  }
+
+  /// Recordings of live streams (see Recordings.swift).
+  private var recordingsRow: some View {
+    Button {
+      app.push(.recordings)
+    } label: {
+      HStack(spacing: 10) {
+        Image(systemName: recordings.active.isEmpty ? "film.stack" : "record.circle.fill")
+          .font(.title3)
+          .foregroundColor(recordings.active.isEmpty ? .accentTeal : .liveRed)
+          .frame(width: 28)
+        Text("Recordings").font(.headline)
+        Text("\(recordings.recordings.count)").font(.subheadline.weight(.semibold)).foregroundColor(.secondary)
+        if !recordings.active.isEmpty {
+          Text("· recording \(recordings.active.count)").font(.subheadline).foregroundColor(.liveRed)
+        }
+        Spacer()
+        Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundColor(.secondary)
+      }
+      .padding(.horizontal, 14)
+      .padding(.vertical, 12)
+      .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
   }
 
   private func header(_ title: String, count: Int) -> some View {

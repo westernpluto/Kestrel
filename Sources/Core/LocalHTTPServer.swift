@@ -263,6 +263,8 @@ final class StreamProxy: @unchecked Sendable {
   private let lock = NSLock()
   private var sessions: [String: PlaylistSource] = [:]
   private var statics: [String: String] = [:]
+  /// Where recordings are (served as `/rec/<id>/<file>`).
+  private var recordingsRoot: URL?
   private var server: LocalHTTPServer?
   private var lastPort: UInt16 = 0
 
@@ -342,6 +344,43 @@ final class StreamProxy: @unchecked Sendable {
     return URL(string: "http://127.0.0.1:\(port)/static/\(id).m3u8")!
   }
 
+  /// Serves the recordings in `root` (each in a folder named by its id).
+  func serveRecordings(from root: URL) {
+    lock.lock()
+    recordingsRoot = root
+    lock.unlock()
+  }
+
+  /// A recording's playlist on the local server.
+  func recordingURL(id: String) throws -> URL {
+    let port = try ensureRunning()
+    return URL(string: "http://127.0.0.1:\(port)/rec/\(id)/index.m3u8")!
+  }
+
+  private func recordingFile(id: String, file: String) -> LocalResponse {
+    lock.lock()
+    let root = recordingsRoot
+    lock.unlock()
+    guard let root, Self.isPlainName(id), Self.isPlainName(file),
+      let data = try? Data(contentsOf: root.appendingPathComponent(id).appendingPathComponent(file))
+    else { return .text(404, "not found") }
+    let type: String
+    if file.hasSuffix(".m3u8") {
+      type = "application/vnd.apple.mpegurl"
+    } else if file.hasSuffix(".ts") {
+      type = "video/mp2t"
+    } else {
+      type = "video/mp4"
+    }
+    return LocalResponse(status: 200, contentType: type, body: data)
+  }
+
+  /// A file or folder name with nothing that could reach outside the recordings.
+  static func isPlainName(_ name: String) -> Bool {
+    !name.isEmpty && !name.hasPrefix(".")
+      && name.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || "-_.".unicodeScalars.contains($0) }
+  }
+
   private func staticBody(_ id: String) -> String? {
     lock.lock()
     defer { lock.unlock() }
@@ -357,6 +396,7 @@ final class StreamProxy: @unchecked Sendable {
   func handle(_ request: LocalRequest) async -> LocalResponse {
     let parts = request.path.split(separator: "/").map(String.init)
     if parts == ["ping"] { return .text(200, "pong") }
+    if parts.count == 3, parts[0] == "rec" { return recordingFile(id: parts[1], file: parts[2]) }
     if parts.count == 2, parts[0] == "static", parts[1].hasSuffix(".m3u8") {
       return staticBody(String(parts[1].dropLast(5))).map { .playlist($0) } ?? .text(404, "not found")
     }

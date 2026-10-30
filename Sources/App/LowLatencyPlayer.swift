@@ -42,6 +42,12 @@
     private weak var view: IVSPlayerView?
     private var pip: AVPictureInPictureController?
     private var pipObservation: NSKeyValueObservation?
+    private var pipPossibleObservation: NSKeyValueObservation?
+    /// The PiP button was pressed while PiP wasn't possible yet: start it as soon as it is.
+    private var pipWanted = false
+    /// Waits a moment after going to the background before taking the picture away (see
+    /// `enteredBackground`).
+    private var backgroundSettleTask: Task<Void, Never>?
     private var detachedForBackground = false
     private var audioOnlyForBackground = false
     private var pausedForBackground = false
@@ -64,17 +70,21 @@
     private var steadyAuto = SteadyAutoQuality(count: 0)
     /// The cap last handed to the player (rank into the video qualities).
     private var appliedAutoCap: Int?
-    /// Started over on the same playlists: when, until the player reports its latency again (if it
-    /// doesn't, the stream is loaded afresh).
-    private var restartedAt: Date?
     /// Played since the last load (buffering after that means the player ran dry).
     private var playedSinceLoad = false
+    /// Start at the newest video (see `LowLatencyPlaylist.startingAtNewest`). Turned off for this
+    /// stream if a start that way doesn't get going.
+    private var edgeStart = true
+    /// When the player was handed the stream (until it plays).
+    private var loadedAt: Date?
     private var lastQualitySwitch = Date.distantPast
     /// IVS documents `buffered` as what's left in the buffer, but has also behaved like the
     /// buffer's end position: it's what's left once it's seen below the playhead.
     private var bufferedIsRemaining = false
     /// Kept across reloads, so going live again doesn't open new connections to Twitch.
     private var http: (client: HTTPClient, proxy: HTTPProxy?)?
+    /// The frames the picture shows, for the MetalFX upscaler (see VideoUpscaler).
+    private(set) lazy var displayedFrames = DisplayedFrames { [weak self] in self?.view?.layer }
     /// Twitch's playlist server for this stream, as the stats show it.
     private var videoServer: String?
     private var serverCheckedAt = Date.distantPast
@@ -138,6 +148,7 @@
 
     func stop() {
       stopped = true
+      backgroundSettleTask?.cancel()
       loadTask?.cancel()
       audioOnlyTask?.cancel()
       player.pause()
@@ -145,6 +156,7 @@
       proxy.controller = nil
       view?.player = nil
       pipObservation = nil
+      pipPossibleObservation = nil
       pip = nil
       notificationTokens.forEach(NotificationCenter.default.removeObserver)
       notificationTokens = []
@@ -181,6 +193,7 @@
         config.adFreeProxies = model?.adFreeProxies ?? settings.adFreeProxyHosts
         config.checkAccountFirst = TwitchAuth.shared.session != nil
         config.nearbyServers = settings.nearbyServers
+        config.startAtLiveEdge = settings.lowLatency && edgeStart
         let session = LowLatencySession(
           login: login, config: config, http: playbackHTTP(), tokens: TwitchAPI.shared
         ) { [weak self] update in
@@ -218,7 +231,7 @@
 
     /// Loads into the player, at normal speed until it has settled.
     private func startPlayback(_ url: URL) {
-      restartedAt = nil
+      loadedAt = Date()
       catchUp.restart()
       playedSinceLoad = false
       if player.playbackRate != 1 { player.playbackRate = 1 }
@@ -257,43 +270,18 @@
       // Back from an ad-free copy to the main stream: the player can get stuck on the switch
       // (TwitchAdSolutions reloads here too), so start it again at the live edge.
       if case .replaced = previous, update.state == .none || update.state == .skipped {
-        reload(reason: "back from the ad-free copy", freshToken: false)
+        reload(reason: "back from the ad-free copy")
       }
     }
 
-    /// Starts playback over at the live edge, at most every 20 seconds.
-    /// - Parameter freshToken: ask for the stream again; otherwise reuse its playlists (quick).
-    private func reload(reason: String, freshToken: Bool) {
+    /// Starts playback over at the live edge (with the stream asked for afresh), at most every 20
+    /// seconds. (Reloading the same playlists kept the player from reporting its latency.)
+    private func reload(reason: String) {
       guard !stopped, Date().timeIntervalSince(lastReload) > 20 else { return }
       lastReload = Date()
       bufferingSince = nil
       ActivityLog.shared.add("Low-latency player: reloading (\(reason))")
-      if freshToken { load() } else { restartOnSamePlaylists() }
-    }
-
-    /// The same playlists under a new address: the player starts over at the live edge without
-    /// the stream being asked for again. (Loading the same address again threw off the player's
-    /// idea of the live edge: latency read negative, then not at all.)
-    private func restartOnSamePlaylists() {
-      guard let old = session, localURL != nil else {
-        load()
-        return
-      }
-      loadTask?.cancel()
-      loadTask = Task { [weak self] in
-        let fresh = await old.restarted()
-        guard let controller = self, !controller.stopped, !Task.isCancelled else { return }
-        guard let url = try? StreamProxy.shared.register(fresh) else {
-          controller.load()
-          return
-        }
-        StreamProxy.shared.remove(old.id)
-        controller.session = fresh
-        controller.localURL = url
-        controller.adTimeline = AdTimeline()
-        controller.startPlayback(url)
-        controller.restartedAt = Date()
-      }
+      load()
     }
 
     // MARK: Player events (forwarded from the delegate proxy on the main queue)
@@ -316,6 +304,7 @@
         }
       case .playing:
         playedSinceLoad = true
+        loadedAt = nil
         model.isBuffering = false
         if model.phase != .playing { model.phase = .playing }
         model.liveResumed()
@@ -341,6 +330,7 @@
     }
 
     fileprivate func qualityChanged(_ quality: IVSQuality?) {
+      defer { updateAudioOnly() }
       // Twitch can change the rendition list mid-stream (e.g. the broadcaster restarts).
       if let quality, !menuQualities.contains(where: { $0.isEqual(to: quality) }) {
         refreshQualities()
@@ -356,6 +346,16 @@
     }
 
     private var videoQualities: [IVSQuality] { menuQualities.filter { $0.width > 0 } }
+
+    /// Tells the screen when the audio-only rendition is playing (picked, or still on after the
+    /// background while the picture comes back).
+    private func updateAudioOnly() {
+      guard let model else { return }
+      let playingAudio = player.quality.map { $0.width == 0 } ?? false
+      let pickedAudio = chosen.map { $0 < menuQualities.count && menuQualities[$0].width == 0 } ?? false
+      let state: PlayerModel.AudioOnly? = playingAudio || pickedAudio ? (pickedAudio ? .chosen : .returning) : nil
+      if model.audioOnly != state { model.audioOnly = state }
+    }
 
     /// Hands the player Auto's current limit (see `SteadyAutoQuality`).
     private func applyAutoCap() {
@@ -483,6 +483,7 @@
       let seconds = player.liveLatency.seconds
       let latency = seconds.isFinite && seconds >= 0 ? seconds : nil
       model.setLatency(latency)
+      updateAudioOnly()
 
       // Stay close to live: eat any extra buffer by playing a touch faster.
       let catchingUp =
@@ -490,22 +491,20 @@
       let rate = catchUp.update(buffer: bufferAhead, latency: latency, playing: catchingUp)
       if player.playbackRate != rate { player.playbackRate = rate }
 
-      // Started over on the same playlists but the player isn't reporting its latency: load the
-      // stream afresh instead (once).
-      if let since = restartedAt, player.state == .playing {
-        if latency != nil {
-          restartedAt = nil
-        } else if Date().timeIntervalSince(since) > 6 {
-          restartedAt = nil
-          ActivityLog.shared.add("Low-latency player: no latency reading after starting over; loading the stream afresh")
-          load()
-        }
-      }
-
       // The session can go back to the ad-free server's playlist server mid-stream.
       if let session, Date().timeIntervalSince(serverCheckedAt) > 5 {
         serverCheckedAt = Date()
         Task { [weak self] in await self?.refreshServer(session) }
+      }
+
+      // A start at the newest video that doesn't get going: start the usual way instead.
+      if let since = loadedAt, edgeStart, AppSettings.shared.lowLatency, !pausedForBackground, !isPaused,
+        Date().timeIntervalSince(since) > 8, player.state != .playing
+      {
+        edgeStart = false
+        loadedAt = nil
+        ActivityLog.shared.add("Low-latency player: starting at the newest video didn't get going; starting the usual way")
+        load()
       }
 
       // Auto: let it try a better quality again once a hold is over; remember what plays well.
@@ -519,7 +518,7 @@
       // Stuck buffering (e.g. after a switch between copies of the stream): start again.
       if player.state == .buffering, !pausedForBackground, !detachedForBackground {
         if bufferingSince == nil { bufferingSince = Date() }
-        if let since = bufferingSince, Date().timeIntervalSince(since) > 8 { reload(reason: "stuck buffering", freshToken: true) }
+        if let since = bufferingSince, Date().timeIntervalSince(since) > 8 { reload(reason: "stuck buffering") }
       } else {
         bufferingSince = nil
       }
@@ -596,6 +595,7 @@
       if player.state == .playing || player.state == .buffering {
         player.pause()
         isPaused = true
+        loadedAt = nil
       } else {
         // Paused live video is behind; start again at the live edge (with a fresh token, since
         // the old one may have expired).
@@ -604,16 +604,12 @@
       }
     }
 
-    /// Starts over at the live edge: on the same playlists while they're flowing (quick, over
-    /// open connections), else with a fresh token.
+    /// Starts over at the live edge, with the stream asked for afresh. The picture keeps playing
+    /// meanwhile, until the new one is ready to load.
     func goLive() {
-      if session != nil, localURL != nil, player.state == .playing || player.state == .buffering {
-        lastReload = Date()
-        bufferingSince = nil
-        restartOnSamePlaylists()
-      } else {
-        load()
-      }
+      lastReload = Date()
+      bufferingSince = nil
+      load()
     }
 
     /// The viewer is watching the VOD (rewinding): stop the live stream for now.
@@ -638,7 +634,7 @@
       player.setLiveLowLatencyEnabled(enabled)
       player.setInitialBufferDuration(startBuffer(lowLatency: enabled))
       lastReload = .distantPast
-      reload(reason: enabled ? "low latency on" : "low latency off", freshToken: false)
+      reload(reason: enabled ? "low latency on" : "low latency off")
     }
 
     func setFill(_ fill: Bool) {
@@ -646,8 +642,22 @@
     }
 
     func togglePictureInPicture() {
-      guard let pip else { return }
-      if pip.isPictureInPictureActive { pip.stopPictureInPicture() } else { pip.startPictureInPicture() }
+      if let pip, pip.isPictureInPictureActive {
+        pip.stopPictureInPicture()
+        return
+      }
+      if let pip, pip.isPictureInPicturePossible {
+        pip.startPictureInPicture()
+        return
+      }
+      // Not possible right now (the controller can go stale once the picture has been taken off
+      // screen for background audio): make a fresh one and start as soon as it's ready.
+      pipWanted = true
+      if let view { makePictureInPicture(for: view) }
+      Task { [weak self] in
+        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        self?.pipWanted = false
+      }
     }
 
     // MARK: View, Picture in Picture, background audio
@@ -656,6 +666,10 @@
       guard self.view !== view else { return }
       self.view = view
       if !detachedForBackground { view.player = player }
+      makePictureInPicture(for: view)
+    }
+
+    private func makePictureInPicture(for view: IVSPlayerView) {
       guard AVPictureInPictureController.isPictureInPictureSupported(),
         let pip = AVPictureInPictureController(ivsPlayerLayer: view.playerLayer)
       else { return }
@@ -666,11 +680,35 @@
         guard let controller = self else { return }
         Task { @MainActor in controller.pictureInPictureActive = active }
       }
+      pipPossibleObservation = pip.observe(\.isPictureInPicturePossible, options: [.new]) { [weak self] pip, _ in
+        guard pip.isPictureInPicturePossible, let controller = self else { return }
+        Task { @MainActor in
+          guard controller.pipWanted, let current = controller.pip, current.isPictureInPicturePossible,
+            !current.isPictureInPictureActive
+          else { return }
+          controller.pipWanted = false
+          current.startPictureInPicture()
+        }
+      }
       self.pip = pip
     }
 
+    /// Going to the background: Picture in Picture starts on its own as the app goes (when it
+    /// can), so wait a moment before taking the picture away for background audio, which would
+    /// stop it (that's how a swipe home sometimes went to audio instead of PiP).
     private func enteredBackground() {
-      guard !stopped, !suspended, !proxy.pictureInPictureStarting, !(pip?.isPictureInPictureActive ?? false) else { return }
+      backgroundSettleTask?.cancel()
+      backgroundSettleTask = Task { [weak self] in
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        guard let controller = self, !Task.isCancelled else { return }
+        controller.settleInBackground()
+      }
+    }
+
+    private func settleInBackground() {
+      guard !stopped, !suspended, UIApplication.shared.applicationState == .background,
+        !proxy.pictureInPictureStarting, !(pip?.isPictureInPictureActive ?? false)
+      else { return }
       if AppSettings.shared.backgroundAudio {
         // Keep the sound: take the picture off screen, and if it stays in the background a while,
         // switch to the audio-only rendition (saves data and battery while only listening).
@@ -699,12 +737,16 @@
     }
 
     private func enteringForeground() {
+      backgroundSettleTask?.cancel()
+      backgroundSettleTask = nil
       audioOnlyTask?.cancel()
       audioOnlyTask = nil
       guard !stopped, !suspended else { return }
       if detachedForBackground {
         detachedForBackground = false
         view?.player = player
+        // A fresh PiP controller for the picture that's back (the old one could stop working).
+        if let view, !(pip?.isPictureInPictureActive ?? false) { makePictureInPicture(for: view) }
       }
       if audioOnlyForBackground {
         // Back to the picture without stopping the sound to rebuffer.

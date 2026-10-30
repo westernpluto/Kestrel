@@ -79,6 +79,8 @@ final class AppSettings: ObservableObject {
   @Published var autoQuality: Bool { didSet { defaults.set(autoQuality, forKey: "autoQuality") } }
   /// Through an ad-free server: move the stream to Twitch's servers near you when they accept it.
   @Published var nearbyServers: Bool { didSet { defaults.set(nearbyServers, forKey: "nearbyServers") } }
+  /// Upscale the picture with MetalFX (see VideoUpscaler).
+  @Published var upscale: Bool { didSet { defaults.set(upscale, forKey: "upscale") } }
   // The user's own HTTP proxy (AdBlocking.customProxy).
   @Published var proxyHost: String { didSet { defaults.set(proxyHost, forKey: "proxyHost"); applyProxy() } }
   @Published var proxyPort: String { didSet { defaults.set(proxyPort, forKey: "proxyPort"); applyProxy() } }
@@ -110,6 +112,7 @@ final class AppSettings: ObservableObject {
     chatFontSize = defaults.double(forKey: "chatFontSize")
     autoQuality = defaults.bool(forKey: "autoQuality")
     nearbyServers = defaults.bool(forKey: "nearbyServers")
+    upscale = defaults.bool(forKey: "upscale")
     proxyHost = defaults.string(forKey: "proxyHost") ?? ""
     proxyPort = defaults.string(forKey: "proxyPort") ?? ""
     proxyUsername = defaults.string(forKey: "proxyUsername") ?? ""
@@ -236,12 +239,14 @@ enum AppTab: Hashable {
 enum Route: Hashable {
   case channel(Channel)
   case category(Category)
+  case recordings
 
   /// Same page, even if the channel's details changed since.
   var key: String {
     switch self {
     case .channel(let channel): return "channel-" + channel.id
     case .category(let category): return "category-" + category.id
+    case .recordings: return "recordings"
     }
   }
 }

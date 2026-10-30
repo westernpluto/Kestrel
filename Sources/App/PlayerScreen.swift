@@ -76,9 +76,22 @@ struct ApplePlayerSurface: UIViewRepresentable {
 
     deinit { tokens.forEach(NotificationCenter.default.removeObserver) }
 
-    /// Taking the player off the layer keeps the sound going in the background.
+    private var settleWork: DispatchWorkItem?
+
+    /// Taking the player off the layer keeps the sound going in the background. Picture in
+    /// Picture starts on its own as the app goes (when it can), so this waits a moment first:
+    /// taking the picture away right away stopped it.
     private func enteredBackground() {
-      guard !pictureInPicture, player?.currentItem != nil else { return }
+      settleWork?.cancel()
+      let work = DispatchWorkItem { [weak self] in self?.settleInBackground() }
+      settleWork = work
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
+    }
+
+    private func settleInBackground() {
+      guard UIApplication.shared.applicationState == .background, !pictureInPicture,
+        !(pip?.isPictureInPictureActive ?? false), player?.currentItem != nil
+      else { return }
       if AppSettings.shared.backgroundAudio {
         detached = true
         view?.playerLayer.player = nil
@@ -88,6 +101,8 @@ struct ApplePlayerSurface: UIViewRepresentable {
     }
 
     private func enteringForeground() {
+      settleWork?.cancel()
+      settleWork = nil
       guard detached else { return }
       detached = false
       view?.playerLayer.player = player
@@ -362,12 +377,12 @@ struct PlayerLayout: Equatable {
   ///   - chatOpen: phone: landscape chat shown; large window: not in full screen.
   ///   - cameraOnLeft: landscape only; nil = unknown (keep clear on both sides).
   ///   - large: a large window (see `large`).
-  ///   - videoInMiddle: large window, landscape: the video halfway down its column (info bar above
-  ///     it, details below) instead of at the top.
+  ///   - theater: large window, landscape: just the video (halfway down its column) and chat, with
+  ///     no info bar or details.
   ///   - chatOverVideo: phone landscape: chat over the video (which then gets the whole screen).
   init(
     safe: CGSize, insets: EdgeInsets, keyboard: CGFloat, chatOpen: Bool, chatWidth: CGFloat, cameraOnLeft: Bool?,
-    large: Bool = false, videoInMiddle: Bool = false, chatOverVideo: Bool = false
+    large: Bool = false, theater: Bool = false, chatOverVideo: Bool = false
   ) {
     landscape = safe.width > safe.height
     self.large = large
@@ -424,21 +439,12 @@ struct PlayerLayout: Equatable {
       let textLeft = max(columnLeft, 0)
       let textWidth = min(columnRight, safe.width) - textLeft
       let windowBottom = safe.height + insets.bottom
-      // In the middle: halfway down, but with the info bar fitting above it (inside the safe area).
-      let middleTop = max(((windowHeight - videoHeight) / 2).rounded(), insets.top + Self.infoHeight)
-      if videoInMiddle, middleTop + videoHeight <= windowHeight {
-        let videoRect = CGRect(x: columnLeft, y: windowTop + middleTop, width: column, height: videoHeight)
-        let infoRect = CGRect(x: textLeft, y: videoRect.minY - Self.infoHeight, width: textWidth, height: Self.infoHeight)
-        video = videoRect
-        info = infoRect
-        // The details below the video, or above the info bar if they only fit there.
-        let below = windowBottom - videoRect.maxY
-        let above = infoRect.minY
-        if below >= 80 {
-          details = CGRect(x: textLeft, y: videoRect.maxY, width: textWidth, height: below)
-        } else if above >= 80 {
-          details = CGRect(x: textLeft, y: 0, width: textWidth, height: above)
-        }
+      if theater {
+        // Theater: the stream and chat, nothing else; the video halfway down its column.
+        let fullHeight = (column * 9 / 16).rounded()
+        let height = min(fullHeight, windowHeight)
+        video = CGRect(x: columnLeft, y: windowTop + ((windowHeight - height) / 2).rounded(), width: column, height: height)
+        info = nil
       } else {
         video = CGRect(x: columnLeft, y: windowTop, width: column, height: videoHeight)
         info = CGRect(x: textLeft, y: video.maxY, width: textWidth, height: Self.infoHeight)
@@ -627,8 +633,8 @@ struct PlayerScreen: View {
   @AppStorage("landscapeChat") private var landscapeChat = true
   /// Landscape chat width, as a share of the screen width (drag the chat's edge to change it).
   @AppStorage("landscapeChatShare") private var chatShare = 0.32
-  /// Large window, landscape: the video halfway down its column instead of at the top.
-  @AppStorage("largeVideoMiddle") private var largeVideoMiddle = false
+  /// Large window, landscape: theater mode (just the stream and chat).
+  @AppStorage("largeTheater") private var theater = false
   /// Phone landscape: chat over the video instead of beside it.
   @AppStorage("chatOverVideo") private var chatOverVideo = false
   @State private var resizingFrom: CGFloat? = nil
@@ -660,12 +666,12 @@ struct PlayerScreen: View {
         safe: geometry.size, insets: insets, keyboard: keyboard.overlap, chatOpen: chatOpen,
         chatWidth: resizedWidth ?? screenWidth * chatShare,
         cameraOnLeft: landscape && !large ? (InterfaceOrientationObserver.cameraOnLeftNow ?? orientation.cameraOnLeft) : nil,
-        large: large, videoInMiddle: largeVideoMiddle, chatOverVideo: chatOverVideo)
+        large: large, theater: theater, chatOverVideo: chatOverVideo)
       // The layout choice the gear menu offers here, if any.
       let layoutToggle: LayoutToggle? =
         landscape && chatOpen
         ? (large
-          ? LayoutToggle(title: "Video in the middle", systemImage: "align.vertical.center", isOn: largeVideoMiddle)
+          ? LayoutToggle(title: "Theater mode", systemImage: "theatermasks", isOn: theater)
           : LayoutToggle(title: "Chat over video", systemImage: "text.bubble", isOn: chatOverVideo))
         : nil
       let progress = layout.fullScreen ? 0 : (dragProgress ?? (app.playerMinimized ? 1 : 0))
@@ -727,7 +733,7 @@ struct PlayerScreen: View {
           layoutToggle: layoutToggle,
           setLayoutToggle: { on in
             withAnimation(Self.spring) {
-              if large { largeVideoMiddle = on } else { chatOverVideo = on }
+              if large { theater = on } else { chatOverVideo = on }
             }
           },
           toggleChat: {

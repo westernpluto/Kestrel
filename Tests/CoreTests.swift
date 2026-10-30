@@ -1136,6 +1136,50 @@ func testMasterClock() {
   check(LowLatencyPlaylist.advancingClock("#EXTM3U\nv/0.m3u8\n", by: 5) == "#EXTM3U\nv/0.m3u8\n")
 }
 
+func testStartingAtNewest() {
+  let text = """
+    #EXTM3U
+    #EXT-X-VERSION:3
+    #EXT-X-TARGETDURATION:6
+    #EXT-X-MEDIA-SEQUENCE:100
+    #EXT-X-TWITCH-ELAPSED-SECS:200.000
+    #EXT-X-PROGRAM-DATE-TIME:2026-10-30T01:00:00.000Z
+    #EXTINF:2.000,live
+    https://edge/a.ts
+    #EXT-X-PROGRAM-DATE-TIME:2026-10-30T01:00:02.000Z
+    #EXTINF:2.000,live
+    https://edge/b.ts
+    #EXT-X-TWITCH-PREFETCH:https://edge/c.ts
+    #EXT-X-TWITCH-PREFETCH:https://edge/d.ts
+
+    """
+  guard let trimmed = LowLatencyPlaylist.startingAtNewest(text) else {
+    check(false, "no trim")
+    return
+  }
+  check(trimmed.contains("#EXT-X-MEDIA-SEQUENCE:102"), trimmed)
+  check(trimmed.contains("#EXT-X-TWITCH-ELAPSED-SECS:200.000"), trimmed)
+  check(trimmed.contains("#EXT-X-PROGRAM-DATE-TIME:2026-10-30T01:00:04.000Z"), trimmed)
+  check(trimmed.contains("#EXTINF:2.000,live\nhttps://edge/c.ts\n#EXT-X-TWITCH-PREFETCH:https://edge/d.ts"), trimmed)
+  check(!trimmed.contains("a.ts") && !trimmed.contains("b.ts"), trimmed)
+  // Nothing to trim to without prefetch hints.
+  check(LowLatencyPlaylist.startingAtNewest(text.replacingOccurrences(of: "#EXT-X-TWITCH-PREFETCH:", with: "#X:")) == nil)
+}
+
+func testRecordingPlaylist() {
+  let entries: [(file: String, duration: Double, discontinuity: Bool, map: String?)] = [
+    ("000001.ts", 2.0, false, nil), ("000002.ts", 2.0, false, nil), ("000003.ts", 1.5, true, nil),
+  ]
+  let live = StreamRecorder.playlistText(entries: entries, ended: false)
+  check(live.contains("#EXT-X-PLAYLIST-TYPE:EVENT") && !live.contains("ENDLIST"), live)
+  check(live.contains("#EXTINF:2.000,\n000002.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:1.500,\n000003.ts"), live)
+  check(live.contains("#EXT-X-TARGETDURATION:2"), live)
+  let done = StreamRecorder.playlistText(entries: entries, ended: true)
+  check(done.contains("#EXT-X-PLAYLIST-TYPE:VOD") && done.hasSuffix("#EXT-X-ENDLIST\n"), done)
+  check(StreamProxy.isPlainName("000001.ts") && StreamProxy.isPlainName("ab-12_3"))
+  check(!StreamProxy.isPlainName("..") && !StreamProxy.isPlainName("a/b") && !StreamProxy.isPlainName(".hidden"))
+}
+
 func testAdFreeProxy() {
   let url = AdFreeProxy.masterURL(host: "eu.luminous.dev", login: "SomeOne", codecs: "h265,h264", lowLatency: true)!
   check(url.absoluteString.hasPrefix("https://eu.luminous.dev/live/someone?") && url.query!.contains("fast_bread=true"), "\(url)")
@@ -1190,6 +1234,8 @@ testLowLatencySession()
 testLiveCatchUp()
 testSteadyAutoQuality()
 testMasterClock()
+testStartingAtNewest()
+testRecordingPlaylist()
 testMediaParsing()
 testAdTimeline()
 testTimelineAndRender()
