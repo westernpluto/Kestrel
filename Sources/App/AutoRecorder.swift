@@ -124,8 +124,11 @@ final class AutoRecorder: ObservableObject {
     scheduleBackgroundCheck()
   }
 
-  /// Whether Kestrel keeps itself running in the background right now.
-  private var wantsKeepAlive: Bool { runInBackground && (!rules.isEmpty || RecordingStore.shared.hasActive) }
+  /// Whether Kestrel keeps itself running in the background right now: for scheduled channels
+  /// and recordings being made, or for go-live alerts (Keep checking in the background).
+  private var wantsKeepAlive: Bool {
+    (runInBackground && (!rules.isEmpty || RecordingStore.shared.hasActive)) || LiveNotifier.shared.keepsRunning
+  }
 
   /// Starts or stops running in the background, as needed (only matters in the background).
   func updateKeepAlive() {
@@ -232,7 +235,7 @@ final class BackgroundKeepAlive {
       self.player = player
       running = true
       observe()
-      ActivityLog.shared.add("Running in the background for recordings")
+      ActivityLog.shared.add("Running in the background (go-live alerts and recordings carry on)")
       return true
     } catch {
       ActivityLog.shared.add("Couldn't keep running in the background (\(error.localizedDescription))")

@@ -1,7 +1,9 @@
 // Go-live alerts for the channels you follow. A sideloaded app has no push server, so Kestrel
-// checks by itself: every minute while it's open or playing in the background, and when it's
-// closed, whenever iOS lets it refresh in the background (iOS decides how often). New streams
-// become notifications on the iPhone; tapping one opens the stream.
+// checks by itself, every minute while it runs. iOS pauses an app soon after it leaves the
+// screen, so Keep checking in the background keeps Kestrel running (silently, see
+// BackgroundKeepAlive) and the checks going with the phone locked; without it, iOS only lets it
+// check now and then (Background App Refresh). New streams become notifications; tapping one
+// opens the stream. (Instant alerts through ntfy work even with Kestrel closed: InstantAlerts.)
 
 import BackgroundTasks
 import Foundation
@@ -16,6 +18,16 @@ final class LiveNotifier: NSObject, ObservableObject {
 
   @Published private(set) var enabled: Bool
   @Published private(set) var permission: UNAuthorizationStatus = .notDetermined
+  /// Keep Kestrel running in the background so the checks carry on every minute (see the top).
+  @Published var backgroundChecks: Bool {
+    didSet {
+      defaults.set(backgroundChecks, forKey: "liveAlerts.background")
+      AutoRecorder.shared.updateKeepAlive()
+    }
+  }
+
+  /// Kestrel should stay running in the background for these alerts.
+  var keepsRunning: Bool { enabled && backgroundChecks }
 
   private let defaults = UserDefaults.standard
   /// Channels seen live in the last complete check.
@@ -25,9 +37,13 @@ final class LiveNotifier: NSObject, ObservableObject {
   private var seeded: Bool
   private var timer: Timer?
   private var lastCheck = Date.distantPast
+  /// The last complete look at who's live (to tell a catch-up after a pause from a regular check).
+  private var lastObserved: Date
 
   private override init() {
     enabled = defaults.bool(forKey: "liveAlerts.enabled")
+    backgroundChecks = defaults.object(forKey: "liveAlerts.background") as? Bool ?? true
+    lastObserved = defaults.object(forKey: "liveAlerts.lastObserved") as? Date ?? .distantPast
     knownLive = Set(defaults.stringArray(forKey: "liveAlerts.known") ?? [])
     announced = (defaults.dictionary(forKey: "liveAlerts.announced") as? [String: Date]) ?? [:]
     seeded = defaults.bool(forKey: "liveAlerts.seeded")
@@ -70,6 +86,7 @@ final class LiveNotifier: NSObject, ObservableObject {
       startPolling()
       await FollowingStore.shared.refresh(force: true)
       scheduleBackgroundCheck()
+      AutoRecorder.shared.updateKeepAlive()
     } else {
       enabled = false
       defaults.set(false, forKey: "liveAlerts.enabled")
@@ -77,6 +94,7 @@ final class LiveNotifier: NSObject, ObservableObject {
       timer = nil
       BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskID)
       ActivityLog.shared.add("Go-live alerts off")
+      AutoRecorder.shared.updateKeepAlive()
     }
   }
 
@@ -119,17 +137,34 @@ final class LiveNotifier: NSObject, ObservableObject {
   func observe(live: [LiveStream], complete: Bool) {
     guard enabled, complete else { return }
     let now = Date()
+    let gap = now.timeIntervalSince(lastObserved)
+    lastObserved = now
+    defaults.set(now, forKey: "liveAlerts.lastObserved")
     let ids = Set(live.map(\.channel.id))
     announced = announced.filter { now.timeIntervalSince($0.value) < 24 * 3600 }
     if seeded {
       let watching = AppModel.shared.playing
+      var fresh: [LiveStream] = []
       for stream in live where !knownLive.contains(stream.channel.id) && announced[stream.id] == nil {
         if case .live(let channel)? = watching, channel.id == stream.channel.id { continue }
         // Started a while ago (seen late, e.g. after the phone was off): still worth a heads-up,
         // but not for streams that have been on for hours.
         if let started = stream.startedAt, now.timeIntervalSince(started) > 3 * 3600 { continue }
         announced[stream.id] = now
-        post(stream)
+        fresh.append(stream)
+      }
+      if UIApplication.shared.applicationState == .active, gap > 150 {
+        // Catching up after Kestrel was paused, with Kestrel open in front of you: Following
+        // shows who's live, and a pile of alerts at once would only be noise.
+        if !fresh.isEmpty {
+          ActivityLog.shared.add(
+            "Went live while Kestrel was paused: \(fresh.map(\.channel.name).joined(separator: ", ")) (no alerts: it's open)")
+        }
+      } else if fresh.count >= 3 {
+        // Several at once (iOS let Kestrel check after a while): one alert for all of them.
+        postSummary(fresh)
+      } else {
+        fresh.forEach(post)
       }
     } else {
       seeded = true
@@ -162,6 +197,22 @@ final class LiveNotifier: NSObject, ObservableObject {
       try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
     }
     ActivityLog.shared.add("Go-live alert: \(stream.channel.name)")
+  }
+
+  private func postSummary(_ streams: [LiveStream]) {
+    let names = streams.map(\.channel.name)
+    let content = UNMutableNotificationContent()
+    content.title = "\(streams.count) channels went live"
+    content.body =
+      names.count > 4
+      ? names.prefix(3).joined(separator: ", ") + " and \(names.count - 3) more"
+      : ListFormatter.localizedString(byJoining: names)
+    content.sound = .default
+    content.threadIdentifier = "live"
+    content.userInfo = ["following": true]
+    UNUserNotificationCenter.current().add(
+      UNNotificationRequest(identifier: "live-summary-\(UUID().uuidString)", content: content, trigger: nil))
+    ActivityLog.shared.add("Go-live alert: \(names.joined(separator: ", "))")
   }
 
   /// The streamer's picture on the notification (it has to be a file).
@@ -219,7 +270,15 @@ extension LiveNotifier: UNUserNotificationCenterDelegate {
     withCompletionHandler completionHandler: @escaping () -> Void
   ) {
     let info = response.notification.request.content.userInfo
-    if info["recordingID"] is String {
+    if info["following"] != nil {
+      // Several channels went live: the Following list.
+      DispatchQueue.main.async {
+        let app = AppModel.shared
+        app.playerMinimized = app.playing != nil
+        app.tab = .following
+        app.followingPath = []
+      }
+    } else if info["recordingID"] is String {
       // A recording started or finished: the recordings list.
       DispatchQueue.main.async {
         let app = AppModel.shared

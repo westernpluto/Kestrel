@@ -385,8 +385,22 @@ struct PlayerLayout: Equatable {
   var chatOnLeft = false
   /// Chat lies over the video (phone landscape, by choice) instead of beside it.
   var chatOverlay = false
+  /// Where the picture goes inside `video` (unless zoomed to fill): iPhone Duo's outer screen keeps
+  /// it clear of the camera, against the opposite edge.
+  var pictureInsets = EdgeInsets()
+  /// Extra room the top bar, or the controls' bottom row, keeps from a camera in its corner.
+  var topBarExtra = EdgeInsets()
+  var bottomRowExtra = EdgeInsets()
 
   static let infoHeight: CGFloat = 62
+  /// iPhone Duo's outer screen: iOS keeps a status strip this wide (84 pt) clear along its right
+  /// edge (held upright), but only the camera (at its top) and the clock and signal under it are
+  /// in it. Wider than any iPhone's landscape inset for the Dynamic Island (59–62 pt).
+  static let cornerStripWidth: CGFloat = 70
+  /// The camera's corner, from the corner: along the strip's edge × away from it (pill plus air).
+  static let cornerCamera = CGSize(width: 140, height: 74)
+  /// Held upright: how far down the strip its clock and signal reach (below that it's empty).
+  static let stripContentBottom: CGFloat = 250
   /// Narrowest landscape chat on a phone (iPhone Duo's outer screen is short of width).
   static let minPhoneChat: CGFloat = 200
   /// How far from the screen edge the Dynamic Island reaches in landscape (plus a little air).
@@ -502,12 +516,22 @@ struct PlayerLayout: Equatable {
         }
       }
       let videoWidth = videoHeight < fullHeight ? (videoHeight * 16 / 9).rounded() : videoSpan
-      video = CGRect(x: videoLeft + ((videoSpan - videoWidth) / 2).rounded(), y: 0, width: videoWidth, height: videoHeight)
+      // Shrunk for the keyboard: within the safe area when it fits (clear of iPhone Duo's camera).
+      let videoX =
+        videoWidth < videoSpan && videoWidth <= width
+        ? ((width - videoWidth) / 2).rounded() : videoLeft + ((videoSpan - videoWidth) / 2).rounded()
+      video = CGRect(x: videoX, y: 0, width: videoWidth, height: videoHeight)
       controls = EdgeInsets(
         top: 2, leading: max(0, -video.minX) + 6, bottom: 2, trailing: max(0, video.maxX - width) + 6)
-      info = showInfo ? CGRect(x: 0, y: videoHeight, width: width, height: Self.infoHeight) : nil
+      // iPhone Duo's outer screen: below the status strip's clock and signal, the strip is empty,
+      // so the info bar and chat run the window's whole width (iOS keeps all of it clear).
+      let sideStrip = !large && max(insets.leading, insets.trailing) > Self.cornerStripWidth
+      let fullWidthFrom = Self.stripContentBottom - insets.top
+      let rowLeft: (CGFloat) -> CGFloat = { y in sideStrip && y >= fullWidthFrom ? windowLeft : 0 }
+      let rowWidth: (CGFloat) -> CGFloat = { y in sideStrip && y >= fullWidthFrom ? windowRight - windowLeft : width }
+      info = showInfo ? CGRect(x: rowLeft(videoHeight), y: videoHeight, width: rowWidth(videoHeight), height: Self.infoHeight) : nil
       let top = videoHeight + (showInfo ? Self.infoHeight : 0)
-      panel = CGRect(x: 0, y: top, width: width, height: max(0, windowBottom - top))
+      panel = CGRect(x: rowLeft(top), y: top, width: rowWidth(top), height: max(0, windowBottom - top))
       panelPadding = EdgeInsets(top: 0, leading: 0, bottom: bottomPad, trailing: 0)
       panelVisible = true
       return
@@ -521,9 +545,73 @@ struct PlayerLayout: Equatable {
     let height = safe.height + insets.top + insets.bottom
     let chat = min(max(chatWidth, Self.minPhoneChat), screenWidth * 0.5).rounded()
     // An iPhone's landscape inset is a little wider than its Dynamic Island reaches; a wider one
-    // (iPhone Duo's status strip) is kept clear in full.
+    // (iPhone Duo's status strip) is kept clear in full unless its camera's corner is known.
     let sideInset = max(insets.leading, insets.trailing)
     let clearance = sideInset > 62 ? sideInset : min(Self.cameraClearance, sideInset)
+    // iPhone Duo's outer screen: its camera (top right, held upright) ends up in a corner along
+    // the top or bottom edge, not down a side: the top left with the phone's top turned left, the
+    // bottom right with it turned right. iOS keeps a whole side clear for it; only that corner needs
+    // to be.
+    let cornerCameraTop: Bool? =
+      sideInset > Self.cornerStripWidth
+      ? (cameraOnLeft ?? (insets.leading > insets.trailing + 1 ? true : insets.trailing > insets.leading + 1 ? false : nil))
+      : nil
+    if let cameraTop = cornerCameraTop {
+      chatOnLeft = !cameraTop
+      let bottomRow = insets.bottom + 4
+      if chatOpen && !chatOverVideo {
+        // Chat beside the video, on the side away from the camera's corner; the picture sits
+        // halfway down, the bars in the room above and below it.
+        if chatOnLeft {
+          panel = CGRect(x: left, y: top, width: chat, height: height)
+          panelPadding = EdgeInsets(top: insets.top + 6, leading: 12, bottom: bottomPad, trailing: 0)
+          video = CGRect(x: panel.maxX, y: top, width: right - panel.maxX, height: height)
+        } else {
+          panel = CGRect(x: right - chat, y: top, width: chat, height: height)
+          panelPadding = EdgeInsets(top: insets.top + 6, leading: 0, bottom: bottomPad, trailing: 12)
+          video = CGRect(x: left, y: top, width: panel.minX - left, height: height)
+        }
+        controls = EdgeInsets(top: insets.top + 8, leading: 10, bottom: bottomRow, trailing: 10)
+        panelVisible = true
+      } else {
+        // The picture as wide as the screen, against the edge away from the camera; the room left
+        // on the camera's side takes the top bar (camera on top) instead of covering the picture.
+        video = CGRect(x: left, y: top, width: screenWidth, height: height)
+        let pictureHeight = min(height, (screenWidth * 9 / 16).rounded())
+        let room = max(0, height - pictureHeight)
+        pictureInsets =
+          cameraTop
+          ? EdgeInsets(top: room, leading: 0, bottom: 0, trailing: 0) : EdgeInsets(top: 0, leading: 0, bottom: room, trailing: 0)
+        let barTop = cameraTop ? max(insets.top + 6, ((room - 40) / 2).rounded()) : insets.top + 8
+        if chatOpen {
+          chatOverlay = true
+          panel = chatOnLeft
+            ? CGRect(x: left, y: top, width: chat, height: height) : CGRect(x: right - chat, y: top, width: chat, height: height)
+          panelPadding = EdgeInsets(
+            top: insets.top + 6, leading: chatOnLeft ? 12 : 0, bottom: bottomPad, trailing: chatOnLeft ? 0 : 12)
+          controls = EdgeInsets(
+            top: barTop, leading: chatOnLeft ? chat + 8 : 10, bottom: bottomRow, trailing: chatOnLeft ? 10 : chat + 8)
+          panelVisible = true
+        } else {
+          controls = EdgeInsets(top: barTop, leading: 10, bottom: bottomRow, trailing: 10)
+          panel = chatOnLeft
+            ? CGRect(x: left - chat - 1, y: top, width: chat, height: height) : CGRect(x: right + 1, y: top, width: chat, height: height)
+          panelPadding = EdgeInsets(
+            top: insets.top + 6, leading: chatOnLeft ? 12 : 0, bottom: bottomPad, trailing: chatOnLeft ? 0 : 12)
+          panelVisible = false
+        }
+      }
+      // Only the camera's corner is kept clear: the top bar starts after it (camera top left), or
+      // the bottom row of controls ends before it (camera bottom right).
+      if cameraTop {
+        if video.minX <= left + 1 {
+          topBarExtra = EdgeInsets(top: 0, leading: max(0, Self.cornerCamera.width - controls.leading), bottom: 0, trailing: 0)
+        }
+      } else if video.maxX >= right - 1 {
+        bottomRowExtra = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: max(0, Self.cornerCamera.width - controls.trailing))
+      }
+      return
+    }
     // Camera on the right: chat goes left. Unknown: chat right, clear of a camera on either side.
     chatOnLeft = cameraOnLeft == false
     let cameraOnChatSide = cameraOnLeft == nil
@@ -773,6 +861,8 @@ struct PlayerScreen: View {
 
         PlayerVideoArea(
           model: model, landscape: layout.fullScreen, chatOpen: chatOpen, controlInsets: layout.controls,
+          pictureInsets: progress == 0 ? layout.pictureInsets : EdgeInsets(),
+          topBarExtra: layout.topBarExtra, bottomRowExtra: layout.bottomRowExtra,
           chromeVisible: progress == 0, minimized: app.playerMinimized, chatOnLeft: layout.chatOnLeft,
           viewersShownElsewhere: layout.details != nil,
           showsStreamer: layout.large && layout.landscape && !layout.fullScreen && layout.info == nil,
@@ -804,6 +894,7 @@ struct PlayerScreen: View {
               OrientationLock.force(.portrait)
             }
           },
+          keyboardUp: keyboard.overlap > 0,
           onPull: { dy in
             if dragProgress == nil { dismissKeyboard() }
             dragProgress = min(1, max(0, dy / pullDistance))
@@ -866,9 +957,11 @@ struct PlayerScreen: View {
       .opacity(closing ? 0 : 1)
       .scaleEffect(closing ? 0.96 : 1, anchor: .bottomTrailing)
       // A large window held sideways hides the status bar too (as an iPhone does in landscape):
-      // on iPhone Duo's inner display it runs down one side of the video.
-      .statusBarHidden((layout.fullScreen || (layout.large && layout.landscape)) && progress == 0)
-      .persistentSystemOverlays(layout.fullScreen && progress == 0 ? .hidden : .automatic)
+      // on iPhone Duo's inner display it runs down one side of the video. It comes back once the
+      // player is actually shrinking (not while a finger is still deciding): bringing it back
+      // re-lays out the window, which cut the keyboard's slide short when a swipe put it away.
+      .statusBarHidden((layout.fullScreen || (layout.large && layout.landscape)) && !app.playerMinimized)
+      .persistentSystemOverlays(layout.fullScreen && !app.playerMinimized ? .hidden : .automatic)
     }
     .ignoresSafeArea(.keyboard)
     .preferredColorScheme(.dark)

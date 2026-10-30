@@ -654,6 +654,10 @@
       if player.muted != wanted { player.muted = wanted }
     }
 
+    func setVolume(_ volume: Float) {
+      if player.volume != volume { player.volume = volume }
+    }
+
     func setMaxHeight(_ height: Int?) {
       guard height != maxHeight else { return }
       maxHeight = height

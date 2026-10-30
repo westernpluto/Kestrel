@@ -12,6 +12,11 @@ struct PlayerVideoArea: View {
   var landscape: Bool
   var chatOpen: Bool
   var controlInsets: EdgeInsets
+  /// Where the picture sits in the area (iPhone Duo's outer screen: clear of the camera).
+  var pictureInsets = EdgeInsets()
+  /// Extra room for the top bar or the bottom row, from a camera in their corner.
+  var topBarExtra = EdgeInsets()
+  var bottomRowExtra = EdgeInsets()
   /// False while the player shrinks into (or is) the mini player.
   var chromeVisible: Bool = true
   /// In the mini player (its own overlay takes the touches).
@@ -32,6 +37,8 @@ struct PlayerVideoArea: View {
   /// Full screen: on a phone the player turns; in a large window the video takes the whole window.
   var enterFullScreen: () -> Void
   var exitFullScreen: () -> Void
+  /// The keyboard is up: a swipe down on the video just puts it away (no pull).
+  var keyboardUp = false
   /// Pulling the video down (portrait): how far, then where it was let go (and where it was headed).
   var onPull: (CGFloat) -> Void = { _ in }
   var onPullEnd: (CGFloat, CGFloat) -> Void = { _, _ in }
@@ -42,6 +49,8 @@ struct PlayerVideoArea: View {
   /// A pinch also moves the fingers; don't read it as a swipe.
   @State private var lastPinch = Date.distantPast
   @State private var pulling = false
+  /// This swipe put the keyboard away; the rest of it does nothing.
+  @State private var swipeTookKeyboard = false
 
   /// Full screen with chat put away: a small see-through chat can lie over the video instead.
   private var overlayAvailable: Bool { landscape && !chatOpen && chat != nil }
@@ -49,8 +58,12 @@ struct PlayerVideoArea: View {
   var body: some View {
     ZStack {
       Color.black
-      poster
-      surface
+      Group {
+        poster
+        surface
+      }
+      .padding(model.fillsScreen ? EdgeInsets() : pictureInsets)
+      .animation(.easeInOut(duration: 0.25), value: model.fillsScreen)
       // Gestures live on this layer, under everything that can be tapped.
       Color.black.opacity(0.001)
         .contentShape(Rectangle())
@@ -62,9 +75,11 @@ struct PlayerVideoArea: View {
         .allowsHitTesting(!minimized)
       if let audioOnly = model.audioOnly, model.phase == .playing, !model.coveringAd {
         AudioOnlyCard(state: audioOnly, compact: !landscape && !chatOpen)
+          .padding(pictureInsets)
           .transition(.opacity)
       }
       statusOverlay
+        .padding(pictureInsets)
         .animation(.easeInOut(duration: 0.25), value: model.phase)
         .animation(.easeInOut(duration: 0.2), value: model.coveringAd)
       if overlayAvailable, chatOverlay, chromeVisible, let chat {
@@ -79,7 +94,7 @@ struct PlayerVideoArea: View {
           .overlay(alignment: .topLeading) {
             StatsOverlay(lines: model.stats, close: { settings.showVideoStats = false })
               .padding(.top, controlsShown ? 44 : 0)
-              .padding(.leading, controlInsets.leading)
+              .padding(.leading, controlInsets.leading + topBarExtra.leading)
               .padding(.top, controlInsets.top)
           }
           .clipped()
@@ -87,7 +102,8 @@ struct PlayerVideoArea: View {
       }
       PlayerControls(
         model: model, landscape: landscape, chatOpen: chatOpen, visible: controlsShown && chromeVisible && !pulling,
-        insets: controlInsets, viewersShownElsewhere: viewersShownElsewhere, showsStreamer: showsStreamer,
+        insets: controlInsets, pictureInsets: pictureInsets, topBarExtra: topBarExtra, bottomRowExtra: bottomRowExtra,
+        viewersShownElsewhere: viewersShownElsewhere, showsStreamer: showsStreamer,
         layoutToggle: layoutToggle, setLayoutToggle: setLayoutToggle,
         chatOverlay: overlayAvailable ? chatOverlay : nil,
         setChatOverlay: { on in withAnimation(.easeInOut(duration: 0.2)) { chatOverlay = on } },
@@ -104,7 +120,7 @@ struct PlayerVideoArea: View {
       }
       if let part = model.currentMutedPart, chromeVisible, model.phase == .playing {
         skipMutedNotice(part)
-          .padding(.trailing, controlInsets.trailing + 8)
+          .padding(.trailing, controlInsets.trailing + bottomRowExtra.trailing + 8)
           .padding(.bottom, controlInsets.bottom + (controlsShown ? 78 : 10))
           .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
           .transition(.opacity.combined(with: .move(edge: .bottom)))
@@ -251,14 +267,25 @@ struct PlayerVideoArea: View {
     // Screen coordinates: the video shrinks under the finger while it's pulled.
     DragGesture(minimumDistance: 14, coordinateSpace: .global)
       .onChanged { value in
-        guard !landscape, Date().timeIntervalSince(lastPinch) > 0.5 else { return }
+        guard !landscape, !swipeTookKeyboard, Date().timeIntervalSince(lastPinch) > 0.5 else { return }
         let dx = value.translation.width, dy = value.translation.height
         if pulling || (dy > 8 && dy > abs(dx) * 1.2) {
+          // Typing: a swipe down puts the keyboard away (letting it slide off), rather than
+          // starting to shrink the player under it.
+          if !pulling, keyboardUp {
+            swipeTookKeyboard = true
+            Keyboard.dismiss()
+            return
+          }
           pulling = true
           onPull(max(0, dy))
         }
       }
       .onEnded { value in
+        if swipeTookKeyboard {
+          swipeTookKeyboard = false
+          return
+        }
         let dx = value.translation.width, dy = value.translation.height
         if pulling {
           pulling = false
@@ -367,6 +394,9 @@ struct PlayerControls: View {
   var chatOpen: Bool
   var visible: Bool
   var insets: EdgeInsets
+  var pictureInsets = EdgeInsets()
+  var topBarExtra = EdgeInsets()
+  var bottomRowExtra = EdgeInsets()
   var viewersShownElsewhere = false
   var showsStreamer = false
   var layoutToggle: LayoutToggle? = nil
@@ -395,6 +425,7 @@ struct PlayerControls: View {
       .allowsHitTesting(false)
       VStack(spacing: 0) {
         topBar
+          .padding(topBarExtra)
           .opacity(scrubbing ? 0 : 1)
         Spacer(minLength: 0)
         bottomBar
@@ -423,6 +454,8 @@ struct PlayerControls: View {
             skipButton(10).opacity(model.canSkipForward ? 1 : 0).disabled(!model.canSkipForward)
           }
         }
+        // Centred on the picture, not the area around it.
+        .padding(pictureInsets)
       }
     }
     .foregroundColor(.white)
@@ -568,6 +601,7 @@ struct PlayerControls: View {
           landscape ? exitFullScreen() : enterFullScreen()
         }
       }
+      .padding(bottomRowExtra)
       .font(.caption.monospacedDigit())
       .labelStyle(StatLabelStyle())
       .foregroundColor(.white)

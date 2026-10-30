@@ -63,6 +63,9 @@ struct SettingsView: View {
 
       Section {
         Toggle("Go-live alerts", isOn: Binding(get: { notifier.enabled }, set: { on in Task { await notifier.setEnabled(on) } }))
+        if notifier.enabled {
+          Toggle("Keep checking in the background", isOn: $notifier.backgroundChecks)
+        }
         if notifier.permission == .denied {
           Button("Allow notifications in iOS Settings") {
             if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
@@ -77,7 +80,7 @@ struct SettingsView: View {
         Text("Notifications")
       } footer: {
         Text(
-          "Go-live alerts: a notification when a channel you follow goes live (your Twitch follows and the channels you heart); tap it to watch. Kestrel checks every minute while it's open or playing; once it's closed, iOS decides when it may check (often every 15–30 minutes), so alerts can come late. Instant alerts arrive within about a minute, closed or not, through the ntfy app."
+          "Go-live alerts: a notification when a channel you follow goes live (your Twitch follows and the channels you heart); tap it to watch. Kestrel checks every minute while it runs. iOS pauses apps soon after you leave them, so Keep checking in the background keeps Kestrel running by playing silence mixed in with your other audio (allowed for apps you install yourself, not App Store apps; it uses some battery). If Kestrel is swiped away or the phone restarts, checks stop until it's opened again. Instant alerts arrive within about a minute even then, through the ntfy app."
         )
       }
 

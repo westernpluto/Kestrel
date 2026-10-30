@@ -15,10 +15,14 @@ final class MultiviewModel: ObservableObject {
   }
 
   static let maxTiles = 4
+  static let volumeSteps: [Float] = [1, 0.75, 0.5, 0.25]
 
   @Published private(set) var tiles: [Tile] = []
-  /// The stream being heard (and whose chat shows).
-  @Published private(set) var heardID: String?
+  /// The stream picked last: its chat shows, and it's the big one in the focus layout.
+  @Published private(set) var selectedID: String?
+  /// The streams heard (any number of them, each at its own volume).
+  @Published private(set) var heardIDs: Set<String> = []
+  @Published private(set) var volumes: [String: Float] = [:]
   @Published private(set) var chat: ChatController?
 
   nonisolated init() {}
@@ -29,13 +33,18 @@ final class MultiviewModel: ObservableObject {
     tiles.contains { $0.channel.id == channel.id || $0.channel.login.lowercased() == channel.login.lowercased() }
   }
 
+  func volume(_ id: String) -> Float { volumes[id] ?? 1 }
+
   func add(_ channel: Channel) {
     guard !channel.login.isEmpty, !isFull, !contains(channel) else { return }
     let player = PlayerModel(target: .live(channel))
     player.isTile = true
-    player.setMuted(heardID != nil)
+    // The first one is heard; the others start quiet.
+    let heard = tiles.isEmpty
+    player.setMuted(!heard)
     tiles.append(Tile(channel: channel, player: player))
-    if heardID == nil { listen(to: channel.id) }
+    if heard { heardIDs.insert(channel.id) }
+    if selectedID == nil { select(channel.id) }
     Task { await player.start() }
   }
 
@@ -43,21 +52,31 @@ final class MultiviewModel: ObservableObject {
     guard let index = tiles.firstIndex(where: { $0.id == id }) else { return }
     tiles[index].player.stop()
     tiles.remove(at: index)
-    guard heardID == id else { return }
-    heardID = nil
-    if let first = tiles.first {
-      listen(to: first.id)
-    } else {
-      chat?.stop()
-      chat = nil
+    let wasHeard = heardIDs.remove(id) != nil
+    volumes[id] = nil
+    if selectedID == id {
+      selectedID = nil
+      if let first = tiles.first {
+        select(first.id)
+      } else {
+        chat?.stop()
+        chat = nil
+      }
     }
+    // Don't leave it silent because the one heard went.
+    if wasHeard, heardIDs.isEmpty, let next = selectedID { heardIDs.insert(next) }
+    applySound()
   }
 
-  /// Hear this stream (the others go quiet) and show its chat.
-  func listen(to id: String) {
+  /// Picks a stream: its chat shows (and it's the big one in focus). If only one is heard, the sound
+  /// moves to it too, like a regular multi-stream page; with several heard, they stay as they are.
+  func select(_ id: String) {
     guard let tile = tiles.first(where: { $0.id == id }) else { return }
-    heardID = id
-    for other in tiles { other.player.setMuted(other.id != id) }
+    selectedID = id
+    if heardIDs.count <= 1 {
+      heardIDs = [id]
+      applySound()
+    }
     guard chat?.channel.id != tile.channel.id else { return }
     chat?.stop()
     let next = ChatController(channel: tile.channel)
@@ -65,11 +84,34 @@ final class MultiviewModel: ObservableObject {
     next.start()
   }
 
+  /// Sound on or off for one stream, leaving the others as they are (several can be heard at once).
+  func toggleSound(_ id: String) {
+    if heardIDs.contains(id) { heardIDs.remove(id) } else { heardIDs.insert(id) }
+    applySound()
+  }
+
+  /// Just this one heard.
+  func listenOnly(_ id: String) {
+    heardIDs = [id]
+    applySound()
+    select(id)
+  }
+
+  func setVolume(_ value: Float, for id: String) {
+    volumes[id] = value
+    tiles.first { $0.id == id }?.player.setVolume(value)
+  }
+
+  private func applySound() {
+    for tile in tiles { tile.player.setMuted(!heardIDs.contains(tile.id)) }
+  }
+
   /// Each stream no sharper than its picture is shown (see `MultiviewLayout.heightCap`).
   func fit(heights: [String: CGFloat], scale: CGFloat) {
     for tile in tiles {
       guard let points = heights[tile.id] else { continue }
-      tile.player.setMaxHeight(MultiviewLayout.heightCap(points: points, scale: scale, heard: tile.id == heardID))
+      let featured = tile.id == selectedID || heardIDs.contains(tile.id)
+      tile.player.setMaxHeight(MultiviewLayout.heightCap(points: points, scale: scale, heard: featured))
     }
   }
 
@@ -118,11 +160,16 @@ struct MultiviewScreen: View {
         ForEach(Array(model.tiles.enumerated()), id: \.element.id) { index, tile in
           let rect = index < rects.count ? rects[index] : .zero
           MultiviewTileView(
-            player: tile.player, channel: tile.channel, heard: tile.id == model.heardID,
-            listen: { withAnimation(Self.spring) { model.listen(to: tile.id) } },
+            player: tile.player, channel: tile.channel, heard: model.heardIDs.contains(tile.id),
+            selected: tile.id == model.selectedID, volume: model.volume(tile.id),
+            several: model.heardIDs.count > 1 || (model.heardIDs.count == 1 && !model.heardIDs.contains(tile.id)),
+            select: { withAnimation(Self.spring) { model.select(tile.id) } },
+            toggleSound: { model.toggleSound(tile.id) },
+            listenOnly: { withAnimation(Self.spring) { model.listenOnly(tile.id) } },
+            setVolume: { model.setVolume($0, for: tile.id) },
             makeMain: {
               withAnimation(Self.spring) {
-                model.listen(to: tile.id)
+                model.select(tile.id)
                 focus = true
               }
             },
@@ -222,14 +269,15 @@ struct MultiviewScreen: View {
   private func layout(in size: CGSize) -> [CGRect] {
     let count = model.tiles.count
     if focus, count > 1 {
-      let main = model.tiles.firstIndex { $0.id == model.heardID } ?? 0
+      let main = model.tiles.firstIndex { $0.id == model.selectedID } ?? 0
       return MultiviewLayout.focus(count: count, main: main, in: size)
     }
     return MultiviewLayout.grid(count: count, in: size)
   }
 
   private func capsKey(_ rects: [CGRect]) -> String {
-    zip(model.tiles, rects).map { "\($0.id):\(Int($1.height))" }.joined(separator: ",") + "|\(model.heardID ?? "")"
+    zip(model.tiles, rects).map { "\($0.id):\(Int($1.height))" }.joined(separator: ",")
+      + "|\(model.selectedID ?? "")|\(model.heardIDs.sorted().joined(separator: ","))"
   }
 
   // MARK: Pieces
@@ -296,7 +344,7 @@ struct MultiviewScreen: View {
     VStack(spacing: 12) {
       Image(systemName: "rectangle.split.2x2").font(.system(size: 40, weight: .semibold)).foregroundColor(.accentTeal)
       Text("Watch up to \(MultiviewModel.maxTiles) streams at once").font(.headline)
-      Text("Tap a picture to hear it and see its chat; double-tap to make it the big one.")
+      Text("Tap a picture for its sound and chat, tap a speaker to hear several at once, double-tap to make one the big one.")
         .font(.footnote).foregroundColor(.secondary).multilineTextAlignment(.center)
       Button {
         picking = true
@@ -311,12 +359,20 @@ struct MultiviewScreen: View {
   }
 }
 
-/// One stream in multi-view: the picture, who it is, and whether it's the one being heard.
+/// One stream in multi-view: the picture, who it is, and whether it's heard.
 struct MultiviewTileView: View {
   @ObservedObject var player: PlayerModel
   let channel: Channel
   let heard: Bool
-  var listen: () -> Void
+  /// Its chat is showing (and it's the big one in focus).
+  let selected: Bool
+  let volume: Float
+  /// Another stream is heard too (the menu then offers "only this one").
+  let several: Bool
+  var select: () -> Void
+  var toggleSound: () -> Void
+  var listenOnly: () -> Void
+  var setVolume: (Float) -> Void
   var makeMain: () -> Void
   var openInPlayer: () -> Void
   var remove: () -> Void
@@ -354,24 +410,34 @@ struct MultiviewTileView: View {
     }
     .overlay {
       Rectangle()
-        .strokeBorder(heard ? Color.accentTeal : Color.white.opacity(0.06), lineWidth: heard ? 2 : 1)
+        .strokeBorder(selected ? Color.accentTeal : Color.white.opacity(0.06), lineWidth: selected ? 2 : 1)
         .allowsHitTesting(false)
     }
     .clipped()
     .contentShape(Rectangle())
     .onTapGesture(count: 2, perform: makeMain)
-    .onTapGesture(perform: listen)
+    .onTapGesture(perform: select)
     .contextMenu {
-      if !heard {
-        Button(action: listen) { Label("Listen", systemImage: "speaker.wave.2") }
+      Button(action: toggleSound) {
+        Label(heard ? "Mute" : "Hear it too", systemImage: heard ? "speaker.slash" : "speaker.plus")
       }
+      if several || !heard {
+        Button(action: listenOnly) { Label("Hear only this one", systemImage: "speaker.wave.2") }
+      }
+      Picker(selection: Binding(get: { volume }, set: setVolume)) {
+        ForEach(MultiviewModel.volumeSteps, id: \.self) { step in
+          Text("\(Int(step * 100))%").tag(step)
+        }
+      } label: {
+        Label("Volume", systemImage: "speaker.wave.1")
+      }
+      .pickerStyle(.menu)
       Button(action: makeMain) { Label("Make it the big one", systemImage: "rectangle.inset.topleft.filled") }
       Button(action: openInPlayer) { Label("Watch on its own", systemImage: "play.rectangle") }
       Button(role: .destructive, action: remove) { Label("Remove", systemImage: "xmark") }
     }
-    .accessibilityElement(children: .combine)
-    .accessibilityLabel("\(player.channel?.name ?? channel.name)\(heard ? ", playing sound" : "")")
-    .accessibilityAddTraits(.isButton)
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel("\(player.channel?.name ?? channel.name)\(heard ? ", sound on" : "")")
   }
 
   @ViewBuilder
@@ -412,16 +478,23 @@ struct MultiviewTileView: View {
     }
   }
 
+  /// Who it is, and its sound: tap the speaker to hear it (alongside the others) or mute it.
   private var nameTag: some View {
-    HStack(spacing: 5) {
+    HStack(spacing: 4) {
       Avatar(url: player.channel?.profileImageURL ?? channel.profileImageURL, size: 18)
       Text(player.channel?.name ?? channel.name).font(.caption.weight(.bold)).lineLimit(1)
-      Image(systemName: heard ? "speaker.wave.2.fill" : "speaker.slash.fill")
-        .font(.system(size: 9, weight: .bold))
-        .foregroundColor(heard ? .accentTeal : .white.opacity(0.6))
+      Button(action: toggleSound) {
+        Image(systemName: heard ? (volume < 0.6 ? "speaker.wave.1.fill" : "speaker.wave.2.fill") : "speaker.slash.fill")
+          .font(.system(size: 11, weight: .bold))
+          .foregroundColor(heard ? .accentTeal : .white.opacity(0.65))
+          .frame(width: 30, height: 26)
+          .contentShape(Rectangle())
+      }
+      .buttonStyle(PressableStyle(scale: 0.8))
+      .accessibilityLabel(heard ? "Mute \(channel.name)" : "Hear \(channel.name) too")
     }
     .foregroundColor(.white)
-    .padding(.leading, 3).padding(.trailing, 7).padding(.vertical, 3)
+    .padding(.leading, 3)
     .background(.black.opacity(0.6), in: Capsule())
   }
 }
@@ -498,7 +571,7 @@ struct MultiviewPicker: View {
           Text("Live now")
         } footer: {
           Text(
-            "Up to \(MultiviewModel.maxTiles) streams. Tap a picture to hear it and see its chat, double-tap it to make it the big one, hold it for more. Each picture is fetched only as sharp as it's shown, to spare data."
+            "Up to \(MultiviewModel.maxTiles) streams. Tap a picture for its sound and chat; tap the speaker on a picture to hear it alongside the others (hold a picture for its volume); double-tap to make it the big one. Each picture is fetched only as sharp as it's shown, to spare data."
           )
         }
       }

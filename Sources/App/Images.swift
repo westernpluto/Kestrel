@@ -19,11 +19,22 @@ final class ImagePipeline: @unchecked Sendable {
   /// Cached as a first frame, with the whole animation still decoding.
   private var upgrading: Set<String> = []
   private var failuresLogged: Set<String> = []
+  /// Stills and first frames: what's on screen waits for these.
   private let decodeQueue: OperationQueue = {
     let queue = OperationQueue()
     queue.name = "kestrel.images"
     queue.qualityOfService = .userInitiated
     queue.maxConcurrentOperationCount = max(2, ProcessInfo.processInfo.activeProcessorCount - 2)
+    return queue
+  }()
+  /// Whole animations, on their own two threads: opening the emote picker on a channel with
+  /// hundreds of animated emotes used to fill every decoding thread with long animations, and the
+  /// first frames of the emotes in view queued up behind them.
+  private let animationQueue: OperationQueue = {
+    let queue = OperationQueue()
+    queue.name = "kestrel.images.animations"
+    queue.qualityOfService = .utility
+    queue.maxConcurrentOperationCount = 2
     return queue
   }()
   private let session: URLSession = {
@@ -160,8 +171,7 @@ final class ImagePipeline: @unchecked Sendable {
       let rest = BlockOperation { [weak self] in
         self?.deliver(key, Self.decode(data, maxPixels: maxPixels), final: true)
       }
-      rest.queuePriority = .low
-      self.decodeQueue.addOperation(rest)
+      self.animationQueue.addOperation(rest)
     }
     first.queuePriority = .high
     decodeQueue.addOperation(first)
@@ -204,12 +214,17 @@ final class ImagePipeline: @unchecked Sendable {
     guard count > 1 else {
       return frame(source, 0, maxPixels: maxPixels).map { UIImage(cgImage: $0, scale: 2, orientation: .up) } ?? UIImage(data: data)
     }
-    // Animated: lay frames on a 20 ms grid so each keeps its own delay.
+    // Animated: lay frames on a 20 ms grid so each keeps its own delay. Long animations keep
+    // every second (or third…) frame, holding each for the ones skipped: at emote size that
+    // looks the same and decodes several times faster.
+    let limit = min(count, 400)
+    let step = max(1, Int((Double(limit) / 100).rounded(.up)))
     var frames: [UIImage] = []
     var total: Double = 0
-    for index in 0..<min(count, 400) {
+    for index in stride(from: 0, to: limit, by: step) {
       guard let image = frame(source, index, maxPixels: maxPixels) else { continue }
-      let delay = frameDelay(source, index)
+      var delay = 0.0
+      for skipped in index..<min(index + step, limit) { delay += frameDelay(source, skipped) }
       total += delay
       let still = UIImage(cgImage: image, scale: 2, orientation: .up)
       for _ in 0..<max(1, Int((delay / 0.02).rounded())) { frames.append(still) }

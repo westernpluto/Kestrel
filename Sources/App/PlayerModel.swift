@@ -174,6 +174,16 @@ final class PlayerModel: ObservableObject {
   var isTile = false
   private(set) var userMuted = false
   private var tileMaxHeight: Int?
+  private(set) var volume: Float = 1
+
+  /// This stream's own volume (multi-view, with several heard at once).
+  func setVolume(_ value: Float) {
+    volume = min(1, max(0, value))
+    #if canImport(AmazonIVSPlayer)
+      lowLatency?.setVolume(volume)
+    #endif
+    player.volume = volume
+  }
 
   func setMuted(_ muted: Bool) {
     userMuted = muted
@@ -1385,6 +1395,7 @@ final class PlayerModel: ObservableObject {
       lowLatency = controller
       controller.start()
       if userMuted { controller.setMuted(true) }
+      if volume < 1 { controller.setVolume(volume) }
       if let tileMaxHeight { controller.setMaxHeight(tileMaxHeight) }
     }
 
