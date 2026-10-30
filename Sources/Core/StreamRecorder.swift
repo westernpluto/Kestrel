@@ -315,6 +315,8 @@ actor StreamRecorder {
       "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:\(max(1, Int(longest.rounded(.up))))",
       "#EXT-X-PLAYLIST-TYPE:\(ended ? "VOD" : "EVENT")", "#EXT-X-MEDIA-SEQUENCE:0",
     ]
+    // Still being made: start from the beginning, not at the newest part like a live stream.
+    if !ended { lines.append("#EXT-X-START:TIME-OFFSET=0") }
     var currentMap: String?
     for (index, entry) in entries.enumerated() {
       if entry.discontinuity, index > 0 { lines.append("#EXT-X-DISCONTINUITY") }

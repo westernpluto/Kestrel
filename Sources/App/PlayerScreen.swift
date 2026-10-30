@@ -24,6 +24,8 @@ struct ApplePlayerSurface: UIViewRepresentable {
   let model: PlayerModel
   var role: Role = .main
   var fill: Bool
+  /// Off for multi-view tiles (one picture can't speak for several).
+  var pictureInPicture = true
 
   private var player: AVPlayer { role == .main ? model.player : model.rewindPlayer }
 
@@ -36,7 +38,7 @@ struct ApplePlayerSurface: UIViewRepresentable {
     view.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
     context.coordinator.view = view
     context.coordinator.player = player
-    if AVPictureInPictureController.isPictureInPictureSupported(),
+    if pictureInPicture, AVPictureInPictureController.isPictureInPictureSupported(),
       let pip = AVPictureInPictureController(playerLayer: view.playerLayer)
     {
       pip.canStartPictureInPictureAutomaticallyFromInline = true
@@ -299,7 +301,17 @@ final class InterfaceOrientationObserver: ObservableObject {
 /// inside SwiftUI and threw the message box to the top of the screen.)
 final class KeyboardObserver: ObservableObject {
   @Published private(set) var overlap: CGFloat = 0
+  /// The keyboard's height the last time it was up (the emote picker takes its place).
+  private(set) static var lastHeight: CGFloat?
   private var tokens: [NSObjectProtocol] = []
+
+  /// The keyboard's own motion: UIKit runs it on a stiff spring squeezed into the notification's
+  /// duration, which comes out as a sharp ease-out. (The same spring at its natural pace, used
+  /// before, took over a second to settle: the message box trailed far behind the keyboard, and
+  /// the keyboard looked like it vanished instead of sliding away.)
+  static func animation(duration: Double) -> Animation {
+    .timingCurve(0.16, 1, 0.3, 1, duration: max(0.25, duration) * 1.6)
+  }
 
   init() {
     let center = NotificationCenter.default
@@ -329,10 +341,19 @@ final class KeyboardObserver: ObservableObject {
     let bounds = window?.bounds ?? AppWindow.bounds
     let hiding = note.name == UIResponder.keyboardWillHideNotification || end.isEmpty || frame.minY >= bounds.maxY - 1
     // Never more than the keyboard can be (guards against a bogus frame).
-    let value = hiding ? 0 : min(bounds.height * 0.6, max(0, bounds.maxY - frame.minY))
+    let value = hiding ? 0 : min(bounds.height * 0.62, max(0, bounds.maxY - frame.minY))
+    if value > 40 { Self.lastHeight = value }
     guard abs(value - overlap) > 0.5 else { return }
-    // The keyboard's own curve (a heavily damped spring).
-    withAnimation(.interpolatingSpring(mass: 3, stiffness: 1000, damping: 500, initialVelocity: 0)) { overlap = value }
+    let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
+    // "Did" notifications only correct a missed "will"; a zero duration means the keyboard itself
+    // isn't animating (moving with it is the point).
+    if note.name == UIResponder.keyboardDidChangeFrameNotification || duration <= 0.01 {
+      var transaction = Transaction()
+      transaction.disablesAnimations = true
+      withTransaction(transaction) { overlap = value }
+    } else {
+      withAnimation(Self.animation(duration: duration)) { overlap = value }
+    }
   }
 }
 
@@ -551,6 +572,17 @@ struct PlayerLayout: Equatable {
     }
   }
 
+  /// The same layout moved by (dx, dy) (into another safe area's coordinates).
+  func shifted(dx: CGFloat, dy: CGFloat) -> PlayerLayout {
+    guard dx != 0 || dy != 0 else { return self }
+    var moved = self
+    moved.video = video.offsetBy(dx: dx, dy: dy)
+    moved.info = info?.offsetBy(dx: dx, dy: dy)
+    moved.panel = panel.offsetBy(dx: dx, dy: dy)
+    moved.details = details?.offsetBy(dx: dx, dy: dy)
+    return moved
+  }
+
   /// The mini player: a small floating video just above the tab bar, bottom right.
   /// - Parameter tabBar: how much of the screen's bottom the tab bar covers.
   static func mini(safe: CGSize, bottomInset: CGFloat, tabBar: CGFloat) -> CGRect {
@@ -660,19 +692,32 @@ struct PlayerScreen: View {
       let insets = Self.insets(geometry)
       let landscape = geometry.size.width > geometry.size.height
       let screenWidth = geometry.size.width + insets.leading + insets.trailing
-      let large = OrientationLock.isLarge(CGSize(width: screenWidth, height: geometry.size.height + insets.top + insets.bottom))
+      let screenHeight = geometry.size.height + insets.top + insets.bottom
+      let large = OrientationLock.isLarge(CGSize(width: screenWidth, height: screenHeight))
       let chatOpen = large ? !largeFullScreen : landscape && landscapeChat
+      // A large window held sideways hides the status bar while the player is open, and iPhone
+      // Duo's status strip goes with it. Shrinking the player brings them back: laid out by the
+      // insets of that moment, chat jumped to the other side of the strip mid-shrink. So the
+      // layout keeps to the window as it is with the player open (no strip), shifted to where
+      // the safe area is right now.
+      let layoutInsets = large && landscape ? EdgeInsets(top: 0, leading: 0, bottom: insets.bottom, trailing: 0) : insets
       let layout = PlayerLayout(
-        safe: geometry.size, insets: insets, keyboard: keyboard.overlap, chatOpen: chatOpen,
+        safe: CGSize(
+          width: screenWidth - layoutInsets.leading - layoutInsets.trailing,
+          height: screenHeight - layoutInsets.top - layoutInsets.bottom),
+        insets: layoutInsets, keyboard: keyboard.overlap, chatOpen: chatOpen,
         chatWidth: resizedWidth ?? screenWidth * chatShare,
         cameraOnLeft: landscape && !large ? (InterfaceOrientationObserver.cameraOnLeftNow ?? orientation.cameraOnLeft) : nil,
-        large: large, theater: theater, chatOverVideo: chatOverVideo)
-      // The layout choice the gear menu offers here, if any.
+        large: large, theater: theater, chatOverVideo: chatOverVideo
+      ).shifted(dx: layoutInsets.leading - insets.leading, dy: layoutInsets.top - insets.top)
+      // The layout choice offered on the video, if any.
       let layoutToggle: LayoutToggle? =
         landscape && chatOpen
         ? (large
-          ? LayoutToggle(title: "Theater mode", systemImage: "theatermasks", isOn: theater)
-          : LayoutToggle(title: "Chat over video", systemImage: "text.bubble", isOn: chatOverVideo))
+          ? LayoutToggle(title: "Theater mode", systemImage: "theatermasks", onImage: "theatermasks.fill", isOn: theater)
+          : LayoutToggle(
+            title: "Chat over video", systemImage: "rectangle.righthalf.inset.filled",
+            onImage: "rectangle.righthalf.inset.filled", isOn: chatOverVideo))
         : nil
       let progress = layout.fullScreen ? 0 : (dragProgress ?? (app.playerMinimized ? 1 : 0))
       let mini = PlayerLayout.mini(safe: geometry.size, bottomInset: insets.bottom, tabBar: app.tabBarHeight)
@@ -705,7 +750,7 @@ struct PlayerScreen: View {
             .allowsHitTesting(progress == 0)
         }
 
-        sidePanel(layout)
+        sidePanel(layout, keyboardUp: keyboard.overlap > 0, safeBottom: layoutInsets.bottom)
           .frame(width: layout.panel.width, height: layout.panel.height)
           .background(layout.chatOverlay ? Color.black.opacity(0.55) : landscape ? Color(white: 0.07) : Color.black)
           .overlay(alignment: .top) {
@@ -730,6 +775,8 @@ struct PlayerScreen: View {
           model: model, landscape: layout.fullScreen, chatOpen: chatOpen, controlInsets: layout.controls,
           chromeVisible: progress == 0, minimized: app.playerMinimized, chatOnLeft: layout.chatOnLeft,
           viewersShownElsewhere: layout.details != nil,
+          showsStreamer: layout.large && layout.landscape && !layout.fullScreen && layout.info == nil,
+          chat: chat,
           layoutToggle: layoutToggle,
           setLayoutToggle: { on in
             withAnimation(Self.spring) {
@@ -844,7 +891,8 @@ struct PlayerScreen: View {
     .onDisappear {
       model.stop()
       chat.stop()
-      OrientationLock.playerVisible(false)
+      // (Multi-view taking over keeps the phone free to turn.)
+      if app.multiview == nil { OrientationLock.playerVisible(false) }
     }
   }
 
@@ -876,7 +924,7 @@ struct PlayerScreen: View {
   }
 
   private func dismissKeyboard() {
-    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    Keyboard.dismiss()
   }
 
   /// Distances from the safe area to the window's edges (the window, not the screen: iPhone Duo
@@ -894,10 +942,10 @@ struct PlayerScreen: View {
       bottom: max(0, window.height - frame.maxY), trailing: max(0, window.width - frame.maxX))
   }
 
-  private func sidePanel(_ layout: PlayerLayout) -> some View {
+  private func sidePanel(_ layout: PlayerLayout, keyboardUp: Bool, safeBottom: CGFloat) -> some View {
     ChatPanel(
-      chat: chat, bottomInset: layout.panelPadding.bottom, compact: layout.landscape && !layout.large,
-      active: !app.playerMinimized)
+      chat: chat, bottomInset: layout.panelPadding.bottom, keyboardUp: keyboardUp, safeBottom: safeBottom,
+      compact: layout.landscape && !layout.large, active: !app.playerMinimized)
       .padding(.top, layout.panelPadding.top)
       .padding(.leading, layout.panelPadding.leading)
       .padding(.trailing, layout.panelPadding.trailing)

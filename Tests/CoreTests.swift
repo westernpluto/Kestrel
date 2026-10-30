@@ -1180,6 +1180,61 @@ func testRecordingPlaylist() {
   check(!StreamProxy.isPlainName("..") && !StreamProxy.isPlainName("a/b") && !StreamProxy.isPlainName(".hidden"))
 }
 
+func testMutedParts() {
+  let playlist = """
+    #EXTM3U
+    #EXT-X-TARGETDURATION:10
+    #EXTINF:10.000,
+    0.ts
+    #EXTINF:10.000,
+    1-unmuted.ts
+    #EXTINF:10.000,
+    2-unmuted.ts
+    #EXTINF:10.000,
+    3.ts
+    #EXTINF:5.500,
+    4-muted.ts
+    #EXT-X-ENDLIST
+    """
+  let parts = VODPlaylists.mutedParts(playlist)
+  check(parts.count == 2, "\(parts)")
+  check(parts.first.map { abs($0.lowerBound - 10) < 0.01 && abs($0.upperBound - 30) < 0.01 } == true, "joined: \(parts)")
+  check(parts.last.map { abs($0.lowerBound - 40) < 0.01 && abs($0.upperBound - 45.5) < 0.01 } == true, "last: \(parts)")
+  check(VODPlaylists.mutedParts("#EXTM3U\n#EXTINF:10,\n0.ts\n").isEmpty, "none")
+}
+
+func testMultiviewLayout() {
+  // Two streams: side by side when wide, stacked when tall.
+  let wide = MultiviewLayout.grid(count: 2, in: CGSize(width: 800, height: 360))
+  check(wide.count == 2 && abs(wide[0].minY - wide[1].minY) < 0.5 && wide[0].maxX <= wide[1].minX, "wide: \(wide)")
+  let tall = MultiviewLayout.grid(count: 2, in: CGSize(width: 390, height: 500))
+  check(tall.count == 2 && abs(tall[0].minX - tall[1].minX) < 0.5 && tall[0].maxY <= tall[1].minY, "tall: \(tall)")
+  // Four in a 2×2 grid, all 16:9, inside the area, none overlapping.
+  let area = CGRect(x: 0, y: 0, width: 900, height: 600)
+  let four = MultiviewLayout.grid(count: 4, in: area.size)
+  check(Set(four.map { Int($0.minY) }).count == 2 && Set(four.map { Int($0.minX) }).count == 2, "2x2: \(four)")
+  for (index, rect) in four.enumerated() {
+    check(area.contains(rect) && abs(rect.width / rect.height - 16.0 / 9) < 0.03, "inside, 16:9: \(rect)")
+    for other in four[(index + 1)...] { check(!rect.intersects(other.insetBy(dx: 0.5, dy: 0.5)), "overlap \(rect) \(other)") }
+  }
+  // Three: the last row's one picture centred.
+  let three = MultiviewLayout.grid(count: 3, in: CGSize(width: 900, height: 600))
+  check(three.count == 3 && abs(three[2].midX - 450) < 1.5, "centred: \(three)")
+  // Focus: the main one is the biggest, the others the same smaller size.
+  let focus = MultiviewLayout.focus(count: 4, main: 2, in: CGSize(width: 900, height: 420))
+  check(focus.count == 4 && focus[2].width > focus[0].width * 2 && focus[0].size == focus[1].size, "focus: \(focus)")
+  for (index, rect) in focus.enumerated() {
+    check(area.contains(rect), "focus inside: \(rect)")
+    for other in focus[(index + 1)...] { check(!rect.intersects(other.insetBy(dx: 0.5, dy: 0.5)), "focus overlap") }
+  }
+  let portraitFocus = MultiviewLayout.focus(count: 3, main: 0, in: CGSize(width: 390, height: 500))
+  check(portraitFocus[0].maxY <= portraitFocus[1].minY && portraitFocus[1].minY == portraitFocus[2].minY, "under: \(portraitFocus)")
+  // Sharpness: a small picture doesn't fetch 1080p.
+  check(MultiviewLayout.heightCap(points: 110, scale: 3, heard: false) == 360, "small cap")
+  check(MultiviewLayout.heightCap(points: 200, scale: 3, heard: true) == 720, "heard cap")
+  check(MultiviewLayout.heightCap(points: 400, scale: 3, heard: true) == nil, "big: any")
+}
+
 func testAdFreeProxy() {
   let url = AdFreeProxy.masterURL(host: "eu.luminous.dev", login: "SomeOne", codecs: "h265,h264", lowLatency: true)!
   check(url.absoluteString.hasPrefix("https://eu.luminous.dev/live/someone?") && url.query!.contains("fast_bread=true"), "\(url)")
@@ -1236,6 +1291,8 @@ testSteadyAutoQuality()
 testMasterClock()
 testStartingAtNewest()
 testRecordingPlaylist()
+testMutedParts()
+testMultiviewLayout()
 testMediaParsing()
 testAdTimeline()
 testTimelineAndRender()

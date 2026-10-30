@@ -20,7 +20,11 @@ struct PlayerVideoArea: View {
   var chatOnLeft: Bool = false
   /// The details panel beside the video already shows the viewer count.
   var viewersShownElsewhere = false
-  /// A layout choice for the gear menu, where one applies.
+  /// Theater mode: the streamer's picture and name go on the video (nothing else shows them).
+  var showsStreamer = false
+  /// For the chat overlay in full screen.
+  var chat: ChatController? = nil
+  /// A layout choice offered on the video, where one applies (theater mode, chat over video).
   var layoutToggle: LayoutToggle? = nil
   var setLayoutToggle: (Bool) -> Void = { _ in }
   var toggleChat: () -> Void
@@ -32,11 +36,15 @@ struct PlayerVideoArea: View {
   var onPull: (CGFloat) -> Void = { _ in }
   var onPullEnd: (CGFloat, CGFloat) -> Void = { _, _ in }
   @EnvironmentObject private var settings: AppSettings
+  @AppStorage("chatOverlay") private var chatOverlay = false
   @State private var controlsVisible = true
   @State private var hideTask: Task<Void, Never>? = nil
   /// A pinch also moves the fingers; don't read it as a swipe.
   @State private var lastPinch = Date.distantPast
   @State private var pulling = false
+
+  /// Full screen with chat put away: a small see-through chat can lie over the video instead.
+  private var overlayAvailable: Bool { landscape && !chatOpen && chat != nil }
 
   var body: some View {
     ZStack {
@@ -59,6 +67,10 @@ struct PlayerVideoArea: View {
       statusOverlay
         .animation(.easeInOut(duration: 0.25), value: model.phase)
         .animation(.easeInOut(duration: 0.2), value: model.coveringAd)
+      if overlayAvailable, chatOverlay, chromeVisible, let chat {
+        ChatOverlay(chat: chat, clearance: controlInsets, tap: toggleControls)
+          .transition(.opacity)
+      }
       if settings.showVideoStats && !model.stats.isEmpty && chromeVisible {
         // An overlay, so its size never changes the video area's (it used to grow it and push
         // the controls off the top and bottom of a small video).
@@ -75,8 +87,11 @@ struct PlayerVideoArea: View {
       }
       PlayerControls(
         model: model, landscape: landscape, chatOpen: chatOpen, visible: controlsShown && chromeVisible && !pulling,
-        insets: controlInsets, viewersShownElsewhere: viewersShownElsewhere, layoutToggle: layoutToggle,
-        setLayoutToggle: setLayoutToggle, toggleChat: toggleChat,
+        insets: controlInsets, viewersShownElsewhere: viewersShownElsewhere, showsStreamer: showsStreamer,
+        layoutToggle: layoutToggle, setLayoutToggle: setLayoutToggle,
+        chatOverlay: overlayAvailable ? chatOverlay : nil,
+        setChatOverlay: { on in withAnimation(.easeInOut(duration: 0.2)) { chatOverlay = on } },
+        toggleChat: toggleChat,
         minimize: minimize, enterFullScreen: enterFullScreen, exitFullScreen: exitFullScreen,
         interacted: { scheduleHide(after: $0) })
       if let resumed = model.resumedAt, chromeVisible {
@@ -87,12 +102,45 @@ struct PlayerVideoArea: View {
           .transition(.opacity.combined(with: .move(edge: .bottom)))
           .animation(.easeInOut(duration: 0.2), value: controlsShown)
       }
+      if let part = model.currentMutedPart, chromeVisible, model.phase == .playing {
+        skipMutedNotice(part)
+          .padding(.trailing, controlInsets.trailing + 8)
+          .padding(.bottom, controlInsets.bottom + (controlsShown ? 78 : 10))
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+          .transition(.opacity.combined(with: .move(edge: .bottom)))
+          .animation(.easeInOut(duration: 0.2), value: controlsShown)
+      }
     }
     .clipped()
+    .animation(.easeInOut(duration: 0.25), value: model.currentMutedPart)
     .onAppear { scheduleHide(after: 3.5) }
   }
 
   private var controlsShown: Bool { controlsVisible || model.isPaused || model.phase != .playing }
+
+  /// "Muted · 1:12 left · Skip": a part Twitch muted for copyright, offered to skip.
+  private func skipMutedNotice(_ part: ClosedRange<Double>) -> some View {
+    Button {
+      model.skipMutedPart()
+      scheduleHide(after: 2)
+    } label: {
+      HStack(spacing: 7) {
+        Image(systemName: "speaker.slash.fill").foregroundColor(.orange)
+        Text("Muted · \(Format.duration(Int(max(0, part.upperBound - model.currentPosition).rounded(.up)))) left")
+          .foregroundColor(.white.opacity(0.85))
+          .monospacedDigit()
+        Text("Skip").foregroundColor(.white).fontWeight(.bold)
+        Image(systemName: "forward.end.fill").font(.caption2)
+      }
+      .font(.caption.weight(.semibold))
+      .padding(.horizontal, 12).padding(.vertical, 8)
+      .background(.black.opacity(0.75), in: Capsule())
+      .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1))
+      .contentShape(Capsule())
+    }
+    .buttonStyle(PressableStyle())
+    .accessibilityLabel("Skip the muted part")
+  }
 
   /// "Resumed at 1:23:45 · Start over"
   private func resumeNotice(_ position: Double) -> some View {
@@ -255,7 +303,7 @@ struct PlayerVideoArea: View {
 
   private func toggleControls() {
     // A tap on the video also puts the keyboard away.
-    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    Keyboard.dismiss()
     if controlsVisible {
       hideTask?.cancel()
       controlsVisible = false
@@ -320,8 +368,12 @@ struct PlayerControls: View {
   var visible: Bool
   var insets: EdgeInsets
   var viewersShownElsewhere = false
+  var showsStreamer = false
   var layoutToggle: LayoutToggle? = nil
   var setLayoutToggle: (Bool) -> Void = { _ in }
+  /// The chat overlay's switch (nil: not offered here).
+  var chatOverlay: Bool? = nil
+  var setChatOverlay: (Bool) -> Void = { _ in }
   var toggleChat: () -> Void
   var minimize: () -> Void
   var enterFullScreen: () -> Void
@@ -329,6 +381,7 @@ struct PlayerControls: View {
   /// Keeps the controls up for this many more seconds.
   var interacted: (Double) -> Void
   @EnvironmentObject private var settings: AppSettings
+  @EnvironmentObject private var app: AppModel
   @ObservedObject private var recordings = RecordingStore.shared
   @ObservedObject private var autoRecorder = AutoRecorder.shared
   /// While dragging the seek bar everything else steps aside for the preview.
@@ -383,17 +436,27 @@ struct PlayerControls: View {
       button("chevron.down", label: landscape ? "Exit full screen" : "Minimize") {
         landscape ? exitFullScreen() : minimize()
       }
-      if landscape {
-        VStack(alignment: .leading, spacing: 1) {
-          Text(model.channel?.name ?? "").font(.subheadline.weight(.bold))
-          if let title = model.stream?.title, !title.isEmpty {
-            Text(title).font(.caption).foregroundColor(.white.opacity(0.75))
+      if landscape || showsStreamer {
+        // Full screen and theater mode: who's streaming (nothing else on screen says).
+        HStack(spacing: 8) {
+          Avatar(url: model.channel?.profileImageURL, size: 30)
+            .overlay(Circle().stroke(Color.white.opacity(0.25), lineWidth: 1))
+          VStack(alignment: .leading, spacing: 1) {
+            Text(model.channel?.name ?? "").font(.subheadline.weight(.bold))
+            if !title.isEmpty {
+              Text(title).font(.caption).foregroundColor(.white.opacity(0.75))
+            }
           }
         }
         .lineLimit(1)
-        .padding(.leading, 4)
+        .padding(.leading, 2)
+        .shadow(color: .black.opacity(0.5), radius: 3)
       }
       Spacer(minLength: 8)
+      if model.isLive, !model.isRewinding, let channel = model.channel, !channel.login.isEmpty {
+        // This stream and others at once.
+        button("rectangle.split.2x2", label: "Multi-view: watch with other streams") { app.openMultiview([channel]) }
+      }
       AirPlayButton().frame(width: 40, height: 40)
       if AVPictureInPictureController.isPictureInPictureSupported() {
         button(model.pictureInPictureActive ? "pip.exit" : "pip.enter", label: "Picture in Picture") {
@@ -401,6 +464,13 @@ struct PlayerControls: View {
         }
       }
       settingsMenu
+    }
+  }
+
+  private var title: String {
+    switch model.target {
+    case .live: return model.stream?.title ?? ""
+    case .video(let video): return video.title
     }
   }
 
@@ -417,15 +487,14 @@ struct PlayerControls: View {
       showLowLatency: model.isLive && model.canToggleLowLatency && !model.isRewinding,
       lowLatency: settings.lowLatency,
       showStats: settings.showVideoStats,
-      layoutToggle: layoutToggle,
       recordOptions: canRecord ? RecordQuality.options(from: model.qualities.map(\.label)) : [],
       recording: canRecord ? recordings.isRecording(login) : nil,
       autoRecord: autoRecorder.rule(for: login) != nil,
       upscale: settings.upscale,
+      skipMuted: model.currentMutedParts.isEmpty ? nil : settings.skipMutedParts,
       select: { [model] in model.selectQuality($0) },
       setLowLatency: { [model] in model.setLowLatency($0) },
       setStats: { [settings] in settings.showVideoStats = $0 },
-      setLayoutToggle: setLayoutToggle,
       startRecording: { [model, recordings] (label: String) in
         guard let channel = model.channel else { return }
         recordings.start(channel: channel, stream: model.stream, maxHeight: RecordQuality.height(label))
@@ -438,6 +507,7 @@ struct PlayerControls: View {
       },
       unscheduleRecording: { [autoRecorder] in autoRecorder.unschedule(login) },
       setUpscale: { [settings] in settings.upscale = $0 },
+      setSkipMuted: { [settings] in settings.skipMutedParts = $0 },
       opened: { [interacted] in interacted(12) }
     )
     .equatable()
@@ -454,9 +524,15 @@ struct PlayerControls: View {
               .font(.caption2.weight(.heavy)).foregroundColor(.liveRed).labelStyle(.titleAndIcon)
               .accessibilityLabel("Recording")
           }
-          if !viewersShownElsewhere, let viewers = model.stream?.viewers {
-            Label(Format.viewers(viewers), systemImage: "person.fill").font(.caption.monospacedDigit())
-              .labelStyle(.titleAndIcon).foregroundColor(.white.opacity(0.85))
+          if !viewersShownElsewhere {
+            if let viewers = model.stream?.viewers {
+              Label(Format.viewers(viewers), systemImage: "person.fill")
+                .accessibilityLabel("\(Format.viewers(viewers)) watching")
+            }
+            if let started = model.stream?.startedAt {
+              Label { UptimeText(since: started) } icon: { Image(systemName: "clock") }
+                .accessibilityLabel("Live for \(Format.uptime(since: started) ?? "")")
+            }
           }
           adBadge
         } else if model.duration > 0 {
@@ -468,7 +544,20 @@ struct PlayerControls: View {
               .background(Color.liveRed.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
           }
         }
-        Spacer()
+        Spacer(minLength: 4)
+        // Layout switches live on the video, where they apply (not in the gear menu).
+        if let layoutToggle {
+          button(
+            layoutToggle.isOn ? layoutToggle.onImage : layoutToggle.systemImage,
+            label: layoutToggle.isOn ? "\(layoutToggle.title) off" : layoutToggle.title, highlighted: layoutToggle.isOn
+          ) { setLayoutToggle(!layoutToggle.isOn) }
+        }
+        if let chatOverlay {
+          button(
+            chatOverlay ? "text.bubble.fill" : "text.bubble", label: chatOverlay ? "Hide chat overlay" : "Chat overlay",
+            highlighted: chatOverlay
+          ) { setChatOverlay(!chatOverlay) }
+        }
         if landscape {
           button(chatOpen ? "bubble.left.fill" : "bubble.left", label: chatOpen ? "Hide chat" : "Show chat", action: toggleChat)
         }
@@ -479,6 +568,9 @@ struct PlayerControls: View {
           landscape ? exitFullScreen() : enterFullScreen()
         }
       }
+      .font(.caption.monospacedDigit())
+      .labelStyle(StatLabelStyle())
+      .foregroundColor(.white)
     }
   }
 
@@ -489,9 +581,10 @@ struct PlayerControls: View {
     if model.isLive, model.rewind != nil, model.broadcastElapsed > 60 {
       SeekBar(
         position: model.isRewinding ? model.rewindPosition : model.broadcastElapsed,
-        duration: model.broadcastElapsed, storyboard: model.storyboard,
-        label: { time in
-          model.broadcastElapsed - time < 20 ? "Live" : Format.duration(Int(time))
+        duration: model.broadcastElapsed, storyboard: model.storyboard, marks: model.rewindMutedParts,
+        label: { [model] time in
+          model.broadcastElapsed - time < 20
+            ? "Live" : Format.duration(Int(time)) + (model.rewindMutedParts.contains { $0.contains(time) } ? " · muted" : "")
         },
         onStart: {
           scrubbing = true
@@ -511,8 +604,8 @@ struct PlayerControls: View {
       .transition(.opacity)
     } else if !model.isLive, model.duration > 0 {
       SeekBar(
-        position: model.position, duration: model.duration, storyboard: model.storyboard,
-        label: { Format.duration(Int($0)) },
+        position: model.position, duration: model.duration, storyboard: model.storyboard, marks: model.mutedParts,
+        label: { [model] time in Format.duration(Int(time)) + (model.mutedParts.contains { $0.contains(time) } ? " · muted" : "") },
         onStart: {
           scrubbing = true
           model.refreshStoryboardIfStale()
@@ -541,12 +634,15 @@ struct PlayerControls: View {
           Text("\(Format.duration(Int(model.rewindPosition))) / \(Format.duration(Int(model.broadcastElapsed)))")
             .font(.caption.monospacedDigit()).foregroundColor(.white.opacity(0.85))
         } else if let latency = model.latency {
-          Text(String(format: "%.1fs", latency)).font(.caption.monospacedDigit()).foregroundColor(.white.opacity(0.85))
+          // How far behind the broadcast the picture is.
+          Label(String(format: "%.1fs", latency), systemImage: "stopwatch")
+            .font(.caption.monospacedDigit()).foregroundColor(.white.opacity(0.85))
         }
       }
       .animation(.easeInOut(duration: 0.2), value: atLiveEdge)
     }
     .accessibilityLabel(model.isRewinding ? "Back to live" : "Jump to live")
+    .accessibilityValue(model.latency.map { String(format: "%.1f seconds behind", $0) } ?? "")
   }
 
   private var atLiveEdge: Bool { !model.isRewinding && (model.latency ?? 0) < (settings.lowLatency ? 6 : 15) }
@@ -556,8 +652,10 @@ struct PlayerControls: View {
     switch model.adState {
     case .skipped, .replaced:
       Label("Ad blocked", systemImage: "checkmark.shield.fill").font(.caption2.weight(.semibold)).foregroundColor(.accentTeal)
+        .labelStyle(.titleAndIcon)
     case .searching, .covering:
       Label("Ad", systemImage: "shield.lefthalf.filled").font(.caption2.weight(.semibold)).foregroundColor(.orange)
+        .labelStyle(.titleAndIcon)
     case .none:
       EmptyView()
     }
@@ -578,13 +676,14 @@ struct PlayerControls: View {
     .accessibilityLabel(seconds < 0 ? "Back 10 seconds" : "Forward 10 seconds")
   }
 
-  private func button(_ icon: String, label: String, action: @escaping () -> Void) -> some View {
+  private func button(_ icon: String, label: String, highlighted: Bool = false, action: @escaping () -> Void) -> some View {
     Button {
       action()
       interacted(3.5)
     } label: {
       Image(systemName: icon)
         .font(.system(size: 18, weight: .semibold))
+        .foregroundColor(highlighted ? .accentTeal : .white)
         .frame(width: 40, height: 40)
         .contentShape(Rectangle())
     }
@@ -593,13 +692,40 @@ struct PlayerControls: View {
   }
 }
 
+/// Small icon-and-number pairs on the video (latency, viewers, time live): the icon a touch
+/// dimmer than the number, tightly spaced.
+struct StatLabelStyle: LabelStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    HStack(spacing: 3) {
+      configuration.icon.font(.system(size: 10, weight: .bold)).foregroundColor(.white.opacity(0.7))
+      configuration.title.foregroundColor(.white.opacity(0.9))
+    }
+  }
+}
+
+/// How long a stream has been live, to the second ("2:03:15"), ticking by itself (only this text
+/// redraws each second, not the controls around it).
+struct UptimeText: View {
+  let since: Date
+
+  var body: some View {
+    TimelineView(.periodic(from: since, by: 1)) { context in
+      Text(Format.clock(Int(max(0, context.date.timeIntervalSince(since)))))
+        .monospacedDigit()
+    }
+  }
+}
+
 // MARK: - Seek bar
 
-/// A Twitch-style seek bar: thin until touched, with a thumbnail of where you'd land.
+/// A Twitch-style seek bar: thin until touched, with a thumbnail of where you'd land, and the
+/// parts Twitch muted for copyright marked on it.
 struct SeekBar: View {
   var position: Double
   var duration: Double
   var storyboard: Storyboard?
+  /// Stretches to mark (muted parts), in seconds.
+  var marks: [ClosedRange<Double>] = []
   var label: (Double) -> String
   var onStart: () -> Void = {}
   var onScrub: (Double) -> Void = { _ in }
@@ -619,6 +745,11 @@ struct SeekBar: View {
       ZStack(alignment: .leading) {
         Capsule().fill(Color.white.opacity(0.28)).frame(height: active ? 6 : 3)
         Capsule().fill(Color.accentTeal).frame(width: max(0, width * fraction), height: active ? 6 : 3)
+        if duration > 0, !marks.isEmpty {
+          MarkStrip(marks: marks, duration: duration)
+            .frame(width: width, height: active ? 6 : 3)
+            .allowsHitTesting(false)
+        }
         Circle().fill(Color.white)
           .frame(width: active ? 16 : 11, height: active ? 16 : 11)
           .shadow(color: .black.opacity(0.4), radius: 2)
@@ -661,6 +792,23 @@ struct SeekBar: View {
       }
     }
     .frame(height: 40)
+  }
+}
+
+/// The marked stretches of a seek bar, drawn in one pass (a VOD can have dozens).
+struct MarkStrip: View {
+  var marks: [ClosedRange<Double>]
+  var duration: Double
+
+  var body: some View {
+    Canvas { context, size in
+      for mark in marks {
+        let start = size.width * min(1, max(0, mark.lowerBound / duration))
+        let end = size.width * min(1, max(0, mark.upperBound / duration))
+        let rect = CGRect(x: start, y: 0, width: max(2, end - start), height: size.height)
+        context.fill(Path(roundedRect: rect, cornerRadius: size.height / 2), with: .color(Color.orange.opacity(0.9)))
+      }
+    }
   }
 }
 
@@ -775,9 +923,7 @@ struct StreamInfoBar: View {
     .frame(maxHeight: .infinity)
     .contentShape(Rectangle())
     // Tapping the bar's empty space puts the keyboard away, like anywhere outside the message box.
-    .onTapGesture {
-      UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-    }
+    .onTapGesture { Keyboard.dismiss() }
   }
 
   @ViewBuilder
@@ -800,8 +946,12 @@ struct StreamInfoBar: View {
             if let category = model.stream?.category?.name {
               Text("· \(category)").font(.footnote).foregroundColor(.accentTeal)
             }
-            if let uptime = Format.uptime(since: model.stream?.startedAt) {
-              Text("· \(uptime)").font(.footnote.monospacedDigit()).foregroundColor(.secondary)
+            if let started = model.stream?.startedAt {
+              HStack(spacing: 0) {
+                Text("· ")
+                UptimeText(since: started)
+              }
+              .font(.footnote.monospacedDigit()).foregroundColor(.secondary)
             }
           }
         }
@@ -857,8 +1007,16 @@ struct StreamDetailsPanel: View {
       if let viewers = model.stream?.viewers {
         Label("\(Format.viewers(viewers)) watching", systemImage: "person.fill").foregroundColor(.white.opacity(0.85))
       }
-      if let uptime = Format.uptime(since: model.stream?.startedAt) {
-        Label("Live for \(uptime)", systemImage: "clock").foregroundColor(.white.opacity(0.85))
+      if let started = model.stream?.startedAt {
+        Label {
+          HStack(spacing: 0) {
+            Text("Live for ")
+            UptimeText(since: started)
+          }
+        } icon: {
+          Image(systemName: "clock")
+        }
+        .foregroundColor(.white.opacity(0.85))
       }
       if let category = model.stream?.category {
         Button {
@@ -969,20 +1127,22 @@ enum RecordQuality {
   }
 }
 
-/// A layout choice offered in the gear menu where it applies (e.g. chat over the video).
+/// A layout choice offered on the video where it applies (theater mode, chat over the video).
 struct LayoutToggle: Equatable {
   var title: String
   var systemImage: String
+  var onImage: String
   var isOn: Bool
 }
 
+/// The gear menu: what's changed often at the top level (quality, low latency, recording, muted
+/// parts); the rest one level down under More.
 struct PlayerSettingsMenu: View, Equatable {
   var qualities: [PlayerModel.Quality]
   var selected: Int?
   var showLowLatency: Bool
   var lowLatency: Bool
   var showStats: Bool
-  var layoutToggle: LayoutToggle?
   /// Qualities a recording can be made at (empty: none offered).
   var recordOptions: [String]
   /// Recording this stream (nil: recording isn't offered here).
@@ -990,22 +1150,24 @@ struct PlayerSettingsMenu: View, Equatable {
   /// This channel is recorded whenever it goes live (see AutoRecorder).
   var autoRecord: Bool
   var upscale: Bool
+  /// Skip muted parts by themselves (nil: the video has none).
+  var skipMuted: Bool?
   var select: (PlayerModel.Quality) -> Void
   var setLowLatency: (Bool) -> Void
   var setStats: (Bool) -> Void
-  var setLayoutToggle: (Bool) -> Void
   var startRecording: (String) -> Void
   var stopRecording: () -> Void
   var scheduleRecording: (Int) -> Void
   var unscheduleRecording: () -> Void
   var setUpscale: (Bool) -> Void
+  var setSkipMuted: (Bool) -> Void
   var opened: () -> Void
 
   static func == (a: Self, b: Self) -> Bool {
     a.qualities == b.qualities && a.selected == b.selected && a.showLowLatency == b.showLowLatency
-      && a.lowLatency == b.lowLatency && a.showStats == b.showStats && a.layoutToggle == b.layoutToggle
+      && a.lowLatency == b.lowLatency && a.showStats == b.showStats
       && a.recordOptions == b.recordOptions && a.recording == b.recording && a.autoRecord == b.autoRecord
-      && a.upscale == b.upscale
+      && a.upscale == b.upscale && a.skipMuted == b.skipMuted
   }
 
   var body: some View {
@@ -1026,15 +1188,9 @@ struct PlayerSettingsMenu: View, Equatable {
           Label("Low latency", systemImage: "bolt")
         }
       }
-      Toggle(isOn: Binding(get: { showStats }, set: setStats)) {
-        Label("Video stats", systemImage: "chart.bar.xaxis")
-      }
-      Toggle(isOn: Binding(get: { upscale }, set: setUpscale)) {
-        Label("Upscale (MetalFX)", systemImage: "wand.and.stars")
-      }
-      if let layoutToggle {
-        Toggle(isOn: Binding(get: { layoutToggle.isOn }, set: setLayoutToggle)) {
-          Label(layoutToggle.title, systemImage: layoutToggle.systemImage)
+      if let skipMuted {
+        Toggle(isOn: Binding(get: { skipMuted }, set: setSkipMuted)) {
+          Label("Skip muted parts", systemImage: "speaker.slash")
         }
       }
       if let recording {
@@ -1064,6 +1220,16 @@ struct PlayerSettingsMenu: View, Equatable {
         } label: {
           Label(recording ? "Recording" : "Record", systemImage: recording ? "record.circle.fill" : "record.circle")
         }
+      }
+      Menu {
+        Toggle(isOn: Binding(get: { upscale }, set: setUpscale)) {
+          Label("Upscale (MetalFX)", systemImage: "wand.and.stars")
+        }
+        Toggle(isOn: Binding(get: { showStats }, set: setStats)) {
+          Label("Video stats", systemImage: "chart.bar.xaxis")
+        }
+      } label: {
+        Label("More", systemImage: "ellipsis.circle")
       }
     } label: {
       Image(systemName: "gearshape.fill")

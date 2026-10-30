@@ -444,6 +444,11 @@ final class FollowingStore: ObservableObject {
     error = problem
     loaded = true
     LiveNotifier.shared.observe(live: live, complete: problem == nil)
+    // The instant-alerts relay watches the same channels (only a complete list replaces its own).
+    if problem == nil {
+      let logins = (live.map(\.channel.login) + offline.map(\.channel.login)).map { $0.lowercased() }
+      await InstantAlerts.shared.followsChanged(logins)
+    }
   }
 }
 
@@ -474,7 +479,23 @@ struct FollowingView: View {
           .feedRow()
       }
       if !store.live.isEmpty {
-        header("Live", count: store.live.count).feedRow(top: 10, bottom: 4)
+        HStack {
+          header("Live", count: store.live.count)
+          Spacer()
+          if store.live.count > 1 {
+            // Several at once (see Multiview).
+            Button {
+              app.openMultiview([])
+            } label: {
+              Label("Multi-view", systemImage: "rectangle.split.2x2")
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Color.white.opacity(0.08), in: Capsule())
+            }
+            .buttonStyle(PressableStyle())
+          }
+        }
+        .feedRow(top: 10, bottom: 4)
         AdaptiveFeed(items: store.live) { stream in StreamTile(stream: stream) }
       }
       if !store.offline.isEmpty {

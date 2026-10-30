@@ -25,6 +25,7 @@ final class VODPlaylists: PlaylistSource, @unchecked Sendable {
   private let lock = NSLock()
   private var _isRecording = false
   private var _recordedSeconds: Double = 0
+  private var _mutedParts: [ClosedRange<Double>] = []
   /// The last playlist served per rendition, reused for a little while (so a prefetch makes the
   /// player's own request instant).
   private var cache: [Int: (body: String, at: Date)] = [:]
@@ -41,6 +42,13 @@ final class VODPlaylists: PlaylistSource, @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     return _recordedSeconds
+  }
+
+  /// The parts Twitch muted for copyright (seconds into the video), from the last playlist read.
+  var mutedParts: [ClosedRange<Double>] {
+    lock.lock()
+    defer { lock.unlock() }
+    return _mutedParts
   }
 
   init(id: String = UUID().uuidString, variants: [HLSVariant], http: HTTPClient) {
@@ -73,7 +81,7 @@ final class VODPlaylists: PlaylistSource, @unchecked Sendable {
     }
     let growing = Self.isGrowing(text)
     let rewritten = Self.rewrite(text, base: response.url ?? url, finish: true)
-    note(recording: growing, seconds: Self.totalDuration(rewritten))
+    note(recording: growing, seconds: Self.totalDuration(rewritten), muted: Self.mutedParts(text))
     store(index, rewritten)
     return (200, rewritten)
   }
@@ -96,11 +104,39 @@ final class VODPlaylists: PlaylistSource, @unchecked Sendable {
     lock.unlock()
   }
 
-  private func note(recording: Bool, seconds: Double) {
+  private func note(recording: Bool, seconds: Double, muted: [ClosedRange<Double>]) {
     lock.lock()
     _isRecording = recording
     _recordedSeconds = seconds
+    _mutedParts = muted
     lock.unlock()
+  }
+
+  /// Where the muted segments are ("N-unmuted.ts" as Twitch lists them, or "N-muted.ts"), as
+  /// stretches of seconds; neighbouring segments are joined into one stretch.
+  static func mutedParts(_ text: String) -> [ClosedRange<Double>] {
+    var parts: [ClosedRange<Double>] = []
+    var time = 0.0
+    var length = 0.0
+    for raw in HLS.lines(text) {
+      let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+      if line.hasPrefix("#EXTINF:") {
+        let value = line.dropFirst(8).split(separator: ",", maxSplits: 1).first.map(String.init) ?? ""
+        length = Double(value.trimmingCharacters(in: .whitespaces)) ?? 0
+      } else if !line.isEmpty, !line.hasPrefix("#") {
+        let end = time + length
+        if line.contains("-unmuted.") || line.contains("-muted."), length > 0 {
+          if let last = parts.last, abs(last.upperBound - time) < 0.05 {
+            parts[parts.count - 1] = last.lowerBound...end
+          } else {
+            parts.append(time...end)
+          }
+        }
+        time = end
+        length = 0
+      }
+    }
+    return parts
   }
 
   /// Absolute segment addresses (the playlist is served from localhost), muted parts under the

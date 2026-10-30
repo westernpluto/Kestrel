@@ -41,8 +41,24 @@ final class ChatController: ObservableObject {
   private var twitchGroups: [TwitchEmoteGroup] = []
   /// Recent chatters, newest first (for @ autocomplete).
   private(set) var recentChatters: [String] = []
-  /// Called with `true` when everything should be re-rendered (emotes/badges loaded).
-  var onUpdate: ((_ fullReload: Bool) -> Void)?
+  /// The views showing this chat (the panel, and the overlay in full screen), told of new messages;
+  /// `true` when everything should be re-rendered (emotes/badges loaded).
+  private struct Listener {
+    weak var owner: AnyObject?
+    let update: (_ fullReload: Bool) -> Void
+  }
+  private var listeners: [Listener] = []
+
+  /// `update` is called until `owner` goes away (capture it weakly).
+  func addListener(_ owner: AnyObject, _ update: @escaping (_ fullReload: Bool) -> Void) {
+    listeners.removeAll { $0.owner == nil || $0.owner === owner }
+    listeners.append(Listener(owner: owner, update: update))
+  }
+
+  private func onUpdate(_ fullReload: Bool) {
+    listeners.removeAll { $0.owner == nil }
+    for listener in listeners { listener.update(fullReload) }
+  }
 
   let channel: Channel
   private var socket: URLSessionWebSocketTask?
@@ -95,7 +111,7 @@ final class ChatController: ObservableObject {
       messages = Array((old + messages).suffix(maxMessages))
       for message in old.reversed() { noteChatter(message.displayName) }
       rebuildEmoteSections()
-      onUpdate?(true)
+      onUpdate(true)
     }
     if isReplay {
       status = .connected
@@ -114,7 +130,7 @@ final class ChatController: ObservableObject {
       // A seek: start over from a little before the new position.
       pending = []
       messages = []
-      onUpdate?(true)
+      onUpdate(true)
     }
     releaseReplay()
     fetchReplayIfNeeded(videoID: videoID)
@@ -130,7 +146,7 @@ final class ChatController: ObservableObject {
     pending = []
     messages = []
     replay = ChatReplayBuffer()
-    onUpdate?(true)
+    onUpdate(true)
     replay(at: position)
   }
 
@@ -145,7 +161,7 @@ final class ChatController: ObservableObject {
     pending = []
     messages = Array(liveStash.suffix(maxMessages))
     liveStash = []
-    onUpdate?(true)
+    onUpdate(true)
   }
 
   private func releaseReplay() {
@@ -326,7 +342,7 @@ final class ChatController: ObservableObject {
     pending.removeAll { $0.id == sent.id }
     if messages.contains(where: { $0.id == sent.id }) {
       messages.removeAll { $0.id == sent.id }
-      onUpdate?(true)
+      onUpdate(true)
     }
     bounced = Bounced(text: sent.text, reason: reason)
   }
@@ -448,7 +464,7 @@ final class ChatController: ObservableObject {
       messages[i].isDeleted = true
       changed = true
     }
-    if changed { onUpdate?(false) }
+    if changed { onUpdate(false) }
   }
 
   /// - Parameter live: from live chat (held back while rewinding), or the replay's.
@@ -470,7 +486,7 @@ final class ChatController: ObservableObject {
     messages.append(contentsOf: pending)
     pending.removeAll()
     if messages.count > maxMessages { messages.removeFirst(messages.count - maxMessages) }
-    onUpdate?(false)
+    onUpdate(false)
   }
 }
 
@@ -549,7 +565,29 @@ enum ChatRenderer {
     text.append(NSAttributedString(attachment: attachment))
   }
 
-  static func render(_ message: ChatMessage, badges: [String: Badge], thirdParty: [String: URL], fontSize: CGFloat, me: String?)
+  /// A soft shadow under the text: readable over a moving picture (the chat overlay).
+  private static let overlayShadow: NSShadow = {
+    let shadow = NSShadow()
+    shadow.shadowColor = UIColor.black.withAlphaComponent(0.9)
+    shadow.shadowOffset = CGSize(width: 0, height: 1)
+    shadow.shadowBlurRadius = 2
+    return shadow
+  }()
+
+  static func render(
+    _ message: ChatMessage, badges: [String: Badge], thirdParty: [String: URL], fontSize: CGFloat, me: String?,
+    shadowed: Bool = false
+  ) -> RenderedMessage {
+    var rendered = renderPlain(message, badges: badges, thirdParty: thirdParty, fontSize: fontSize, me: me)
+    if shadowed {
+      let text = NSMutableAttributedString(attributedString: rendered.text)
+      text.addAttribute(.shadow, value: overlayShadow, range: NSRange(location: 0, length: text.length))
+      rendered.text = text
+    }
+    return rendered
+  }
+
+  private static func renderPlain(_ message: ChatMessage, badges: [String: Badge], thirdParty: [String: URL], fontSize: CGFloat, me: String?)
     -> RenderedMessage
   {
     let font = UIFont.systemFont(ofSize: fontSize)
@@ -761,8 +799,14 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   private var reflowScheduled = false
   var onMention: ((String) -> Void)?
 
-  init(chat: ChatController) {
+  /// The chat panel, or the see-through overlay on a full-screen video (read-only, always on the
+  /// newest messages, text with a shadow).
+  enum Style { case panel, overlay }
+  let style: Style
+
+  init(chat: ChatController, style: Style = .panel) {
     self.chat = chat
+    self.style = style
     super.init(nibName: nil, bundle: nil)
   }
 
@@ -787,6 +831,11 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     tableView.showsVerticalScrollIndicator = false
     tableView.translatesAutoresizingMaskIntoConstraints = false
     view.addSubview(tableView)
+    if style == .overlay {
+      // Nothing to touch: the overlay is moved as a whole, and taps go to the video.
+      view.isUserInteractionEnabled = false
+      tableView.isScrollEnabled = false
+    }
     // A tap anywhere in chat (between messages too) puts the keyboard away; rows and menus still
     // get their touches.
     let tap = UITapGestureRecognizer(target: self, action: #selector(tappedChat))
@@ -816,7 +865,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
       resumeButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10),
     ])
 
-    chat.onUpdate = { [weak self] full in self?.chatUpdated(fullReload: full) }
+    chat.addListener(self) { [weak self] full in self?.chatUpdated(fullReload: full) }
     imageObserver = NotificationCenter.default.addObserver(
       forName: ChatImageEvents.notification, object: nil, queue: .main
     ) { [weak self] _ in
@@ -874,10 +923,16 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   private func render(_ message: ChatMessage) -> RenderedMessage {
     let k = key(message)
     if let cached = rendered[k] { return cached }
-    let result = ChatRenderer.render(
-      message, badges: chat.badges, thirdParty: chat.thirdParty, fontSize: AppSettings.shared.chatFontSize, me: chat.ownLogin)
+    let result = freshRender(message)
     rendered[k] = result
     return result
+  }
+
+  private func freshRender(_ message: ChatMessage) -> RenderedMessage {
+    let size = AppSettings.shared.chatFontSize
+    return ChatRenderer.render(
+      message, badges: chat.badges, thirdParty: chat.thirdParty, fontSize: style == .overlay ? max(12, size - 1) : size,
+      me: chat.ownLogin, shadowed: style == .overlay)
   }
 
   private func chatUpdated(fullReload: Bool) {
@@ -959,8 +1014,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
       guard let old = rendered[k], !old.waiting.isEmpty,
         old.waiting.contains(where: { ImagePipeline.shared.cached($0, maxPixels: 112) != nil })
       else { continue }
-      let fresh = ChatRenderer.render(
-        message, badges: chat.badges, thirdParty: chat.thirdParty, fontSize: AppSettings.shared.chatFontSize, me: chat.ownLogin)
+      let fresh = freshRender(message)
       rendered[k] = fresh
       guard fresh.slots.map(\.size) != old.slots.map(\.size) else { continue }
       changed.append(row)
@@ -1069,24 +1123,25 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     let cell = tableView.dequeueReusableCell(withIdentifier: "chat", for: indexPath) as! ChatCell
     let result = render(displayed[indexPath.row])
     cell.messageView.show(result)
-    cell.contentView.backgroundColor = result.highlighted ? ChatRenderer.accent.withAlphaComponent(0.14) : .clear
+    cell.contentView.backgroundColor =
+      result.highlighted ? ChatRenderer.accent.withAlphaComponent(style == .overlay ? 0.3 : 0.14) : .clear
     return cell
   }
 
   @objc private func tappedChat() {
-    view.window?.endEditing(true)
+    Keyboard.dismiss()
   }
 
   /// A tap on chat just puts the keyboard away (reply by holding a message instead).
   func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: false)
-    view.window?.endEditing(true)
+    Keyboard.dismiss()
   }
 
   func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint)
     -> UIContextMenuConfiguration?
   {
-    guard indexPath.row < displayed.count else { return nil }
+    guard style == .panel, indexPath.row < displayed.count else { return nil }
     let message = displayed[indexPath.row]
     guard message.kind != .notice else { return nil }
     holdForMenu()
@@ -1191,10 +1246,11 @@ private final class GlideTarget: NSObject {
 
 struct ChatMessagesView: UIViewControllerRepresentable {
   let chat: ChatController
+  var style: ChatViewController.Style = .panel
   var onMention: ((String) -> Void)?
 
   func makeUIViewController(context: Context) -> ChatViewController {
-    let controller = ChatViewController(chat: chat)
+    let controller = ChatViewController(chat: chat, style: style)
     controller.onMention = onMention
     return controller
   }
@@ -1208,8 +1264,13 @@ struct ChatMessagesView: UIViewControllerRepresentable {
 /// autocomplete (":" for emotes, "@" for people in chat).
 struct ChatPanel: View {
   @ObservedObject var chat: ChatController
-  /// Space to keep clear at the bottom (home indicator or keyboard).
+  /// Space to keep clear at the bottom: the keyboard (and a little air) while it's up, else the
+  /// home indicator.
   var bottomInset: CGFloat = 0
+  /// The keyboard is up (`bottomInset` is the keyboard's).
+  var keyboardUp = false
+  /// The home indicator's room (under the emote picker).
+  var safeBottom: CGFloat = 0
   /// Landscape: a shorter emote picker.
   var compact = false
   /// False while the player is shrunk into the mini player: the message box can't take focus.
@@ -1218,10 +1279,15 @@ struct ChatPanel: View {
   @State private var draft = ""
   @State private var showLogin = false
   @State private var pickerOpen = false
+  /// The picker takes the keyboard's place exactly, so switching between them leaves the message
+  /// box where it is.
+  @State private var pickerHeight: CGFloat = 280
+  @State private var pickerSwap = 0
   @State private var focused = false
   @State private var warning: String? = nil
 
   private static let spring = Animation.spring(response: 0.32, dampingFraction: 0.86)
+  private var pickerPad: CGFloat { min(safeBottom, 24) }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -1240,17 +1306,18 @@ struct ChatPanel: View {
       inputBar
       if pickerOpen {
         EmotePicker(sections: chat.emoteSections) { insert($0.name) }
-          .frame(height: compact ? 190 : 280)
+          .frame(height: pickerHeight)
           .transition(.move(edge: .bottom).combined(with: .opacity))
       }
     }
-    .padding(.bottom, pickerOpen ? min(bottomInset, 24) : bottomInset)
-    .animation(Self.spring, value: pickerOpen)
+    // While the keyboard comes or goes behind the open picker, the box stays on top of whichever
+    // is taller.
+    .padding(.bottom, pickerOpen ? max(pickerPad, bottomInset - pickerHeight) : bottomInset)
     .animation(.easeOut(duration: 0.15), value: suggestions.isEmpty)
     .sheet(isPresented: $showLogin) { TwitchLoginView() }
     .onChange(of: account.session?.login) { _ in chat.reconnect() }
     .onChange(of: focused) { isFocused in
-      if isFocused, pickerOpen { pickerOpen = false }
+      if isFocused, pickerOpen { closePickerUnderKeyboard() }
     }
     .onChange(of: active) { isActive in
       guard !isActive else { return }
@@ -1361,6 +1428,42 @@ struct ChatPanel: View {
     draft += name + " "
   }
 
+  // MARK: Emote picker ↔ keyboard
+
+  private func openPicker() {
+    pickerSwap += 1
+    if keyboardUp {
+      // Exactly where the keyboard is: it slides away underneath, and the box doesn't move.
+      pickerHeight = max(140, bottomInset - pickerPad)
+      var transaction = Transaction()
+      transaction.disablesAnimations = true
+      withTransaction(transaction) { pickerOpen = true }
+      focused = false
+    } else {
+      pickerHeight = KeyboardObserver.lastHeight.map { max(140, $0 + 14 - pickerPad) } ?? (compact ? 190 : 280)
+      withAnimation(Self.spring) { pickerOpen = true }
+    }
+  }
+
+  /// The keyboard was asked for: it comes up over the picker, which goes once it's covered (the
+  /// box rides on whichever is taller meanwhile, so nothing jumps).
+  private func closePickerUnderKeyboard() {
+    pickerSwap += 1
+    let swap = pickerSwap
+    let pad = pickerPad
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+      guard swap == pickerSwap, pickerOpen, focused else { return }
+      let keyboardSpace = (KeyboardObserver.lastHeight ?? 0) + 14
+      if FirstResponder.current is EmoteTextView, abs(keyboardSpace - (pickerHeight + pad)) < 3 {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { pickerOpen = false }
+      } else {
+        withAnimation(Self.spring) { pickerOpen = false }
+      }
+    }
+  }
+
   // MARK: Input
 
   @ViewBuilder
@@ -1385,21 +1488,21 @@ struct ChatPanel: View {
         }
         // Bottom-aligned: as the box grows with longer messages, its buttons stay by the last line.
         HStack(alignment: .bottom, spacing: 8) {
-          HStack(alignment: .bottom, spacing: 4) {
-            EmoteTextField(
-              text: $draft, isFocused: $focused,
-              placeholder: !chat.canSend ? "Joining chat…" : chat.emoteOnly ? "Emotes only" : "Send a message",
-              enabled: chat.canSend && active,
-              emoteURL: { chat.emoteURL(for: $0) }, onSubmit: send
-            )
-            .frame(minHeight: EmoteTextField.minHeight)
+          EmoteTextField(
+            text: $draft, isFocused: $focused,
+            placeholder: !chat.canSend ? "Joining chat…" : chat.emoteOnly ? "Emotes only" : "Send a message",
+            enabled: chat.canSend && active,
+            emoteURL: { chat.emoteURL(for: $0) }, onSubmit: send
+          )
+          .frame(minHeight: EmoteTextField.minHeight)
+          .padding(.leading, 12)
+          .padding(.trailing, 40)
+          .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+          // Part of the box itself (not a neighbour in a row), so it moves with the box and can't
+          // drift out of it while the keyboard comes and goes.
+          .overlay(alignment: .bottomTrailing) {
             Button {
-              if pickerOpen {
-                focused = true
-              } else {
-                focused = false
-                pickerOpen = true
-              }
+              if pickerOpen { focused = true } else { openPicker() }
             } label: {
               Image(systemName: pickerOpen ? "keyboard" : "face.smiling")
                 .font(.system(size: 18, weight: .medium))
@@ -1407,12 +1510,10 @@ struct ChatPanel: View {
                 .frame(width: 32, height: 32)
                 .contentShape(Rectangle())
             }
+            .padding(.trailing, 4)
             .padding(.bottom, 2)
             .accessibilityLabel(pickerOpen ? "Keyboard" : "Emotes")
           }
-          .padding(.leading, 12)
-          .padding(.trailing, 4)
-          .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
           Button(action: send) {
             Image(systemName: "paperplane.fill").font(.system(size: 16, weight: .semibold))
               .frame(width: 36, height: 36)

@@ -37,7 +37,13 @@
     private var failures: [Date] = []
     private var adTimeline = AdTimeline()
     private var adState: AdState = .none
-    private var mutedForAd = false
+    /// A multi-view tile: starts on Auto, no Picture in Picture, and pauses in the background
+    /// unless it's the one being listened to.
+    var tile = false
+    /// Muted by choice (multi-view: every tile but the one being listened to).
+    private var userMuted = false
+    /// The tallest picture worth fetching (multi-view: as big as the tile is shown); nil for any.
+    private var maxHeight: Int?
     private var stopped = false
     private weak var view: IVSPlayerView?
     private var pip: AVPictureInPictureController?
@@ -132,6 +138,7 @@
       player.setRebufferToLive(true)
       player.setNetworkRecoveryMode(.resume)
       player.autoQualityMode = false
+      if tile { chosen = nil }
       let center = NotificationCenter.default
       notificationTokens.append(
         center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
@@ -361,10 +368,15 @@
     private func applyAutoCap() {
       let video = videoQualities
       guard chosen == nil, !video.isEmpty else { return }
-      let cap = steadyAuto.cap.map { min($0, video.count - 1) }
+      let steady = steadyAuto.cap.map { min($0, video.count - 1) }
+      var cap = steady
+      if let maxHeight, let index = video.firstIndex(where: { min($0.width, $0.height) <= maxHeight }) {
+        cap = max(cap ?? 0, index)
+      }
       guard cap != appliedAutoCap else { return }
       appliedAutoCap = cap
       player.setAutoMaxQuality(video[cap ?? 0])
+      if tile { return }
       if let cap, cap > 0 {
         ActivityLog.shared.add(
           "Auto quality: staying at \(Self.label(video[cap])) or lower for now (\(Self.label(video[cap - 1])) kept stalling)")
@@ -442,7 +454,7 @@
         player.autoQualityMode = true
         // The player forgets its limit on a new stream: hand it over again.
         appliedAutoCap = nil
-        if steadyAuto.cap != nil { applyAutoCap() }
+        if steadyAuto.cap != nil || maxHeight != nil { applyAutoCap() }
         return
       }
       guard index < menuQualities.count else { return }
@@ -510,7 +522,8 @@
       // Auto: let it try a better quality again once a hold is over; remember what plays well.
       if chosen == nil, !audioOnlyForBackground {
         if steadyAuto.tick() { applyAutoCap() }
-        if let rank = steadyAuto.steadyRank(), rank < videoQualities.count {
+        // (Not from a multi-view tile: its limit is its size on screen, not the connection.)
+        if !tile, let rank = steadyAuto.steadyRank(), rank < videoQualities.count {
           PlaybackMemory.autoBitrate = videoQualities[rank].bitrate
         }
       }
@@ -533,13 +546,7 @@
       // on screen (stamped `latency` seconds ago) is inside an ad.
       let inAd = latency.map { adTimeline.covers(Date().addingTimeInterval(-$0)) } ?? adTimeline.isActive
       if inAd != model.coveringAd { model.coveringAd = inAd }
-      if inAd, !player.muted {
-        player.muted = true
-        mutedForAd = true
-      } else if !inAd, mutedForAd {
-        player.muted = false
-        mutedForAd = false
-      }
+      if player.muted != (inAd || userMuted) { player.muted = inAd || userMuted }
       let shown: AdState = inAd ? .covering : (adState == .covering ? .searching : adState)
       if model.adState != shown { model.adState = shown }
     }
@@ -641,6 +648,18 @@
       view?.videoGravity = fill ? .resizeAspectFill : .resizeAspect
     }
 
+    func setMuted(_ muted: Bool) {
+      userMuted = muted
+      let wanted = muted || (model?.coveringAd ?? false)
+      if player.muted != wanted { player.muted = wanted }
+    }
+
+    func setMaxHeight(_ height: Int?) {
+      guard height != maxHeight else { return }
+      maxHeight = height
+      applyAutoCap()
+    }
+
     func togglePictureInPicture() {
       if let pip, pip.isPictureInPictureActive {
         pip.stopPictureInPicture()
@@ -666,7 +685,7 @@
       guard self.view !== view else { return }
       self.view = view
       if !detachedForBackground { view.player = player }
-      makePictureInPicture(for: view)
+      if !tile { makePictureInPicture(for: view) }
     }
 
     private func makePictureInPicture(for view: IVSPlayerView) {
@@ -709,7 +728,7 @@
       guard !stopped, !suspended, UIApplication.shared.applicationState == .background,
         !proxy.pictureInPictureStarting, !(pip?.isPictureInPictureActive ?? false)
       else { return }
-      if AppSettings.shared.backgroundAudio {
+      if AppSettings.shared.backgroundAudio, !(tile && userMuted) {
         // Keep the sound: take the picture off screen, and if it stays in the background a while,
         // switch to the audio-only rendition (saves data and battery while only listening).
         detachedForBackground = true
@@ -746,7 +765,7 @@
         detachedForBackground = false
         view?.player = player
         // A fresh PiP controller for the picture that's back (the old one could stop working).
-        if let view, !(pip?.isPictureInPictureActive ?? false) { makePictureInPicture(for: view) }
+        if let view, !tile, !(pip?.isPictureInPictureActive ?? false) { makePictureInPicture(for: view) }
       }
       if audioOnlyForBackground {
         // Back to the picture without stopping the sound to rebuffer.

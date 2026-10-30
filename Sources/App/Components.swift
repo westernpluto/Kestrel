@@ -256,6 +256,7 @@ struct StreamRow: View {
     .buttonStyle(PressableStyle(scale: 0.98))
     .contextMenu {
       Button { app.playing = .live(stream.channel) } label: { Label("Watch", systemImage: "play.fill") }
+      Button { app.openMultiview([stream.channel]) } label: { Label("Watch with others", systemImage: "rectangle.split.2x2") }
       Button { app.push(.channel(stream.channel)) } label: { Label("Open channel", systemImage: "person.crop.circle") }
       if let category = stream.category {
         Button { app.push(.category(category)) } label: { Label(category.name, systemImage: "square.grid.2x2") }
@@ -362,6 +363,7 @@ struct StreamCard: View {
     .contextMenu {
       if showChannel {
         Button { app.playing = .live(stream.channel) } label: { Label("Watch", systemImage: "play.fill") }
+        Button { app.openMultiview([stream.channel]) } label: { Label("Watch with others", systemImage: "rectangle.split.2x2") }
         Button { app.push(.channel(stream.channel)) } label: { Label("Open channel", systemImage: "person.crop.circle") }
         if let category = stream.category {
           Button { app.push(.category(category)) } label: { Label(category.name, systemImage: "square.grid.2x2") }

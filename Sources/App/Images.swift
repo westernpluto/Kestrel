@@ -4,19 +4,33 @@ import UIKit
 
 /// Loads, decodes (including animated GIF/WebP/APNG) and caches images: avatars, thumbnails,
 /// emotes, badges.
+///
+/// Busy chat asks for dozens of emotes at once, many of them animated (every frame decoded up
+/// front, so all copies on screen can share them). Decoding runs a few at a time, and an animated
+/// picture's first frame is handed out straight away while the rest decode at lower priority: every
+/// emote shows up quickly and starts moving a moment later, instead of all of them waiting on the
+/// biggest animations.
 final class ImagePipeline: @unchecked Sendable {
   static let shared = ImagePipeline()
 
   private let cache = NSCache<NSString, UIImage>()
   private let lock = NSLock()
   private var waiting: [String: [(UIImage?) -> Void]] = [:]
+  /// Cached as a first frame, with the whole animation still decoding.
+  private var upgrading: Set<String> = []
   private var failuresLogged: Set<String> = []
-  private let decodeQueue = DispatchQueue(label: "kestrel.images", qos: .userInitiated, attributes: .concurrent)
+  private let decodeQueue: OperationQueue = {
+    let queue = OperationQueue()
+    queue.name = "kestrel.images"
+    queue.qualityOfService = .userInitiated
+    queue.maxConcurrentOperationCount = max(2, ProcessInfo.processInfo.activeProcessorCount - 2)
+    return queue
+  }()
   private let session: URLSession = {
     let configuration = URLSessionConfiguration.default
     configuration.urlCache = URLCache(memoryCapacity: 24 << 20, diskCapacity: 250 << 20)
     configuration.requestCachePolicy = .useProtocolCachePolicy
-    configuration.httpMaximumConnectionsPerHost = 8
+    configuration.httpMaximumConnectionsPerHost = 10
     configuration.timeoutIntervalForRequest = 20
     configuration.httpAdditionalHeaders = [
       "User-Agent": Browser.userAgent,
@@ -33,8 +47,16 @@ final class ImagePipeline: @unchecked Sendable {
     maxPixels.map { "\(url.absoluteString)#\(Int($0))" } ?? url.absoluteString
   }
 
+  /// The picture if it's in memory (for an animation still decoding: its first frame).
   func cached(_ url: URL, maxPixels: CGFloat? = nil) -> UIImage? {
     cache.object(forKey: Self.key(url, maxPixels) as NSString)
+  }
+
+  /// Only the first frame is in memory so far; `load` hands out the whole animation when it's ready.
+  func isUpgrading(_ url: URL, maxPixels: CGFloat? = nil) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return upgrading.contains(Self.key(url, maxPixels))
   }
 
   func clear() {
@@ -48,60 +70,101 @@ final class ImagePipeline: @unchecked Sendable {
   /// - Parameters:
   ///   - maxPixels: downsample so the longer side is at most this many pixels.
   ///   - fallback: tried when `url` fails (e.g. the original size of a resized Twitch image).
-  ///   - completion: called on the main queue.
+  ///   - completion: called on the main queue, or straight away when it's in memory. For an
+  ///     animated picture it can be called twice: with the first frame, then the animation.
   func load(_ url: URL, maxPixels: CGFloat? = nil, fallback: URL? = nil, completion: @escaping (UIImage?) -> Void) {
     let key = Self.key(url, maxPixels)
-    if let image = cache.object(forKey: key as NSString) {
+    lock.lock()
+    let image = cache.object(forKey: key as NSString)
+    if let image, !upgrading.contains(key) {
+      lock.unlock()
       completion(image)
       return
     }
-    lock.lock()
     if waiting[key] != nil {
       waiting[key]?.append(completion)
       lock.unlock()
+      if let image { completion(image) }
       return
     }
     waiting[key] = [completion]
     lock.unlock()
-    fetch(url, maxPixels: maxPixels, fallback: fallback, attempt: 1) { [weak self] image in
-      guard let self else { return }
-      if let image { self.cache.setObject(image, forKey: key as NSString, cost: Self.cost(image)) }
-      self.lock.lock()
-      let callbacks = self.waiting.removeValue(forKey: key) ?? []
-      self.lock.unlock()
-      DispatchQueue.main.async { callbacks.forEach { $0(image) } }
-    }
+    fetch(url, maxPixels: maxPixels, fallback: fallback, attempt: 1, key: key)
   }
 
-  private func fetch(_ url: URL, maxPixels: CGFloat?, fallback: URL?, attempt: Int, done: @escaping (UIImage?) -> Void) {
-    session.dataTask(with: url) { [weak self] data, response, error in
+  /// Hands a picture to everyone waiting for it: `final` ends the wait (else it's a first frame,
+  /// with the whole animation to come).
+  private func deliver(_ key: String, _ image: UIImage?, final: Bool) {
+    lock.lock()
+    var picture = image
+    if let image {
+      cache.setObject(image, forKey: key as NSString, cost: Self.cost(image))
+    } else if final {
+      // The animation didn't decode: keep the first frame if there is one.
+      picture = cache.object(forKey: key as NSString)
+    }
+    let callbacks: [(UIImage?) -> Void]
+    if final {
+      callbacks = waiting.removeValue(forKey: key) ?? []
+      upgrading.remove(key)
+    } else {
+      callbacks = waiting[key] ?? []
+      upgrading.insert(key)
+    }
+    lock.unlock()
+    DispatchQueue.main.async { callbacks.forEach { $0(picture) } }
+  }
+
+  private func fetch(_ url: URL, maxPixels: CGFloat?, fallback: URL?, attempt: Int, key: String) {
+    let task = session.dataTask(with: url) { [weak self] data, response, error in
       guard let self else { return }
       let status = (response as? HTTPURLResponse)?.statusCode ?? 0
       if let data, (200..<300).contains(status) {
-        self.decodeQueue.async {
-          if let image = Self.decode(data, maxPixels: maxPixels) {
-            done(image)
-          } else {
-            self.logFailure(url, "couldn't decode \(data.count) bytes (\(response?.mimeType ?? "?"))")
-            done(nil)
-          }
-        }
+        self.decode(data, maxPixels: maxPixels, key: key, url: url, mimeType: response?.mimeType)
         return
       }
       // Retry network hiccups once; then try the fallback address.
       if status == 0 || status >= 500, attempt < 2 {
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) {
-          self.fetch(url, maxPixels: maxPixels, fallback: fallback, attempt: attempt + 1, done: done)
+          self.fetch(url, maxPixels: maxPixels, fallback: fallback, attempt: attempt + 1, key: key)
         }
         return
       }
       if let fallback, fallback != url {
-        self.fetch(fallback, maxPixels: maxPixels, fallback: nil, attempt: 1, done: done)
+        self.fetch(fallback, maxPixels: maxPixels, fallback: nil, attempt: 1, key: key)
         return
       }
       self.logFailure(url, status == 0 ? (error?.localizedDescription ?? "no response") : "HTTP \(status)")
-      done(nil)
-    }.resume()
+      self.deliver(key, nil, final: true)
+    }
+    // Small pictures (emotes, badges) first: they're what chat is waiting on.
+    if let maxPixels, maxPixels <= 160 { task.priority = URLSessionTask.highPriority }
+    task.resume()
+  }
+
+  private func decode(_ data: Data, maxPixels: CGFloat?, key: String, url: URL, mimeType: String?) {
+    let first = BlockOperation { [weak self] in
+      guard let self else { return }
+      guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+        CGImageSourceGetCount(source) > 1
+      else {
+        let image = Self.decode(data, maxPixels: maxPixels)
+        if image == nil { self.logFailure(url, "couldn't decode \(data.count) bytes (\(mimeType ?? "?"))") }
+        self.deliver(key, image, final: true)
+        return
+      }
+      // Animated: its first frame now, the whole animation once the frames are decoded.
+      if let frame = Self.frame(source, 0, maxPixels: maxPixels) {
+        self.deliver(key, UIImage(cgImage: frame, scale: 2, orientation: .up), final: false)
+      }
+      let rest = BlockOperation { [weak self] in
+        self?.deliver(key, Self.decode(data, maxPixels: maxPixels), final: true)
+      }
+      rest.queuePriority = .low
+      self.decodeQueue.addOperation(rest)
+    }
+    first.queuePriority = .high
+    decodeQueue.addOperation(first)
   }
 
   /// One activity-log line per host, so a broken image source is visible without flooding.
@@ -118,30 +181,34 @@ final class ImagePipeline: @unchecked Sendable {
     return Int(image.size.width * image.size.height * image.scale * image.scale * 4) * max(1, frames)
   }
 
+  private static func thumbnailOptions(_ maxPixels: CGFloat?) -> CFDictionary {
+    [
+      kCGImageSourceCreateThumbnailFromImageAlways: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceShouldCacheImmediately: true,
+      kCGImageSourceThumbnailMaxPixelSize: maxPixels ?? 2048,
+    ] as CFDictionary
+  }
+
+  private static func frame(_ source: CGImageSource, _ index: Int, maxPixels: CGFloat?) -> CGImage? {
+    CGImageSourceCreateThumbnailAtIndex(source, index, thumbnailOptions(maxPixels))
+      ?? CGImageSourceCreateImageAtIndex(source, index, nil)
+  }
+
   /// Decodes still and animated images with ImageIO.
   static func decode(_ data: Data, maxPixels: CGFloat?) -> UIImage? {
     guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else {
       return UIImage(data: data)
     }
     let count = CGImageSourceGetCount(source)
-    let options: [CFString: Any] = [
-      kCGImageSourceCreateThumbnailFromImageAlways: true,
-      kCGImageSourceCreateThumbnailWithTransform: true,
-      kCGImageSourceShouldCacheImmediately: true,
-      kCGImageSourceThumbnailMaxPixelSize: maxPixels ?? 2048,
-    ]
-    func frame(_ index: Int) -> CGImage? {
-      CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary)
-        ?? CGImageSourceCreateImageAtIndex(source, index, nil)
-    }
     guard count > 1 else {
-      return frame(0).map { UIImage(cgImage: $0, scale: 2, orientation: .up) } ?? UIImage(data: data)
+      return frame(source, 0, maxPixels: maxPixels).map { UIImage(cgImage: $0, scale: 2, orientation: .up) } ?? UIImage(data: data)
     }
     // Animated: lay frames on a 20 ms grid so each keeps its own delay.
     var frames: [UIImage] = []
     var total: Double = 0
     for index in 0..<min(count, 400) {
-      guard let image = frame(index) else { continue }
+      guard let image = frame(source, index, maxPixels: maxPixels) else { continue }
       let delay = frameDelay(source, index)
       total += delay
       let still = UIImage(cgImage: image, scale: 2, orientation: .up)
@@ -233,17 +300,32 @@ final class LoadingImageView: UIImageView {
     }
     if let cached = ImagePipeline.shared.cached(url, maxPixels: maxPixels) {
       show(cached)
+      // Only its first frame so far: the animation follows.
+      guard ImagePipeline.shared.isUpgrading(url, maxPixels: maxPixels) else { return }
+      ImagePipeline.shared.load(url, maxPixels: maxPixels, fallback: fallback) { [weak self] image in
+        guard let self, self.current == url, let image, image !== self.shownPicture else { return }
+        self.show(image)
+      }
       return
     }
     show(nil)
     ImagePipeline.shared.load(url, maxPixels: maxPixels, fallback: fallback) { [weak self] image in
-      guard let self, self.current == url else { return }
-      UIView.transition(with: self, duration: 0.15, options: .transitionCrossDissolve) { self.show(image) }
+      guard let self, self.current == url, image == nil || image !== self.shownPicture else { return }
+      if self.shownPicture == nil {
+        UIView.transition(with: self, duration: 0.15, options: .transitionCrossDissolve) { self.show(image) }
+      } else if let image {
+        // The animation taking over from its first frame: no fade (it starts on the same frame).
+        self.show(image)
+      }
     }
   }
 
+  /// What's on screen (the first frame of an animation until the animation arrives).
+  private(set) var shownPicture: UIImage?
+
   /// Shows a picture; an animated one plays by itself for as long as it's on screen.
   private func show(_ picture: UIImage?) {
+    shownPicture = picture
     guard let picture, let frames = picture.images, frames.count > 1 else {
       animatedPicture = nil
       if let framesLayer {

@@ -81,6 +81,8 @@ final class AppSettings: ObservableObject {
   @Published var nearbyServers: Bool { didSet { defaults.set(nearbyServers, forKey: "nearbyServers") } }
   /// Upscale the picture with MetalFX (see VideoUpscaler).
   @Published var upscale: Bool { didSet { defaults.set(upscale, forKey: "upscale") } }
+  /// VODs: jump past the parts Twitch muted for copyright as playback reaches them.
+  @Published var skipMutedParts: Bool { didSet { defaults.set(skipMutedParts, forKey: "skipMutedParts") } }
   // The user's own HTTP proxy (AdBlocking.customProxy).
   @Published var proxyHost: String { didSet { defaults.set(proxyHost, forKey: "proxyHost"); applyProxy() } }
   @Published var proxyPort: String { didSet { defaults.set(proxyPort, forKey: "proxyPort"); applyProxy() } }
@@ -113,6 +115,7 @@ final class AppSettings: ObservableObject {
     autoQuality = defaults.bool(forKey: "autoQuality")
     nearbyServers = defaults.bool(forKey: "nearbyServers")
     upscale = defaults.bool(forKey: "upscale")
+    skipMutedParts = defaults.bool(forKey: "skipMutedParts")
     proxyHost = defaults.string(forKey: "proxyHost") ?? ""
     proxyPort = defaults.string(forKey: "proxyPort") ?? ""
     proxyUsername = defaults.string(forKey: "proxyUsername") ?? ""
@@ -230,6 +233,11 @@ enum PlaybackTarget: Identifiable, Hashable {
   }
 }
 
+struct MultiviewRequest: Identifiable, Equatable {
+  let id = UUID()
+  var channels: [Channel]
+}
+
 /// The app's sections (not `Tab`: that's a SwiftUI type in newer SDKs).
 enum AppTab: Hashable {
   case following, browse, search, settings
@@ -253,9 +261,23 @@ enum Route: Hashable {
 
 final class AppModel: ObservableObject {
   static let shared = AppModel()
-  /// What's playing. Setting it (even to what's already in the mini player) opens the player.
+  /// What's playing. Setting it (even to what's already in the mini player) opens the player (and
+  /// closes multi-view: one or the other).
   @Published var playing: PlaybackTarget? {
-    didSet { if playing != nil { playerMinimized = false } }
+    didSet {
+      if playing != nil {
+        playerMinimized = false
+        if multiview != nil { multiview = nil }
+      }
+    }
+  }
+  /// Multi-view (several live streams at once): the streams it opened with; nil while closed.
+  @Published var multiview: MultiviewRequest?
+
+  /// Opens multi-view with these streams (the player closes: its stream can be one of them).
+  func openMultiview(_ channels: [Channel]) {
+    playing = nil
+    multiview = MultiviewRequest(channels: channels)
   }
   /// The player is shrunk into the mini player above the tab bar.
   @Published var playerMinimized = false
@@ -313,6 +335,11 @@ enum Format {
   static func duration(_ seconds: Int) -> String {
     let h = seconds / 3600, m = seconds % 3600 / 60, s = seconds % 60
     return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+  }
+
+  /// "2:03:15": hours, minutes and seconds (hours always shown, as for how long a stream's been live).
+  static func clock(_ seconds: Int) -> String {
+    String(format: "%d:%02d:%02d", seconds / 3600, seconds % 3600 / 60, seconds % 60)
   }
 
   static func uptime(since date: Date?) -> String? {

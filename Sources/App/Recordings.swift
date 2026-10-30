@@ -307,7 +307,7 @@ struct RecordingsView: View {
     .navigationTitle("Recordings")
     .onAppear { store.reload() }
     .fullScreenCover(item: $playing) { info in
-      RecordingPlayerScreen(info: info, url: store.playbackURL(info), recording: store.active[info.id] != nil)
+      RecordingPlayerScreen(info: info, url: store.playbackURL(info))
     }
   }
 
@@ -373,119 +373,404 @@ struct RecordingRow: View {
 
 // MARK: - Playback
 
-/// Plays a recording with the system player (seek bar, skips, Picture in Picture), picking up
-/// where it was left, or from the start.
+/// Plays a recording with Kestrel's own controls: a seek bar from the start to the newest part
+/// recorded (it keeps growing while the recording is made, like a stream's VOD while it's live),
+/// ten-second skips, a jump to the newest part, Picture in Picture, and the sound carrying on in
+/// the background. Picks up where it was left, or starts from the beginning.
 struct RecordingPlayerScreen: View {
   let info: RecordingInfo
   let url: URL?
-  let recording: Bool
+  @ObservedObject private var store = RecordingStore.shared
   @Environment(\.dismiss) private var dismiss
   @StateObject private var playback = RecordingPlayback()
+  @State private var controlsVisible = true
+  @State private var hideTask: Task<Void, Never>? = nil
+  @State private var fill = false
+
+  private var recording: Bool { store.active[info.id] != nil }
 
   var body: some View {
-    VStack(spacing: 0) {
-      HStack(spacing: 10) {
-        VStack(alignment: .leading, spacing: 2) {
-          HStack(spacing: 6) {
-            Text(info.channelName).font(.headline)
-            if recording {
-              Label("REC", systemImage: "record.circle.fill").font(.caption2.weight(.heavy)).foregroundColor(.liveRed)
-            }
-          }
-          if let title = info.title, !title.isEmpty {
-            Text(title).font(.footnote).foregroundColor(.secondary).lineLimit(1)
-          }
+    GeometryReader { geometry in
+      let landscape = geometry.size.width > geometry.size.height
+      ZStack {
+        Color.black
+        RecordingVideoSurface(playback: playback, fill: fill)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .ignoresSafeArea()
+        Color.black.opacity(0.001)
+          .contentShape(Rectangle())
+          .onTapGesture(count: 2) { withAnimation(.easeInOut(duration: 0.25)) { fill.toggle() } }
+          .onTapGesture { toggleControls() }
+          .ignoresSafeArea()
+        if playback.buffering && !playback.isPaused {
+          ProgressView().tint(.white).scaleEffect(1.2).allowsHitTesting(false)
         }
-        Spacer(minLength: 8)
-        if recording {
-          // Caught up: on to the stream itself.
-          Button {
-            let channel = Channel(
-              id: info.channelID ?? "", login: info.login, displayName: info.channelName, profileImageURL: info.profileImageURL)
-            dismiss()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { AppModel.shared.playing = .live(channel) }
-          } label: {
-            Text("Watch live").font(.subheadline.weight(.semibold))
-              .padding(.horizontal, 12).padding(.vertical, 7)
-              .background(Color.liveRed, in: Capsule())
-          }
-          .accessibilityHint("Closes the recording and opens the live stream")
-        }
-        Button {
-          dismiss()
-        } label: {
-          Image(systemName: "xmark").font(.system(size: 17, weight: .bold)).frame(width: 44, height: 44)
-            .contentShape(Rectangle())
-        }
-        .accessibilityLabel("Close")
+        controls(landscape: landscape)
+          .opacity(controlsShown ? 1 : 0)
+          .allowsHitTesting(controlsShown)
+          .animation(.easeInOut(duration: 0.22), value: controlsShown)
       }
-      .padding(.horizontal, 12)
-      .foregroundColor(.white)
-      SystemVideoPlayer(player: playback.player)
     }
     .background(Color.black.ignoresSafeArea())
     .preferredColorScheme(.dark)
-    .onAppear { if let url { playback.start(url: url, id: info.id) } }
-    .onDisappear { playback.finish() }
+    .statusBarHidden(!controlsShown)
+    .onAppear {
+      OrientationLock.playerVisible(true)
+      if let url { playback.start(url: url, id: info.id) }
+      scheduleHide()
+    }
+    .onDisappear {
+      playback.finish()
+      if AppModel.shared.playing == nil { OrientationLock.playerVisible(false) }
+    }
+  }
+
+  private var controlsShown: Bool { controlsVisible || playback.isPaused }
+
+  private func controls(landscape: Bool) -> some View {
+    ZStack {
+      LinearGradient(colors: [.black.opacity(0.65), .clear, .clear, .black.opacity(0.75)], startPoint: .top, endPoint: .bottom)
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+      VStack(spacing: 0) {
+        topBar
+        Spacer(minLength: 0)
+        bottomBar
+      }
+      .padding(.horizontal, landscape ? 12 : 8)
+      .padding(.vertical, 6)
+      HStack(spacing: landscape ? 44 : 30) {
+        roundButton(icon: "gobackward.10", size: 50, label: "Back 10 seconds") { playback.skip(by: -10) }
+        roundButton(icon: playback.isPaused ? "play.fill" : "pause.fill", size: 64, label: playback.isPaused ? "Play" : "Pause") {
+          playback.togglePause()
+        }
+        roundButton(icon: "goforward.10", size: 50, label: "Forward 10 seconds") { playback.skip(by: 10) }
+          .opacity(playback.canSkipForward ? 1 : 0.35)
+          .disabled(!playback.canSkipForward)
+      }
+    }
+    .foregroundColor(.white)
+  }
+
+  private var topBar: some View {
+    HStack(spacing: 10) {
+      Button {
+        dismiss()
+      } label: {
+        Image(systemName: "chevron.down").font(.system(size: 18, weight: .semibold)).frame(width: 40, height: 40)
+          .contentShape(Rectangle())
+      }
+      .accessibilityLabel("Close")
+      Avatar(url: info.profileImageURL, size: 30)
+      VStack(alignment: .leading, spacing: 1) {
+        HStack(spacing: 6) {
+          Text(info.channelName).font(.subheadline.weight(.bold))
+          if recording {
+            Label("REC", systemImage: "record.circle.fill").font(.caption2.weight(.heavy)).foregroundColor(.liveRed)
+              .labelStyle(.titleAndIcon)
+          }
+        }
+        if let title = info.title, !title.isEmpty {
+          Text(title).font(.caption).foregroundColor(.white.opacity(0.75))
+        }
+      }
+      .lineLimit(1)
+      Spacer(minLength: 6)
+      AirPlayButton().frame(width: 40, height: 40)
+      if AVPictureInPictureController.isPictureInPictureSupported() {
+        Button {
+          playback.togglePictureInPicture()
+        } label: {
+          Image(systemName: playback.pictureInPictureActive ? "pip.exit" : "pip.enter")
+            .font(.system(size: 18, weight: .semibold)).frame(width: 40, height: 40).contentShape(Rectangle())
+        }
+        .accessibilityLabel("Picture in Picture")
+      }
+      if recording {
+        // Caught up: on to the stream itself.
+        Button {
+          let channel = Channel(
+            id: info.channelID ?? "", login: info.login, displayName: info.channelName, profileImageURL: info.profileImageURL)
+          dismiss()
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { AppModel.shared.playing = .live(channel) }
+        } label: {
+          Text("Watch live").font(.footnote.weight(.semibold))
+            .padding(.horizontal, 11).padding(.vertical, 6)
+            .background(Color.liveRed, in: Capsule())
+        }
+        .accessibilityHint("Closes the recording and opens the live stream")
+      }
+    }
+  }
+
+  private var bottomBar: some View {
+    VStack(spacing: 2) {
+      if playback.end > 0 {
+        SeekBar(
+          position: playback.position, duration: playback.end, storyboard: nil,
+          label: { [recording, playback] time in
+            recording && playback.end - time < 15 ? "Latest" : Format.duration(Int(time))
+          },
+          onStart: { hideTask?.cancel() },
+          onCommit: { time in
+            playback.seek(to: time)
+            scheduleHide()
+          }
+        )
+        .padding(.horizontal, 4)
+      }
+      HStack(spacing: 10) {
+        Text("\(Format.duration(Int(playback.position))) / \(Format.duration(Int(playback.end)))")
+          .font(.caption.monospacedDigit())
+        if recording {
+          // How far behind the newest recorded part, and a jump there.
+          Button {
+            playback.jumpToNewest()
+            scheduleHide()
+          } label: {
+            Text("LATEST").font(.caption.weight(.heavy))
+              .padding(.horizontal, 6).padding(.vertical, 2)
+              .background(playback.atNewest ? Color.liveRed : Color.gray, in: RoundedRectangle(cornerRadius: 4))
+          }
+          .accessibilityLabel("Jump to the newest part recorded")
+          if !playback.atNewest {
+            Text("\(Format.duration(Int(playback.end - playback.position))) behind")
+              .font(.caption.monospacedDigit()).foregroundColor(.white.opacity(0.75))
+          }
+        }
+        Spacer()
+        Button {
+          withAnimation(.easeInOut(duration: 0.25)) { fill.toggle() }
+          scheduleHide()
+        } label: {
+          Image(systemName: fill ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+            .font(.system(size: 17, weight: .semibold)).frame(width: 40, height: 40).contentShape(Rectangle())
+        }
+        .accessibilityLabel(fill ? "Fit the picture" : "Fill the screen")
+      }
+    }
+  }
+
+  private func roundButton(icon: String, size: CGFloat, label: String, action: @escaping () -> Void) -> some View {
+    Button {
+      action()
+      scheduleHide()
+    } label: {
+      Image(systemName: icon)
+        .font(.system(size: size > 60 ? 30 : 22, weight: .semibold))
+        .frame(width: size, height: size)
+        .background(.black.opacity(0.35), in: Circle())
+    }
+    .buttonStyle(PressableStyle(scale: 0.88))
+    .accessibilityLabel(label)
+  }
+
+  private func toggleControls() {
+    if controlsVisible {
+      hideTask?.cancel()
+      controlsVisible = false
+    } else {
+      scheduleHide()
+    }
+  }
+
+  private func scheduleHide() {
+    hideTask?.cancel()
+    controlsVisible = true
+    hideTask = Task {
+      try? await Task.sleep(nanoseconds: 3_500_000_000)
+      guard !Task.isCancelled else { return }
+      controlsVisible = false
+    }
   }
 }
 
-final class RecordingPlayback: ObservableObject {
+/// The recording's picture (with Picture in Picture).
+struct RecordingVideoSurface: UIViewRepresentable {
+  let playback: RecordingPlayback
+  var fill: Bool
+
+  func makeUIView(context: Context) -> PlayerLayerView {
+    let view = PlayerLayerView()
+    view.backgroundColor = .black
+    view.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+    playback.attach(view)
+    return view
+  }
+
+  func updateUIView(_ view: PlayerLayerView, context: Context) {
+    let gravity: AVLayerVideoGravity = fill ? .resizeAspectFill : .resizeAspect
+    if view.playerLayer.videoGravity != gravity { view.playerLayer.videoGravity = gravity }
+  }
+}
+
+@MainActor
+final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureControllerDelegate {
   let player = AVPlayer()
+  @Published private(set) var position: Double = 0
+  /// The newest moment recorded (grows while the recording is made), or the whole length.
+  @Published private(set) var end: Double = 0
+  @Published private(set) var isPaused = false
+  @Published private(set) var buffering = true
+  @Published private(set) var pictureInPictureActive = false
   private var id = ""
   private var statusObservation: NSKeyValueObservation?
+  private var pipObservation: NSKeyValueObservation?
   private var timeObserver: Any?
+  private var pip: AVPictureInPictureController?
+  private weak var view: PlayerLayerView?
+  private var detached = false
+  private var seekingTo: Double?
+  private var lastSaved = Date.distantPast
+  private var tokens: [NSObjectProtocol] = []
+
+  nonisolated override init() {
+    super.init()
+  }
 
   private static func positionKey(_ id: String) -> String { "kestrel.recordingPosition.\(id)" }
 
+  var atNewest: Bool { end - position < 15 }
+  var canSkipForward: Bool { end - position > 3 }
+
   func start(url: URL, id: String) {
     self.id = id
+    try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+    try? AVAudioSession.sharedInstance().setActive(true)
     let item = AVPlayerItem(url: url)
     let resume = UserDefaults.standard.double(forKey: Self.positionKey(id))
     statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
       guard item.status == .readyToPlay else { return }
-      DispatchQueue.main.async {
+      Task { @MainActor in
         guard let playback = self, playback.statusObservation != nil else { return }
         playback.statusObservation = nil
         // Where it was left, or the start (a recording still being made would otherwise start at
         // its end, like a live stream).
-        playback.player.seek(to: CMTime(seconds: resume > 5 ? resume - 3 : 0, preferredTimescale: 600)) { _ in
-          playback.player.play()
-        }
+        playback.seek(to: resume > 5 ? resume - 3 : 0)
       }
     }
+    player.automaticallyWaitsToMinimizeStalling = true
     player.replaceCurrentItem(with: item)
-    timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 5, preferredTimescale: 1), queue: .main) {
-      [weak self] time in
-      guard let playback = self, time.seconds.isFinite, time.seconds > 0 else { return }
-      UserDefaults.standard.set(time.seconds, forKey: Self.positionKey(playback.id))
+    timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) {
+      [weak self] _ in
+      Task { @MainActor in self?.tick() }
     }
+    let center = NotificationCenter.default
+    tokens.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { Task { @MainActor in self?.settleInBackground() } }
+    })
+    tokens.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+      Task { @MainActor in self?.reattach() }
+    })
+  }
+
+  private func tick() {
+    guard let item = player.currentItem else { return }
+    let seekable = item.seekableTimeRanges.map(\.timeRangeValue).last.map { CMTimeRangeGetEnd($0).seconds } ?? 0
+    let length = item.duration.seconds.isFinite ? item.duration.seconds : 0
+    let newEnd = max(seekable, length)
+    if newEnd.isFinite, abs(newEnd - end) >= 0.5 { end = newEnd.rounded(.down) }
+    let current = player.currentTime().seconds
+    if let target = seekingTo {
+      position = target
+    } else if current.isFinite {
+      position = current
+    }
+    let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate || seekingTo != nil
+    if waiting != buffering { buffering = waiting }
+    let paused = player.timeControlStatus == .paused && seekingTo == nil
+    if paused != isPaused { isPaused = paused }
+    if Date().timeIntervalSince(lastSaved) > 5, current.isFinite, current > 0 {
+      lastSaved = Date()
+      UserDefaults.standard.set(current, forKey: Self.positionKey(id))
+    }
+  }
+
+  func seek(to seconds: Double) {
+    let target = max(0, end > 0 ? min(seconds, end - 1) : seconds)
+    seekingTo = target
+    position = target
+    player.seek(
+      to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero,
+      toleranceAfter: CMTime(seconds: 2, preferredTimescale: 600)
+    ) { [weak self] _ in
+      Task { @MainActor in
+        guard let playback = self else { return }
+        playback.seekingTo = nil
+        playback.player.play()
+        playback.isPaused = false
+      }
+    }
+  }
+
+  func skip(by seconds: Double) { seek(to: position + seconds) }
+
+  /// The newest part recorded (a few seconds back, so it doesn't run straight into the end).
+  func jumpToNewest() { seek(to: max(0, end - 4)) }
+
+  func togglePause() {
+    if isPaused {
+      player.play()
+      isPaused = false
+    } else {
+      player.pause()
+      isPaused = true
+    }
+  }
+
+  func attach(_ view: PlayerLayerView) {
+    self.view = view
+    view.playerLayer.player = player
+    guard AVPictureInPictureController.isPictureInPictureSupported(),
+      let pip = AVPictureInPictureController(playerLayer: view.playerLayer)
+    else { return }
+    pip.canStartPictureInPictureAutomaticallyFromInline = true
+    pip.delegate = self
+    pipObservation = pip.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
+      let active = pip.isPictureInPictureActive
+      Task { @MainActor in self?.pictureInPictureActive = active }
+    }
+    self.pip = pip
+  }
+
+  func togglePictureInPicture() {
+    guard let pip else { return }
+    if pip.isPictureInPictureActive { pip.stopPictureInPicture() } else { pip.startPictureInPicture() }
+  }
+
+  /// In the background without Picture in Picture: the sound carries on (with the picture taken off).
+  private func settleInBackground() {
+    guard UIApplication.shared.applicationState == .background, !(pip?.isPictureInPictureActive ?? false) else { return }
+    if AppSettings.shared.backgroundAudio {
+      detached = true
+      view?.playerLayer.player = nil
+    } else {
+      player.pause()
+    }
+  }
+
+  private func reattach() {
+    guard detached else { return }
+    detached = false
+    view?.playerLayer.player = player
   }
 
   func finish() {
     let seconds = player.currentTime().seconds
     if seconds.isFinite, seconds > 0 { UserDefaults.standard.set(seconds, forKey: Self.positionKey(id)) }
+    pip?.stopPictureInPicture()
     player.pause()
+    player.replaceCurrentItem(with: nil)
     if let timeObserver { player.removeTimeObserver(timeObserver) }
     timeObserver = nil
     statusObservation = nil
-  }
-}
-
-/// The system's player controls around an AVPlayer.
-struct SystemVideoPlayer: UIViewControllerRepresentable {
-  let player: AVPlayer
-
-  func makeUIViewController(context: Context) -> AVPlayerViewController {
-    let controller = AVPlayerViewController()
-    controller.player = player
-    controller.allowsPictureInPicturePlayback = true
-    controller.canStartPictureInPictureAutomaticallyFromInline = true
-    controller.view.backgroundColor = .black
-    return controller
+    pipObservation = nil
+    tokens.forEach(NotificationCenter.default.removeObserver)
+    tokens = []
   }
 
-  func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
-    if controller.player !== player { controller.player = player }
-  }
+  nonisolated func pictureInPictureController(
+    _ pictureInPictureController: AVPictureInPictureController,
+    restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
+  ) { completionHandler(true) }
 }

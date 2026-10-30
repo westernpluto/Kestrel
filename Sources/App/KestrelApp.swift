@@ -80,17 +80,26 @@ struct RootView: View {
           .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
           .zIndex(1)
       }
+      if let request = app.multiview {
+        MultiviewScreen(request: request)
+          .id(request.id)
+          .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
+          .zIndex(2)
+      }
     }
     .animation(.spring(response: 0.42, dampingFraction: 0.88), value: app.playing?.id)
+    .animation(.spring(response: 0.42, dampingFraction: 0.88), value: app.multiview?.id)
     .background(WindowSizeReporter())
     .background(KeyboardDismisser())
+    // kestrel://live/<channel> (instant alerts), kestrel://recordings, …
+    .onOpenURL { DeepLink.open($0) }
   }
 }
 
-/// A tap anywhere outside the message box puts the keyboard away, wherever it lands (before, only
-/// taps on chat or the video did). It watches taps on the whole window without taking them, so
-/// whatever was tapped still gets the tap. Taps on the message box's row (the box, emoji and send
-/// buttons, and the suggestions above it) keep the keyboard up.
+/// A tap anywhere outside the message box puts the keyboard away, wherever it lands. It watches
+/// taps on the whole window without taking them, so whatever was tapped still gets the tap. Taps
+/// on the message box's row (the box, emote and send buttons, and the suggestions above it) keep
+/// the keyboard up.
 struct KeyboardDismisser: UIViewRepresentable {
   func makeUIView(context: Context) -> DismisserView {
     let view = DismisserView()
@@ -123,8 +132,10 @@ struct KeyboardDismisser: UIViewRepresentable {
       guard let window = installedOn, let editor = FirstResponder.current as? UIView, editor.window === window else { return }
       let point = recognizer.location(in: window)
       let field = editor.convert(editor.bounds, to: window)
-      if point.y >= field.minY - 56, point.y <= field.maxY + 14 { return }
-      window.endEditing(true)
+      // (Only beside the box itself: in landscape the video sits level with it, and a tap there
+      // should put the keyboard away.)
+      if point.y >= field.minY - 56, point.y <= field.maxY + 14, point.x >= field.minX - 60, point.x <= field.maxX + 110 { return }
+      Keyboard.dismiss()
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
@@ -140,6 +151,22 @@ struct KeyboardDismisser: UIViewRepresentable {
         view = current.superview
       }
       return true
+    }
+  }
+}
+
+/// Puts the keyboard away. Always on the next turn of the main loop: asked from inside a SwiftUI
+/// gesture or update, UIKit could skip the keyboard's slide, and it vanished at once (in landscape
+/// most of all, where a tap on the video is the usual way to put it away).
+enum Keyboard {
+  private static var pending = false
+
+  static func dismiss() {
+    guard !pending else { return }
+    pending = true
+    DispatchQueue.main.async {
+      pending = false
+      FirstResponder.current?.resignFirstResponder()
     }
   }
 }

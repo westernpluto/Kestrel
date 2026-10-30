@@ -4,6 +4,7 @@ struct SettingsView: View {
   @EnvironmentObject private var settings: AppSettings
   @ObservedObject private var account = TwitchAccount.shared
   @ObservedObject private var notifier = LiveNotifier.shared
+  @ObservedObject private var instantAlerts = InstantAlerts.shared
   @State private var imageCacheCleared = false
   @State private var showLogin = false
   @State private var confirmSignOut = false
@@ -67,11 +68,16 @@ struct SettingsView: View {
             if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
           }
         }
+        NavigationLink {
+          InstantAlertsView()
+        } label: {
+          LabeledContent("Instant alerts (ntfy)", value: instantAlerts.active ? "On" : "Off")
+        }
       } header: {
         Text("Notifications")
       } footer: {
         Text(
-          "A notification when a channel you follow goes live (your Twitch follows and the channels you heart); tap it to watch. Kestrel checks every minute while it's open or playing. Once it's closed, iOS decides when it may check (often every 15–30 minutes, less if you rarely open Kestrel), so alerts can come later. Keep Background App Refresh on for Kestrel."
+          "Go-live alerts: a notification when a channel you follow goes live (your Twitch follows and the channels you heart); tap it to watch. Kestrel checks every minute while it's open or playing; once it's closed, iOS decides when it may check (often every 15–30 minutes), so alerts can come late. Instant alerts arrive within about a minute, closed or not, through the ntfy app."
         )
       }
 

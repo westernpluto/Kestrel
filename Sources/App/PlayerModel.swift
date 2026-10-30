@@ -103,6 +103,14 @@ final class PlayerModel: ObservableObject {
   private var lastArchiveCheck = Date.distantPast
   private var checkingArchive = false
 
+  /// Parts Twitch muted for copyright (seconds into the video): the VOD's, and the broadcast's VOD
+  /// for rewinding. Marked on the seek bar.
+  @Published private(set) var mutedParts: [ClosedRange<Double>] = []
+  @Published private(set) var rewindMutedParts: [ClosedRange<Double>] = []
+  /// The muted part playing right now (offered to skip).
+  @Published private(set) var currentMutedPart: ClosedRange<Double>?
+  private var lastMutedCheck: Double?
+
   /// VOD seek previews (VODs, and live streams that can be rewound).
   @Published private(set) var storyboard: Storyboard?
   private var storyboardSource: (url: URL, videoID: String, duration: Double?)?
@@ -161,6 +169,37 @@ final class PlayerModel: ObservableObject {
   /// False once the user picked a player by hand: don't switch players behind their back.
   private(set) var mayAutoSwitchPlayer = true
 
+  /// One of several streams in multi-view: no lock-screen controls or Picture in Picture of its
+  /// own, Auto quality up to `tileMaxHeight`, sound only when it's the one listened to.
+  var isTile = false
+  private(set) var userMuted = false
+  private var tileMaxHeight: Int?
+
+  func setMuted(_ muted: Bool) {
+    userMuted = muted
+    #if canImport(AmazonIVSPlayer)
+      if let lowLatency {
+        lowLatency.setMuted(muted)
+        return
+      }
+    #endif
+    player.isMuted = muted || mutedForAd
+  }
+
+  /// The tallest picture worth fetching for how big it's shown (nil: any).
+  func setMaxHeight(_ height: Int?) {
+    guard height != tileMaxHeight else { return }
+    tileMaxHeight = height
+    #if canImport(AmazonIVSPlayer)
+      lowLatency?.setMaxHeight(height)
+    #endif
+    player.currentItem?.preferredMaximumResolution = Self.resolution(forHeight: height)
+  }
+
+  private static func resolution(forHeight height: Int?) -> CGSize {
+    height.map { CGSize(width: CGFloat($0) * 16 / 9, height: CGFloat($0)) } ?? .zero
+  }
+
   nonisolated init(target: PlaybackTarget) {
     self.target = target
     if case .live = target {
@@ -184,7 +223,7 @@ final class PlayerModel: ObservableObject {
     #endif
     try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
     try? AVAudioSession.sharedInstance().setActive(true)
-    NowPlaying.shared.attach(self)
+    if !isTile { NowPlaying.shared.attach(self) }
     switch target {
     case .live(let channel):
       self.channel = channel
@@ -248,8 +287,9 @@ final class PlayerModel: ObservableObject {
       qualities = info.variants.enumerated().map { Quality(id: $0.offset, label: $0.element.label) }
         + [Quality(id: nil, label: "Auto")]
       // Always the highest quality: the player is given only that one rendition, so it can't drop
-      // to a lower one on its own. (Picking another in the menu applies to this stream only.)
-      selectedQuality = preferredQualityLabel.flatMap { label in info.variants.firstIndex { $0.label == label } } ?? 0
+      // to a lower one on its own. (Picking another in the menu applies to this stream only.) A
+      // multi-view tile plays on Auto, up to its size.
+      selectedQuality = isTile ? nil : preferredQualityLabel.flatMap { label in info.variants.firstIndex { $0.label == label } } ?? 0
       preferredQualityLabel = nil
       liveVariants = info.variants
       play(StreamProxy.shared.masterURL(for: session, quality: selectedQuality))
@@ -366,6 +406,7 @@ final class PlayerModel: ObservableObject {
       return
     }
     let item = AVPlayerItem(url: url)
+    if tileMaxHeight != nil { item.preferredMaximumResolution = Self.resolution(forHeight: tileMaxHeight) }
     pendingStart = seconds
     itemObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
       let status = item.status
@@ -477,7 +518,7 @@ final class PlayerModel: ObservableObject {
   /// Played through an ad-free server: does Twitch itself offer a better quality? Then it's
   /// listed in the quality menu, to play straight from Twitch at the viewer's choice.
   func checkDirectQualities(served: [HLSVariant]) {
-    guard case .live(let channel) = target, !forceDirect, !checkedDirect, case .adFreeServer? = route else { return }
+    guard !isTile, case .live(let channel) = target, !forceDirect, !checkedDirect, case .adFreeServer? = route else { return }
     checkedDirect = true
     let codecs = self.codecs
     Task { [weak self] in
@@ -707,6 +748,37 @@ final class PlayerModel: ObservableObject {
   var canSkipBack: Bool { isLive ? isRewinding || (rewind != nil && broadcastElapsed > 60) : duration > 0 }
   var canSkipForward: Bool { isLive ? isRewinding : duration > 0 }
 
+  /// Where playback is in the video being watched (the VOD, or the broadcast while rewinding).
+  var currentPosition: Double { isRewinding ? rewindPosition : position }
+
+  /// The muted parts of what's playing (none while watching live).
+  var currentMutedParts: [ClosedRange<Double>] { isRewinding ? rewindMutedParts : (isLive ? [] : mutedParts) }
+
+  /// Past the muted part playing now.
+  func skipMutedPart() {
+    guard let part = currentMutedPart else { return }
+    currentMutedPart = nil
+    let target = part.upperBound + 0.1
+    if isRewinding {
+      seekBroadcast(to: target)
+    } else if !isLive {
+      seek(to: min(target, max(0, duration - 1)))
+    }
+  }
+
+  /// Notes the muted part at `position`, and with Skip muted parts on, skips it when playback
+  /// runs into it (not when you've gone into one yourself).
+  private func checkMutedPart(at position: Double, in parts: [ClosedRange<Double>], settling: Bool) {
+    defer { lastMutedCheck = position }
+    let part = parts.first { $0.contains(position) && position < $0.upperBound - 1 }
+    if part != currentMutedPart { currentMutedPart = part }
+    guard let part, !settling, !isPaused, AppSettings.shared.skipMutedParts else { return }
+    let reached = lastMutedCheck.map { $0 < part.lowerBound + 0.75 && part.lowerBound - $0 < 3 } ?? (position < part.lowerBound + 2)
+    guard reached else { return }
+    ActivityLog.shared.add("Skipped a muted part (\(Format.duration(Int(part.upperBound - part.lowerBound))))")
+    skipMutedPart()
+  }
+
   func seek(to seconds: Double) {
     position = seconds
     resumedAt = nil
@@ -765,7 +837,7 @@ final class PlayerModel: ObservableObject {
     adRanges = []
     coveringAd = false
     if mutedForAd {
-      player.isMuted = false
+      player.isMuted = userMuted
       mutedForAd = false
     }
     isBuffering = true
@@ -838,15 +910,23 @@ final class PlayerModel: ObservableObject {
       lastInfoRefresh = now
       Task { await refreshInfo() }
     }
-    if isLive, phase == .playing { checkForArchive() }
+    if isLive, phase == .playing, !isTile { checkForArchive() }
     if let rewind {
       // Whole seconds (all that's shown): fewer changes for the views watching the player.
       let elapsed = max(0, now.timeIntervalSince(rewind.startedAt)).rounded(.down)
       if elapsed != broadcastElapsed { broadcastElapsed = elapsed }
     }
+    if let rewindSource {
+      let parts = rewindSource.mutedParts
+      if parts != rewindMutedParts { rewindMutedParts = parts }
+    }
     if isRewinding {
       tickRewind()
       return
+    }
+    if isLive, currentMutedPart != nil {
+      currentMutedPart = nil
+      lastMutedCheck = nil
     }
     if rewindLinger, let since = lingerSince {
       // Live is playing again (or it's taking too long): let the VOD's picture go.
@@ -885,6 +965,11 @@ final class PlayerModel: ObservableObject {
       let current = player.currentTime().seconds
       // Held at the target while a seek is under way (the player still reports the old spot).
       if current.isFinite, pendingStart == nil, !seeking { position = current }
+      if let vodSource {
+        let parts = vodSource.mutedParts
+        if parts != mutedParts { mutedParts = parts }
+      }
+      checkMutedPart(at: position, in: mutedParts, settling: pendingStart != nil || seeking)
       // Still recording: it was loaded as what's been recorded so far; near the end, load it
       // again to get what's been recorded since.
       if vodIsRecording, duration > 0, position > duration - 30, pendingStart == nil,
@@ -910,11 +995,11 @@ final class PlayerModel: ObservableObject {
 
     let inAd = currentDate.map { date in adRanges.contains { $0.contains(date) } } ?? false
     if inAd != coveringAd { coveringAd = inAd }
-    if inAd, !player.isMuted {
+    if inAd, !mutedForAd {
       player.isMuted = true
       mutedForAd = true
     } else if !inAd, mutedForAd {
-      player.isMuted = false
+      player.isMuted = userMuted
       mutedForAd = false
     }
 
@@ -1215,6 +1300,7 @@ final class PlayerModel: ObservableObject {
     let current = rewindPlayer.currentTime().seconds
     // Held at the target while seeking (the player reports the old spot, or 0, until it lands).
     if current.isFinite, rewindPendingSeek == nil, !rewindSeeking { rewindPosition = current }
+    checkMutedPart(at: rewindPosition, in: rewindMutedParts, settling: rewindPendingSeek != nil || rewindSeeking)
     let status = rewindPlayer.timeControlStatus
     let buffering = status == .waitingToPlayAtSpecifiedRate || rewindPendingSeek != nil || rewindSeeking
     if buffering != isBuffering { isBuffering = buffering }
@@ -1295,8 +1381,11 @@ final class PlayerModel: ObservableObject {
   #if canImport(AmazonIVSPlayer)
     private func startLowLatency(_ channel: Channel) {
       let controller = LowLatencyController(login: channel.login, codecs: codecs, model: self)
+      controller.tile = isTile
       lowLatency = controller
       controller.start()
+      if userMuted { controller.setMuted(true) }
+      if let tileMaxHeight { controller.setMaxHeight(tileMaxHeight) }
     }
 
     /// The low-latency player gave up: use the Apple player for the rest of this stream.
