@@ -1076,16 +1076,16 @@ func testLiveCatchUp() {
   let before = catchUp.targetBuffer
   catchUp.stalled(now: t1)
   check(catchUp.targetBuffer > before)
-  check(catchUp.update(buffer: 3, latency: 4, playing: true, now: t1.addingTimeInterval(9)) == 1)
-  check(catchUp.update(buffer: 3, latency: 4, playing: true, now: t1.addingTimeInterval(13)) == LiveCatchUp.rates.fast)
-  // A connection with little to spare: gentle at most.
-  check(catchUp.update(buffer: 3, latency: 4, playing: true, maxRate: LiveCatchUp.rates.gentle, now: t1.addingTimeInterval(13)) == LiveCatchUp.rates.gentle)
-  check(catchUp.update(buffer: 3, latency: 4, playing: true, maxRate: 1, now: t1.addingTimeInterval(13)) == 1)
-  // Starting from the last stream's margin.
-  check(LiveCatchUp(targetBuffer: 1.9).targetBuffer == 1.9)
+  check(catchUp.update(buffer: 3, latency: 4, playing: true, now: t1.addingTimeInterval(5)) == 1)
+  check(catchUp.update(buffer: 3, latency: 4, playing: true, now: t1.addingTimeInterval(9)) == LiveCatchUp.rates.fast)
+  // Capped: gentle at most, or not at all.
+  check(catchUp.update(buffer: 3, latency: 4, playing: true, maxRate: LiveCatchUp.rates.gentle, now: t1.addingTimeInterval(9)) == LiveCatchUp.rates.gentle)
+  check(catchUp.update(buffer: 3, latency: 4, playing: true, maxRate: 1, now: t1.addingTimeInterval(9)) == 1)
+  // A given starting margin, within bounds.
+  check(LiveCatchUp(targetBuffer: 1.5).targetBuffer == 1.5)
   check(LiveCatchUp(targetBuffer: 9).targetBuffer == LiveCatchUp.maxBuffer)
   // Smooth for long enough: the margin creeps back down, never under the minimum.
-  var later = t1.addingTimeInterval(13)
+  var later = t1.addingTimeInterval(9)
   for _ in 0..<40 {
     later = later.addingTimeInterval(91)
     catchUp.update(buffer: 1, latency: 2, playing: true, now: later)
@@ -1125,6 +1125,15 @@ func testSteadyAutoQuality() {
   check(steady.steadyRank(now: t0.addingTimeInterval(30)) == nil)
   check(steady.steadyRank(now: t0.addingTimeInterval(61)) == 1)
   check(steady.steadyRank(now: t0.addingTimeInterval(90)) == nil)
+}
+
+func testMasterClock() {
+  let master = "#EXTM3U\n#EXT-X-TWITCH-INFO:NODE=\"a\",SERVER-TIME=\"1761772800.69\",USER-IP=\"1.2.3.4\",STREAM-TIME=\"3122.69299889\"\nv/0.m3u8\n"
+  let moved = LowLatencyPlaylist.advancingClock(master, by: 90.5)
+  check(moved.contains("SERVER-TIME=\"1761772891.19\""), moved)
+  check(moved.contains("STREAM-TIME=\"3213.19299889\""), moved)
+  check(moved.contains("USER-IP=\"1.2.3.4\"") && moved.hasSuffix("v/0.m3u8\n"))
+  check(LowLatencyPlaylist.advancingClock("#EXTM3U\nv/0.m3u8\n", by: 5) == "#EXTM3U\nv/0.m3u8\n")
 }
 
 func testAdFreeProxy() {
@@ -1180,6 +1189,7 @@ testFullWindowAdDetection()
 testLowLatencySession()
 testLiveCatchUp()
 testSteadyAutoQuality()
+testMasterClock()
 testMediaParsing()
 testAdTimeline()
 testTimelineAndRender()

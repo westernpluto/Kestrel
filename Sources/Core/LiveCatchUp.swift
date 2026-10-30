@@ -24,11 +24,11 @@ struct LiveCatchUp: Sendable {
   private var smoothSince: Date
 
   static let minBuffer = 0.7
-  static let maxBuffer = 2.6
+  static let maxBuffer = 2.0
   static let startBuffer = 0.9
   /// Rates: well behind, behind, a little behind. Small enough that speech still sounds natural.
   static let rates: (fast: Float, medium: Float, gentle: Float) = (1.2, 1.1, 1.05)
-  private static let relaxAfter: TimeInterval = 90
+  private static let relaxAfter: TimeInterval = 45
 
   /// - Parameter targetBuffer: the margin to start from (the last stream's, so a connection that
   ///   needed more doesn't have to stall again to get it).
@@ -80,9 +80,9 @@ struct LiveCatchUp: Sendable {
 
   /// The player ran out of video: keep more in hand from now on, and leave it be for a while.
   mutating func stalled(now: Date = Date()) {
-    targetBuffer = min(Self.maxBuffer, targetBuffer + 0.4)
+    targetBuffer = min(Self.maxBuffer, targetBuffer + 0.3)
     rate = 1
-    holdUntil = now.addingTimeInterval(12)
+    holdUntil = now.addingTimeInterval(8)
     smoothSince = now
   }
 

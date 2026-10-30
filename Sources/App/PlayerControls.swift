@@ -18,6 +18,8 @@ struct PlayerVideoArea: View {
   var minimized: Bool = false
   /// Landscape chat is on the left (swipes to show and hide it are mirrored).
   var chatOnLeft: Bool = false
+  /// The details panel beside the video already shows the viewer count.
+  var viewersShownElsewhere = false
   /// A layout choice for the gear menu, where one applies.
   var layoutToggle: LayoutToggle? = nil
   var setLayoutToggle: (Bool) -> Void = { _ in }
@@ -69,7 +71,8 @@ struct PlayerVideoArea: View {
       }
       PlayerControls(
         model: model, landscape: landscape, chatOpen: chatOpen, visible: controlsShown && chromeVisible && !pulling,
-        insets: controlInsets, layoutToggle: layoutToggle, setLayoutToggle: setLayoutToggle, toggleChat: toggleChat,
+        insets: controlInsets, viewersShownElsewhere: viewersShownElsewhere, layoutToggle: layoutToggle,
+        setLayoutToggle: setLayoutToggle, toggleChat: toggleChat,
         minimize: minimize, enterFullScreen: enterFullScreen, exitFullScreen: exitFullScreen,
         interacted: { scheduleHide(after: $0) })
       if let resumed = model.resumedAt, chromeVisible {
@@ -274,6 +277,7 @@ struct PlayerControls: View {
   var chatOpen: Bool
   var visible: Bool
   var insets: EdgeInsets
+  var viewersShownElsewhere = false
   var layoutToggle: LayoutToggle? = nil
   var setLayoutToggle: (Bool) -> Void = { _ in }
   var toggleChat: () -> Void
@@ -383,7 +387,7 @@ struct PlayerControls: View {
       HStack(spacing: 10) {
         if model.isLive {
           liveButton
-          if let viewers = model.stream?.viewers {
+          if !viewersShownElsewhere, let viewers = model.stream?.viewers {
             Label(Format.viewers(viewers), systemImage: "person.fill").font(.caption.monospacedDigit())
               .labelStyle(.titleAndIcon).foregroundColor(.white.opacity(0.85))
           }
@@ -676,6 +680,9 @@ struct StoryboardThumbnail: UIViewRepresentable {
 struct StreamInfoBar: View {
   @ObservedObject var model: PlayerModel
   let target: PlaybackTarget
+  /// False when the details panel shows the title, category and uptime: then this is just who's
+  /// streaming (nothing said twice).
+  var showsTitle = true
   @EnvironmentObject private var app: AppModel
 
   var body: some View {
@@ -706,7 +713,11 @@ struct StreamInfoBar: View {
     }
   }
 
+  @ViewBuilder
   private var details: some View {
+    if !showsTitle {
+      Text(model.channel?.name ?? "").font(.headline).foregroundColor(.white).lineLimit(1)
+    } else {
       VStack(alignment: .leading, spacing: 2) {
         Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
         HStack(spacing: 4) {
@@ -730,6 +741,7 @@ struct StreamInfoBar: View {
         .lineLimit(1)
       }
       .foregroundColor(.white)
+    }
   }
 
   private var title: String {

@@ -58,17 +58,15 @@
     private var renderedFPS: Double?
     /// Paused while the viewer rewinds through the VOD.
     private var suspended = false
-    /// Plays a touch faster while more is buffered than needed (see `LiveCatchUp`). Starts from
-    /// the margin the last stream needed.
-    private var catchUp = LiveCatchUp(targetBuffer: PlaybackMemory.liveMargin)
+    /// Plays a touch faster while more is buffered than needed (see `LiveCatchUp`).
+    private var catchUp = LiveCatchUp()
     /// Keeps Auto from going back up to a quality that just stalled (see `SteadyAutoQuality`).
     private var steadyAuto = SteadyAutoQuality(count: 0)
     /// The cap last handed to the player (rank into the video qualities).
     private var appliedAutoCap: Int?
-    /// Recent stalls. Several close together: stop jumping to the live edge after each one (which
-    /// leaves almost nothing buffered, so the next stall comes sooner) until Live is pressed.
-    private var stallTimes: [Date] = []
-    private var rebufferingToLive = true
+    /// Started over on the same playlists: when, until the player reports its latency again (if it
+    /// doesn't, the stream is loaded afresh).
+    private var restartedAt: Date?
     /// Played since the last load (buffering after that means the player ran dry).
     private var playedSinceLoad = false
     private var lastQualitySwitch = Date.distantPast
@@ -95,25 +93,9 @@
     }
 
     /// How much video to have before starting. Low latency: half a second (the player's own
-    /// default is a second; `LiveCatchUp` keeps it from building up after that), or a second on a
-    /// connection that has needed a bigger margin.
+    /// default is a second; `LiveCatchUp` keeps it from building up after that).
     private func startBuffer(lowLatency: Bool) -> CMTime {
-      let seconds = lowLatency ? (catchUp.targetBuffer > 1.2 ? 1.0 : 0.5) : 2.0
-      return CMTime(seconds: seconds, preferredTimescale: 1000)
-    }
-
-    /// How much faster than normal catching up may play. Playing faster also downloads faster,
-    /// so on Auto it's held back when the connection has little to spare (judged by the player's
-    /// bandwidth estimate, which it only keeps up to date on Auto).
-    private var catchUpLimit: Float {
-      guard player.autoQualityMode else { return LiveCatchUp.rates.fast }
-      let bitrate = Double(player.videoBitrate)
-      let estimate = Double(player.bandwidthEstimate)
-      guard bitrate > 0, estimate > 0 else { return LiveCatchUp.rates.gentle }
-      let headroom = estimate / bitrate
-      if headroom < 1.15 { return 1 }
-      if headroom < 1.6 { return LiveCatchUp.rates.gentle }
-      return LiveCatchUp.rates.fast
+      CMTime(seconds: lowLatency ? 0.5 : 2.0, preferredTimescale: 1000)
     }
 
     /// Quality-menu IDs at or above this pick a rendition for the Apple player.
@@ -198,6 +180,7 @@
         config.allowLowQualityBackup = settings.allowLowQualityBackup
         config.adFreeProxies = model?.adFreeProxies ?? settings.adFreeProxyHosts
         config.checkAccountFirst = TwitchAuth.shared.session != nil
+        config.nearbyServers = settings.nearbyServers
         let session = LowLatencySession(
           login: login, config: config, http: playbackHTTP(), tokens: TwitchAPI.shared
         ) { [weak self] update in
@@ -235,6 +218,7 @@
 
     /// Loads into the player, at normal speed until it has settled.
     private func startPlayback(_ url: URL) {
+      restartedAt = nil
       catchUp.restart()
       playedSinceLoad = false
       if player.playbackRate != 1 { player.playbackRate = 1 }
@@ -308,6 +292,7 @@
         controller.localURL = url
         controller.adTimeline = AdTimeline()
         controller.startPlayback(url)
+        controller.restartedAt = Date()
       }
     }
 
@@ -326,15 +311,8 @@
         // Ran dry mid-stream (not a start, a pause or a quality switch): keep a bigger margin.
         if playedSinceLoad, !pausedForBackground, Date().timeIntervalSince(lastQualitySwitch) > 3 {
           catchUp.stalled()
-          PlaybackMemory.liveMargin = catchUp.targetBuffer
           if player.playbackRate != 1 { player.playbackRate = 1 }
           if chosen == nil, steadyAuto.stalled() { applyAutoCap() }
-          stallTimes = stallTimes.filter { Date().timeIntervalSince($0) < 90 } + [Date()]
-          if stallTimes.count >= 3, rebufferingToLive {
-            rebufferingToLive = false
-            player.setRebufferToLive(false)
-            ActivityLog.shared.add("Stalling often: keeping more video in hand instead of jumping to live after each stall")
-          }
         }
       case .playing:
         playedSinceLoad = true
@@ -371,7 +349,7 @@
       // Auto moved: don't speed up while the new quality fills in, and note it for keeping
       // Auto steady.
       guard let quality, chosen == nil, !audioOnlyForBackground else { return }
-      catchUp.hold(for: 10)
+      catchUp.hold(for: 3)
       if let rank = videoQualities.firstIndex(where: { $0.isEqual(to: quality) }), steadyAuto.switched(to: rank) {
         applyAutoCap()
       }
@@ -509,8 +487,20 @@
       // Stay close to live: eat any extra buffer by playing a touch faster.
       let catchingUp =
         AppSettings.shared.lowLatency && player.isLiveLowLatency && player.state == .playing && !pausedForBackground
-      let rate = catchUp.update(buffer: bufferAhead, latency: latency, playing: catchingUp, maxRate: catchUpLimit)
+      let rate = catchUp.update(buffer: bufferAhead, latency: latency, playing: catchingUp)
       if player.playbackRate != rate { player.playbackRate = rate }
+
+      // Started over on the same playlists but the player isn't reporting its latency: load the
+      // stream afresh instead (once).
+      if let since = restartedAt, player.state == .playing {
+        if latency != nil {
+          restartedAt = nil
+        } else if Date().timeIntervalSince(since) > 6 {
+          restartedAt = nil
+          ActivityLog.shared.add("Low-latency player: no latency reading after starting over; loading the stream afresh")
+          load()
+        }
+      }
 
       // The session can go back to the ad-free server's playlist server mid-stream.
       if let session, Date().timeIntervalSince(serverCheckedAt) > 5 {
@@ -617,11 +607,6 @@
     /// Starts over at the live edge: on the same playlists while they're flowing (quick, over
     /// open connections), else with a fresh token.
     func goLive() {
-      if !rebufferingToLive {
-        rebufferingToLive = true
-        stallTimes = []
-        player.setRebufferToLive(true)
-      }
       if session != nil, localURL != nil, player.state == .playing || player.state == .buffering {
         lastReload = Date()
         bufferingSince = nil

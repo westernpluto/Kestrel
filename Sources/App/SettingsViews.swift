@@ -156,7 +156,13 @@ struct AdBlockingView: View {
         choice(.customProxy, title: "My own proxy", detail: "An HTTP proxy in a country without Twitch ads")
         choice(.basic, title: "Basic", detail: "No server: skip ad breaks Kestrel can see, hide the rest")
       } footer: {
-        Text("Ad-free servers ask Twitch for the stream from a country where Twitch doesn't run ads (the TTV LOL PRO v1 servers). Only the playlist request goes through them; the video comes straight from Twitch at full quality. Twitch hands out servers near the ad-free server, so Kestrel moves the stream to Twitch's servers near you when they accept it (video stats show which are used: near you, or the ad-free server's, which adds delay and can limit quality when it's far away). Applies to the next stream you open.")
+        Text("Ad-free servers ask Twitch for the stream from a country where Twitch doesn't run ads (the TTV LOL PRO v1 servers). Only the playlist request goes through them; the video comes straight from Twitch at full quality. Applies to the next stream you open.")
+      }
+
+      Section {
+        Toggle("Twitch servers near me", isOn: $settings.nearbyServers)
+      } footer: {
+        Text("Twitch serves an ad-free server's stream from its own servers near that server (usually in Europe), which adds delay and can limit quality far from there. With this on, Kestrel moves the stream to Twitch's servers near you when they accept it. Video stats show which are in use.")
       }
 
       Section {

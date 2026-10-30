@@ -25,6 +25,8 @@ struct LowLatencyConfig: Sendable {
   var adFreeProxies: [String] = []
   /// Signed in: ask Twitch first and play straight from it when it shows this account no ads.
   var checkAccountFirst = false
+  /// Through an ad-free server: try the playlists on Twitch's server near the viewer.
+  var nearbyServers = true
 }
 
 struct LowLatencyUpdate: Sendable {
@@ -43,6 +45,9 @@ actor LowLatencySession: PlaylistSource {
   private let onUpdate: @Sendable (LowLatencyUpdate) -> Void
 
   private var masterText = ""
+  /// When the master playlist came from Twitch (its clock is moved on by the time since, see
+  /// `LowLatencyPlaylist.advancingClock`).
+  private var masterFetchedAt = Date()
   /// The ad-free proxy that delivered this stream, if any.
   private(set) var route: StreamRoute = .twitch
   /// Index i is served as `v/i.m3u8` (portrait renditions removed).
@@ -92,6 +97,7 @@ actor LowLatencySession: PlaylistSource {
     let fetched = try await MasterPlaylistFetch.fetch(
       login: login, codecs: config.codecs, lowLatency: true, proxies: config.adFreeProxies,
       checkAccountFirst: config.checkAccountFirst, playerType: config.mainPlayerType, http: http, tokens: tokens, log: log)
+    masterFetchedAt = Date()
     route = fetched.route
     let text = fetched.text
     let base = fetched.url
@@ -122,7 +128,7 @@ actor LowLatencySession: PlaylistSource {
     masterText = lines.joined(separator: "\n") + "\n"
     let farHost = URL(string: found[first].uri)?.host
     servingHost = farHost
-    if case .adFreeServer = route, let near = fetched.nearbyHost, let farHost, near != farHost,
+    if case .adFreeServer = route, config.nearbyServers, let near = fetched.nearbyHost, let farHost, near != farHost,
       NearbyPlaylists.isTwitchPlaylistHost(farHost), NearbyPlaylists.worthTrying(near)
     {
       await tryNearby(near, far: farHost, first: first)
@@ -181,12 +187,18 @@ actor LowLatencySession: PlaylistSource {
   /// live edge), without asking Twitch for it again.
   func restarted() async -> LowLatencySession {
     let copy = LowLatencySession(login: login, config: config, http: http, tokens: tokens, log: log, onUpdate: onUpdate)
-    await copy.adopt(masterText: masterText, variants: variants, farVariants: farVariants, route: route, servingHost: servingHost)
+    await copy.adopt(
+      masterText: masterText, fetchedAt: masterFetchedAt, variants: variants, farVariants: farVariants, route: route,
+      servingHost: servingHost)
     return copy
   }
 
-  private func adopt(masterText: String, variants: [HLSVariant], farVariants: [HLSVariant]?, route: StreamRoute, servingHost: String?) {
+  private func adopt(
+    masterText: String, fetchedAt: Date, variants: [HLSVariant], farVariants: [HLSVariant]?, route: StreamRoute,
+    servingHost: String?
+  ) {
     self.masterText = masterText
+    masterFetchedAt = fetchedAt
     self.variants = variants
     self.farVariants = farVariants
     self.route = route
@@ -209,7 +221,9 @@ actor LowLatencySession: PlaylistSource {
     return host
   }
 
-  func masterPlaylist(only: Int?) -> String { masterText }
+  func masterPlaylist(only: Int?) -> String {
+    LowLatencyPlaylist.advancingClock(masterText, by: Date().timeIntervalSince(masterFetchedAt))
+  }
 
   // MARK: - Media playlists
 
@@ -540,6 +554,31 @@ enum LowLatencyPlaylist {
     }
     // IVS-style source switches to an ad ("live" is the broadcast itself).
     return lower.contains("live-video-net-stream-source") && !lower.contains("stream-source=\"live\"")
+  }
+
+  /// Twitch's master playlist says what its clock read when it was made (`SERVER-TIME`) and how
+  /// far into the broadcast that was (`STREAM-TIME`), in `#EXT-X-TWITCH-INFO`. The player sets its
+  /// idea of "now", and so the latency it reports, from them. Served later than it was fetched,
+  /// they're moved on by the time since: served unchanged minutes later (to start over at the
+  /// live edge), the player thought it was ahead of live and reported no latency at all.
+  static func advancingClock(_ master: String, by seconds: TimeInterval) -> String {
+    guard seconds > 0.01, master.contains("#EXT-X-TWITCH-INFO") else { return master }
+    var lines = master.components(separatedBy: "\n")
+    for index in lines.indices where lines[index].hasPrefix("#EXT-X-TWITCH-INFO") {
+      lines[index] = advance("SERVER-TIME", in: lines[index], by: seconds)
+      lines[index] = advance("STREAM-TIME", in: lines[index], by: seconds)
+    }
+    return lines.joined(separator: "\n")
+  }
+
+  private static func advance(_ attribute: String, in line: String, by seconds: TimeInterval) -> String {
+    guard let start = line.range(of: attribute + "=\""), let end = line[start.upperBound...].firstIndex(of: "\""),
+      let value = Double(line[start.upperBound..<end])
+    else { return line }
+    let old = line[start.upperBound..<end]
+    let decimals = old.firstIndex(of: ".").map { old.distance(from: $0, to: old.endIndex) - 1 } ?? 0
+    let moved = String(format: "%.\(min(max(decimals, 2), 9))f", value + seconds)
+    return line.replacingCharacters(in: start.upperBound..<end, with: moved)
   }
 
   /// `URI="…"` attributes made absolute.

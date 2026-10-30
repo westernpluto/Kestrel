@@ -47,6 +47,8 @@ echo "==> Compiling with $(basename "$SDK")"
   -Xlinker -rpath -Xlinker /usr/lib/swift -Xlinker -rpath -Xlinker @executable_path/Frameworks \
   -Xlinker -dead_strip \
   "${SOURCES[@]}" -o "$BUNDLE/$APP"
+# Debug and local symbols aren't needed to run (a smaller download and install).
+xcrun strip -Sx "$BUNDLE/$APP"
 
 echo "==> Bundling"
 sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD_NUMBER/" Resources/Info.plist > "$BUNDLE/Info.plist"
@@ -65,5 +67,5 @@ echo "==> Signing (ad-hoc)"
 sign "$BUNDLE/$APP"
 
 echo "==> Packaging"
-(cd "$OUT" && zip -qry "$APP.ipa" Payload)
+(cd "$OUT" && zip -qry -9 "$APP.ipa" Payload)
 echo "Built $OUT/$APP.ipa ($(du -h "$OUT/$APP.ipa" | cut -f1))"

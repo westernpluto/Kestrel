@@ -684,7 +684,7 @@ struct PlayerScreen: View {
           .allowsHitTesting(progress < 0.01)
 
         if let info = layout.info {
-          StreamInfoBar(model: model, target: target)
+          StreamInfoBar(model: model, target: target, showsTitle: layout.details == nil)
             .frame(width: info.width, height: info.height)
             .offset(x: info.minX, y: info.minY + progress * 140)
             .opacity(expandedOpacity)
@@ -723,6 +723,7 @@ struct PlayerScreen: View {
         PlayerVideoArea(
           model: model, landscape: layout.fullScreen, chatOpen: chatOpen, controlInsets: layout.controls,
           chromeVisible: progress == 0, minimized: app.playerMinimized, chatOnLeft: layout.chatOnLeft,
+          viewersShownElsewhere: layout.details != nil,
           layoutToggle: layoutToggle,
           setLayoutToggle: { on in
             withAnimation(Self.spring) {
