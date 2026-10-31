@@ -81,6 +81,8 @@
     private var pausedForBackground = false
     /// Just back from the background: stalls until then are the return's doing.
     private var settlingUntil = Date.distantPast
+    /// Just back from an ad-free copy to the main stream (see `apply`).
+    private var switchedBackAt: Date?
     /// Switches to audio only after a while in the background (not right away: a quick trip to
     /// Notification Center or another app shouldn't cost the picture a rebuffer on return).
     private var audioOnlyTask: Task<Void, Never>?
@@ -323,11 +325,18 @@
       let previous = adState
       adTimeline = update.ads
       adState = update.state
-      // Back from an ad-free copy to the main stream: the player can get stuck on the switch
-      // (TwitchAdSolutions reloads here too), so start it again at the live edge.
+      // Back from an ad-free copy to the main stream. The player can get stuck on the switch: if it
+      // does, it's started again within a few seconds (see `tick`). It used to be started again
+      // every time, which showed as a refresh at the end of every ad break.
       if case .replaced = previous, update.state == .none || update.state == .skipped {
-        reload(reason: "back from the ad-free copy")
+        switchedBackAt = Date()
       }
+      // Onto or off an ad-free copy: a stall around the switch is the switch's doing, not the
+      // stream's, so it doesn't raise the margin (which would keep it further behind afterwards).
+      var switching = false
+      if case .replaced = previous { switching = true }
+      if case .replaced = update.state { switching = true }
+      if switching, previous != update.state { settlingUntil = Date().addingTimeInterval(10) }
     }
 
     /// Starts playback over at the live edge (with the stream asked for afresh), at most every 20
@@ -650,7 +659,13 @@
       // only throw away what's in hand (see StreamArrival).
       if player.state == .buffering, !pausedForBackground, !detachedForBackground, !isPaused {
         if bufferingSince == nil { bufferingSince = Date() }
-        if let since = bufferingSince, let arrival = session?.arrival {
+        if let back = switchedBackAt, Date().timeIntervalSince(back) > 30 { switchedBackAt = nil }
+        if let since = bufferingSince, switchedBackAt != nil, Date().timeIntervalSince(since) > 3 {
+          // Stuck on the switch back from the ad-free copy: that's the one time starting over is
+          // the fix straight away.
+          switchedBackAt = nil
+          reload(reason: "stuck switching back from the ad-free copy")
+        } else if let since = bufferingSince, let arrival = session?.arrival {
           let ages = arrival.ages()
           switch StreamArrival.verdict(buffering: Date().timeIntervalSince(since), asked: ages.asked, moved: ages.moved) {
           case .wait:

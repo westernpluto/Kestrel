@@ -8,22 +8,22 @@
 //
 // Jumping to the live edge after a stall, or restarting the stream to get closer, empties the
 // buffer and sets up the next stall: on a shaky stream that turned into a loop of skips and
-// reloads. So this never jumps: it steers with the playback speed alone, a touch faster while more
-// is in hand than needed, a touch slower (0.95×) while less is, which builds the margin back
-// without a stall.
+// reloads. So this never jumps: it steers with the playback speed alone, the way YouTube's and
+// ExoPlayer's live players do: faster in proportion to how much more is in hand than needed (1.04×
+// a second over, at most 1.1×), easing off as it nears the margin so it never overshoots into a
+// stall; slower in proportion while there's less (at least 0.95×). Right after a start it catches
+// up a little more keenly (what's over then is only how far back the player joined), so it's close
+// to live within seconds.
 //
-// It steers by what's in hand on average, not by each reading. Video arrives in pieces, so the
-// buffer goes up with each piece and down until the next: steering on the reading itself sped up
-// after every piece and stopped before the next, catching up all the time for nothing. Now it only
-// catches up when there's been clearly more than needed for a few seconds, gently (1.05×; faster
-// only when far behind), and carries on down to the margin in one go. Except right after it
-// starts: then what's over the margin is just how far back the player joined, so it catches up at
-// once (1.1×) and is close to live within seconds.
+// It steers by what's in hand on average, not by each reading: video arrives in pieces, so the
+// reading goes up with each piece and down until the next, and steering on it sped up after every
+// piece. Within a fifth of a second of the margin it leaves the speed alone, and it doesn't speed
+// up while the reading itself is low (between pieces).
 //
 // And it learns the margin each stream needs from how its video actually arrives: it keeps track of
 // how far delivery falls behind playback when the stream hiccups (whatever playing faster or slower
 // accounts for aside), and keeps that much in hand plus a little air. It starts from the least the
-// connection allows (half a second on Wi-Fi), or what the channel needed lately. A hiccup bigger
+// connection allows (0.6 s on Wi-Fi), or what the channel needed lately. A hiccup bigger
 // than any lately raises the margin at once; once none that big has come for a few minutes, the
 // margin comes back down within a minute or two. A steady stream on good Wi-Fi ends up around a
 // second from live; a shaky one a little further back, but without the stalls and skips.
@@ -49,38 +49,37 @@ struct LiveCatchUp: Sendable {
   /// The last reading: buffer, when, the rate it played at since, and where the playhead was.
   private var last: (buffer: Double, at: Date, rate: Float, position: Double?)?
   private var lastShrink: Date
-  /// When the margin last grew: catching up stays gentle for a while after (playing fast spends
-  /// the margin that rides out the next hiccup).
+  /// When the margin last grew (it isn't brought back down for a while after).
   private(set) var grewAt = Date.distantPast
   /// What's in hand on average lately (see the top), and when it was last brought up to date.
   private(set) var level: Double?
   private var levelAt: Date?
-  /// Since when there's been clearly more in hand than needed (catching up waits for it to last).
-  private var overSince: Date?
   /// The least to keep in hand on this connection (more on cellular: see `setFloor`).
   private(set) var floor = LiveCatchUp.minBuffer
   /// When playback (re)started: the first seconds catch up straight away (see `startWindow`).
   private var startedAt: Date
 
-  static let minBuffer = 0.5
+  static let minBuffer = 0.6
   static let maxBuffer = 3.5
   /// A margin above this (plus a little) means the stream's video arrives unevenly.
   static let startBuffer = 1.0
-  /// Rates: well behind (after an outage), behind, a little behind (the usual one); and building
-  /// the margin back up. Small enough that speech still sounds natural.
+  /// Speed limits: well behind (after an outage), the usual most, a gentle one (multi-view's), and
+  /// the slowest. Small enough that speech still sounds natural.
   static let rates: (fast: Float, medium: Float, gentle: Float, slow: Float) = (1.2, 1.1, 1.05, 0.95)
   /// Kept on top of the biggest hiccup lately.
   static let air = 0.3
   /// How quickly the average follows the readings (seconds).
   static let levelTime = 3.0
-  /// Catching up starts once the average has been this far over the margin for `catchUpAfter`
-  /// seconds (or at once when it's `catchUpNow` over), and stops this close to it.
-  static let catchUpFrom = 0.35
-  static let catchUpAfter: TimeInterval = 3
-  static let catchUpNow = 3.0
-  static let catchUpTo = 0.1
-  /// Slowing down: the average this far under the margin, or the reading itself nearly dry.
-  static let shortBy = 0.3
+  /// Speed change per second of difference from the margin; a little more just after a start.
+  static let gain = 0.04
+  static let startGain = 0.1
+  /// Steering starts this far from the margin and stops this close to it (no flip-flopping on a
+  /// reading's wobble).
+  static let deadband = 0.2
+  static let settle = 0.05
+  /// The least change made (it eases in, but doesn't crawl over the last bit).
+  static let minStep = 0.02
+  /// The reading itself this low: slower at once, whatever the average says.
   static let nearlyDry = 0.35
   /// How long a hiccup counts.
   static let memory: TimeInterval = 180
@@ -91,14 +90,10 @@ struct LiveCatchUp: Sendable {
   private static let shrinkEvery: TimeInterval = 5
   private static let shrinkStep = 0.05
   private static let shrinkAfterGrowth: TimeInterval = 30
-  private static let calmAfter: TimeInterval = 45
   /// Just started: whatever's over the margin is the join point's lag, not a burst of video, so
-  /// it's caught up at once and a little faster (it settles within seconds, not minutes).
+  /// it's caught up more keenly (it settles within seconds).
   static let startWindow: TimeInterval = 20
-  static let startCatchUp = 0.3
 
-  /// - Parameter targetBuffer: the margin to start from (what this channel needed last time, so it
-  ///   doesn't have to learn it again).
   /// - Parameter targetBuffer: the margin to start from (what this channel needed lately, so it
   ///   doesn't have to stall to learn it again); otherwise the least the connection allows.
   init(targetBuffer: Double? = nil, now: Date = Date()) {
@@ -142,7 +137,6 @@ struct LiveCatchUp: Sendable {
       rate = 1
       last = nil
       level = nil
-      overSince = nil
       return rate
     }
     let position = position.flatMap { $0.isFinite ? $0 : nil }
@@ -168,40 +162,26 @@ struct LiveCatchUp: Sendable {
     }
 
     let excess = average - targetBuffer
-    // Already well behind live (e.g. after a long outage): never slow down further.
+    // Already well behind live (e.g. after a long outage): never slower.
     let wellBehind = latency > targetBuffer + 2.5
-    let calm = now.timeIntervalSince(grewAt) > Self.calmAfter
-    var next: Float = 1
-    let short = buffer < Self.nearlyDry || excess < -Self.shortBy
-    if !wellBehind, short || (rate < 1 && excess < 0) {
-      // Less in hand than the stream needs (or about to run dry): build it back up, to the margin.
-      next = Self.rates.slow
-      overSince = nil
-    } else if latency > targetBuffer + 0.5, maxRate > 1 {
-      if excess > Self.catchUpFrom {
-        if overSince == nil { overSince = now }
-      } else if excess <= Self.catchUpTo {
-        overSince = nil
-      }
-      let lasting = overSince.map { now.timeIntervalSince($0) >= Self.catchUpAfter } ?? false
-      // Already catching up: carry on down to the margin (no stopping and starting).
-      let catching = rate > 1 && excess > Self.catchUpTo
-      let starting = now.timeIntervalSince(startedAt) < Self.startWindow && excess > Self.startCatchUp
-      if catching || lasting || starting || excess > Self.catchUpNow {
-        if excess > 4 || (starting && excess > 2.5) {
-          // Far more than needed in hand (after an outage, or joining well back): catch up properly.
-          next = Self.rates.fast
-        } else if (excess > 1 && calm) || now.timeIntervalSince(startedAt) < Self.startWindow {
-          next = Self.rates.medium
-        } else {
-          next = Self.rates.gentle
-        }
-        next = min(next, maxRate)
-      }
-    } else {
-      overSince = nil
+    let starting = now.timeIntervalSince(startedAt) < Self.startWindow
+    var next = 1.0
+    if buffer < Self.nearlyDry, !wellBehind {
+      // About to run dry: slower at once.
+      next = Double(Self.rates.slow)
+    } else if excess < -(rate < 1 ? Self.settle : Self.deadband), !wellBehind {
+      // Less in hand than needed: slower in proportion, building it back up.
+      next = max(Double(Self.rates.slow), 1 + min(-Self.minStep, excess * Self.gain))
+    } else if excess > (rate > 1 ? Self.settle : Self.deadband), latency > targetBuffer + 0.3, maxRate > 1,
+      buffer > Self.nearlyDry + 0.15
+    {
+      // More than needed: faster in proportion, easing off toward the margin.
+      let top = Double(min(excess > 4 ? Self.rates.fast : Self.rates.medium, maxRate))
+      next = min(top, 1 + max(Self.minStep, excess * (starting ? Self.startGain : Self.gain)))
     }
-    rate = next
+    // In hundredths: the player isn't told about every wobble.
+    next = (next * 100).rounded() / 100
+    rate = Float(next)
     last = (buffer, now, rate, position)
     return rate
   }
@@ -262,7 +242,6 @@ struct LiveCatchUp: Sendable {
     rate = 1
     last = nil
     level = nil
-    overSince = nil
     holdUntil = max(holdUntil, now.addingTimeInterval(3))
   }
 
@@ -272,7 +251,6 @@ struct LiveCatchUp: Sendable {
     rate = 1
     last = nil
     level = nil
-    overSince = nil
     holdUntil = max(holdUntil, now.addingTimeInterval(seconds))
   }
 
@@ -283,7 +261,6 @@ struct LiveCatchUp: Sendable {
     rate = 1
     last = nil
     level = nil
-    overSince = nil
     shortfall = 0
     shortfallPeak = 0
     holdUntil = now.addingTimeInterval(1)

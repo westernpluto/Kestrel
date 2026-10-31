@@ -1059,19 +1059,24 @@ func testLiveCatchUp() {
   var catchUp = LiveCatchUp(now: t0)
   // Settling after a start: normal speed.
   check(catchUp.update(buffer: 2.5, latency: 3.5, playing: true, now: t0) == 1)
-  // Far more than needed in hand (well after the start): catches up at once, faster while well
-  // over, then gently down to the margin in one go, and stops.
+  // Far more than needed in hand (well after the start): faster in proportion, easing off as it
+  // nears the margin (never faster again on the way down), stopping at it without overshooting.
   var t = t0.addingTimeInterval(25)
   var buffer = 4.2
-  var seen: [Float] = []
-  for _ in 0..<200 {
+  var rates: [Float] = []
+  var lowest = buffer
+  for _ in 0..<400 {
     let rate = catchUp.update(buffer: buffer, latency: buffer + 1, playing: true, now: t)
-    if seen.last != rate { seen.append(rate) }
+    rates.append(rate)
     buffer -= Double(rate - 1) * 0.5
+    lowest = min(lowest, buffer)
     t += 0.5
   }
-  check(seen == [LiveCatchUp.rates.medium, LiveCatchUp.rates.gentle, 1], "\(seen)")
-  check(buffer > 0.4 && buffer < 0.9, "ends near the margin: \(buffer)")
+  let easing = zip(rates, rates.dropFirst()).allSatisfy { $0 >= $1 }
+  check((rates.first ?? 1) > 1 && easing && rates.last == 1, "eases in: \(Set(rates).sorted())")
+  check((rates.first ?? 9) <= LiveCatchUp.rates.medium, "gently")
+  check(abs(buffer - catchUp.targetBuffer) < 0.3, "ends at the margin: \(buffer)")
+  check(lowest >= catchUp.targetBuffer - 0.2, "without overshooting: \(lowest)")
   check(catchUp.targetBuffer <= LiveCatchUp.minBuffer + 0.001, "spending the extra on purpose isn't a hiccup")
   // Paused or buffering: normal speed. Close to live already: leave it.
   check(catchUp.update(buffer: 3, latency: 4, playing: false, now: t) == 1)
@@ -1082,74 +1087,78 @@ func testLiveCatchUp() {
   var start = LiveCatchUp(now: t0)
   var st = t0.addingTimeInterval(1.5)
   var joined = 1.6
-  check(start.update(buffer: joined, latency: joined + 1, playing: true, now: st) == LiveCatchUp.rates.medium, "at once")
-  while st < t0.addingTimeInterval(20) {
+  check(start.update(buffer: joined, latency: joined + 1, playing: true, now: st) > 1, "at once")
+  var closeAt: Date?
+  while st < t0.addingTimeInterval(60) {
     st += 0.5
     let rate = start.update(buffer: joined, latency: joined + 1, playing: true, now: st)
     joined -= Double(rate - 1) * 0.5
+    if closeAt == nil, joined <= start.targetBuffer + 0.2 { closeAt = st }
   }
-  check(joined <= start.targetBuffer + 0.3, "close to live within seconds: \(joined)")
+  check((closeAt ?? .distantFuture) <= t0.addingTimeInterval(30), "close to live within seconds: \(String(describing: closeAt))")
 
   // Video arriving in pieces: the reading goes up and down around an average a little over the
-  // margin. No catching up for that (it used to speed up after every piece).
-  var pieces = LiveCatchUp(targetBuffer: 0.8, now: t0)
+  // margin. Hardly any steering for that (it used to speed up after every piece), never slower,
+  // and never near running dry.
+  var pieces = LiveCatchUp(targetBuffer: 1, now: t0)
   var p = t0.addingTimeInterval(25)
   var inPieces = 0.8
   var changes = 0
   var lastRate: Float = 1
+  var slowed = false
+  var lowestPiece = inPieces
   for step in 0..<240 {
     let rate = pieces.update(buffer: inPieces, latency: inPieces + 0.8, playing: true, now: p)
     if rate != lastRate {
       changes += 1
       lastRate = rate
     }
+    if rate < 1 { slowed = true }
     // A second of video every other reading; half a second played each time.
     inPieces += (step % 2 == 0 ? 1.0 : 0) - Double(rate) * 0.5
+    lowestPiece = min(lowestPiece, inPieces)
     p += 0.5
   }
-  check(changes == 0, "steady speed while video arrives in pieces: \(changes) changes")
+  check(changes <= 4 && !slowed && lowestPiece > 0.3, "steady while video arrives in pieces: \(changes) changes")
 
-  // More than needed: not caught up for the first few seconds (it may just be video arriving in a
-  // piece), then it is.
+  // More than needed, lasting: caught up, gently.
   var surplus = LiveCatchUp(targetBuffer: 1, now: t0)
   var s = t0.addingTimeInterval(25)
   var surplusRates: [Float] = []
-  for _ in 0..<20 {
+  for _ in 0..<10 {
     surplusRates.append(surplus.update(buffer: 2.4, latency: 3.3, playing: true, now: s))
     s += 0.5
   }
-  check(surplusRates.prefix(5).allSatisfy { $0 == 1 }, "not for a moment's surplus: \(surplusRates)")
-  check((surplusRates.last ?? 1) > 1, "a lasting one is caught up")
+  check((surplusRates.last ?? 1) > 1 && (surplusRates.max() ?? 9) <= LiveCatchUp.rates.medium, "\(surplusRates)")
 
   // A hiccup: 1.5 s of no video arriving (the buffer drains at normal speed). The margin grows to
   // cover it as it happens; then playback slows a touch to build the margin back, and stops there.
   var hiccup = LiveCatchUp(now: t0)
   var h = t0.addingTimeInterval(25)
   var held = 2.0
-  hiccup.update(buffer: held, latency: 1.4, playing: true, now: h)
+  hiccup.update(buffer: held, latency: 0.8, playing: true, now: h)
   for _ in 0..<3 {
     h += 0.5
     held -= 0.5
-    hiccup.update(buffer: held, latency: 1.4, playing: true, now: h)
+    hiccup.update(buffer: held, latency: 0.8, playing: true, now: h)
   }
   check(hiccup.targetBuffer >= 1.5 + LiveCatchUp.air - 0.01, "margin covers the hiccup: \(hiccup.targetBuffer)")
   h += 0.5
   held = 0.3
   check(hiccup.update(buffer: held, latency: 2, playing: true, now: h) == LiveCatchUp.rates.slow, "builds it back")
-  var building: [Float] = [LiveCatchUp.rates.slow]
+  var building: [Float] = []
   var atNormal: (held: Double, target: Double, needed: Double)?
   for _ in 0..<600 {
     h += 0.5
     let rate = hiccup.update(buffer: held, latency: held + 1, playing: true, now: h)
-    if building.last != rate {
-      building.append(rate)
-      if rate == 1, atNormal == nil { atNormal = (held, hiccup.targetBuffer, hiccup.neededBuffer(now: h)) }
-    }
+    building.append(rate)
+    if rate == 1, atNormal == nil { atNormal = (held, hiccup.targetBuffer, hiccup.neededBuffer(now: h)) }
     held += (1 - Double(rate)) * 0.5
   }
-  check(Array(building.prefix(2)) == [LiveCatchUp.rates.slow, 1] && !building.dropFirst(2).contains(LiveCatchUp.rates.slow),
-    "slower until the margin's back, then normal: \(building)")
-  check((atNormal?.held ?? 0) >= (atNormal?.target ?? 9) - 0.2, "back to the margin: \(String(describing: atNormal))")
+  let normalFrom = building.firstIndex(of: 1) ?? building.count
+  check(normalFrom < building.count && building[..<normalFrom].allSatisfy { $0 < 1 } && building[normalFrom...].allSatisfy { $0 >= 1 },
+    "slower until the margin's back, then normal")
+  check((atNormal?.held ?? 0) >= (atNormal?.target ?? 9) - 0.3, "back to the margin: \(String(describing: atNormal))")
   check((atNormal?.needed ?? 0) >= 1.5, "the hiccup is remembered")
   // Well behind live already: never slower.
   var behind = LiveCatchUp(now: t0)
