@@ -48,6 +48,9 @@ struct SettingsView: View {
           LabeledContent("Ad blocking", value: settings.adBlocking.shortTitle)
         }
         Toggle("Background audio", isOn: $settings.backgroundAudio)
+        if PlayerEngine.isLowLatencyBuilt {
+          Toggle("Multi-view: all streams in PiP", isOn: $settings.multiviewPiPAll)
+        }
         NavigationLink {
           RecordingsView()
         } label: {
@@ -57,7 +60,7 @@ struct SettingsView: View {
         Text("Playback")
       } footer: {
         Text(
-          "Low latency keeps streams as close to live as your connection allows: when one falls behind, it plays slightly faster for a few seconds to catch up. Streams start at the highest quality; pick Auto in the player's gear menu and they start on Auto from then on, which settles on a quality your connection keeps up with instead of bouncing between them. Video stats are in the gear menu too."
+          "Low latency keeps streams as close to live as your connection allows: when one falls behind, it plays slightly faster for a few seconds to catch up. Streams start at the highest quality; pick Auto in the player's gear menu and they start on Auto from then on, which settles on a quality your connection keeps up with instead of bouncing between them. Video stats are in the gear menu too. Multi-view's Picture in Picture shows all its streams together (experimental); off, it shows the picked one."
         )
       }
 

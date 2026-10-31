@@ -350,6 +350,8 @@ struct SearchView: View {
     }
     .listStyle(.insetGrouped)
     .environment(\.defaultMinListRowHeight, 1)
+    // Scrolling puts the search keyboard away (a tap on a result opens it straight away).
+    .scrollDismissesKeyboard(.immediately)
     .refreshable { [model] in await detachedRefresh { await model.refresh() } }
     .task { await model.loadTop() }
     .onAppear { model.refreshIfStale() }
@@ -452,13 +454,26 @@ struct SearchView: View {
     if !model.channels.isEmpty {
       Section("Channels") {
         ForEach(model.channels.prefix(8)) { result in
-          NavigationLink(value: Route.channel(result.channel)) {
-            ChannelRow(
-              channel: result.channel,
-              subtitle: result.followers.map { "\(Format.viewers($0)) followers" },
-              liveViewers: result.liveViewers)
+          // A plain button, not a link with a tap watcher added: that pair often swallowed the
+          // tap in a list.
+          Button {
+            model.remember(result.channel)
+            Keyboard.dismiss()
+            app.push(.channel(result.channel))
+          } label: {
+            HStack(spacing: 8) {
+              ChannelRow(
+                channel: result.channel,
+                subtitle: result.followers.map { "\(Format.viewers($0)) followers" },
+                liveViewers: result.liveViewers)
+              Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundColor(Color(white: 0.4))
+            }
+            .foregroundColor(.primary)
+            .contentShape(Rectangle())
           }
-          .simultaneousGesture(TapGesture().onEnded { model.remember(result.channel) })
+          .buttonStyle(PressableStyle(scale: 0.98))
           .swipeActions {
             if result.liveViewers != nil {
               Button("Watch") {
@@ -504,6 +519,7 @@ struct SearchView: View {
   private func liveRow(_ stream: LiveStream) -> some View {
     Button {
       model.remember(stream.channel)
+      Keyboard.dismiss()
       app.playing = .live(stream.channel)
     } label: {
       HStack(spacing: 12) {
@@ -528,7 +544,7 @@ struct SearchView: View {
       }
       .contentShape(Rectangle())
     }
-    .buttonStyle(.plain)
+    .buttonStyle(PressableStyle(scale: 0.98))
     .contextMenu {
       Button {
         model.remember(stream.channel)

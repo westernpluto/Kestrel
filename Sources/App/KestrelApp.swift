@@ -159,8 +159,10 @@ struct KeyboardDismisser: UIViewRepresentable {
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-      // Only while typing, and not on the text itself (moving the cursor).
-      guard FirstResponder.current is UIView else { return false }
+      // Only while typing, and not on the text itself (moving the cursor). Not for a search
+      // field: putting its keyboard away under a tap on a result shifted the list mid-tap and the
+      // result often didn't open (search's keyboard goes away by scrolling, or with the result).
+      guard let editor = FirstResponder.current as? UIView, !(editor is UISearchTextField) else { return false }
       var view = touch.view
       while let current = view {
         if current is UITextView || current is UITextField { return false }

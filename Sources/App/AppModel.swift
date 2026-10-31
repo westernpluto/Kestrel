@@ -105,6 +105,9 @@ final class AppSettings: ObservableObject {
   @Published var nearbyServers: Bool { didSet { defaults.set(nearbyServers, forKey: "nearbyServers") } }
   /// VODs: jump past the parts Twitch muted for copyright as playback reaches them.
   @Published var skipMutedParts: Bool { didSet { defaults.set(skipMutedParts, forKey: "skipMutedParts") } }
+  /// Multi-view's Picture in Picture shows every stream together (experimental) instead of the
+  /// picked one.
+  @Published var multiviewPiPAll: Bool { didSet { defaults.set(multiviewPiPAll, forKey: "multiviewPiPAll") } }
   // The user's own HTTP proxy (AdBlocking.customProxy).
   @Published var proxyHost: String { didSet { defaults.set(proxyHost, forKey: "proxyHost"); applyProxy() } }
   @Published var proxyPort: String { didSet { defaults.set(proxyPort, forKey: "proxyPort"); applyProxy() } }
@@ -126,6 +129,7 @@ final class AppSettings: ObservableObject {
   private init() {
     defaults.register(defaults: [
       "lowLatency": true, "nearbyServers": true, "adBlocking": "auto", "backgroundAudio": true, "showVideoStats": false, "chatFontSize": 15.0,
+      "multiviewPiPAll": true,
     ])
     lowLatency = defaults.bool(forKey: "lowLatency")
     adBlocking = AdBlocking(stored: defaults.string(forKey: "adBlocking"))
@@ -135,6 +139,7 @@ final class AppSettings: ObservableObject {
     autoQuality = defaults.bool(forKey: "autoQuality")
     nearbyServers = defaults.bool(forKey: "nearbyServers")
     skipMutedParts = defaults.bool(forKey: "skipMutedParts")
+    multiviewPiPAll = defaults.bool(forKey: "multiviewPiPAll")
     proxyHost = defaults.string(forKey: "proxyHost") ?? ""
     proxyPort = defaults.string(forKey: "proxyPort") ?? ""
     proxyUsername = defaults.string(forKey: "proxyUsername") ?? ""

@@ -3,6 +3,10 @@ import AVKit
 import SwiftUI
 import UIKit
 
+#if canImport(AmazonIVSPlayer)
+  import AmazonIVSPlayer
+#endif
+
 @MainActor
 final class PlayerModel: ObservableObject {
   enum Phase: Equatable {
@@ -1438,12 +1442,22 @@ final class PlayerModel: ObservableObject {
   }
 
   #if canImport(AmazonIVSPlayer)
+    /// Multi-view, all streams in Picture in Picture: the picture shows in this view of the PiP
+    /// window (nil: back in the tile). Kept for a player started afresh meanwhile.
+    private weak var sharedPictureView: IVSPlayerView?
+
+    func showPicture(in view: IVSPlayerView?) {
+      sharedPictureView = view
+      if let view { lowLatency?.show(in: view) } else { lowLatency?.showInTile() }
+    }
+
     private func startLowLatency(_ channel: Channel) {
       let controller = LowLatencyController(login: channel.login, codecs: codecs, model: self)
       controller.tile = isTile
       controller.pictureInPictureAllowed = pictureInPictureAllowed
       lowLatency = controller
       controller.start()
+      if let sharedPictureView { controller.show(in: sharedPictureView) }
       if userMuted { controller.setMuted(true) }
       if volume < 1 { controller.setVolume(volume) }
       if let tileMaxHeight { controller.setMaxHeight(tileMaxHeight) }

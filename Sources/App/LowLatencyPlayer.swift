@@ -55,6 +55,9 @@
       }
     }
     private var offersPictureInPicture: Bool { !tile || pictureInPictureAllowed }
+    /// Multi-view's all-streams Picture in Picture: the picture shows in this view (in the PiP
+    /// window) instead of the tile's own, and carries on in the background like any PiP.
+    private weak var sharedView: IVSPlayerView?
     /// Muted by choice (multi-view: every tile but the one being listened to).
     private var userMuted = false
     /// The tallest picture worth fetching (multi-view: as big as the tile is shown); nil for any.
@@ -199,6 +202,7 @@
       player.delegate = nil
       proxy.controller = nil
       view?.player = nil
+      if let sharedView, sharedView.player === player { sharedView.player = nil }
       pipObservation = nil
       pipPossibleObservation = nil
       pip = nil
@@ -622,7 +626,11 @@
         reload(reason: String(format: "%.0f s behind live after a dropout", latency))
       }
       // The picture's view lost the player somehow: give it back.
-      if let view, !detachedForBackground, view.player !== player { view.player = player }
+      if let sharedView {
+        if sharedView.player !== player { sharedView.player = player }
+      } else if let view, !detachedForBackground, view.player !== player {
+        view.player = player
+      }
       let decoded = player.videoFramesDecoded
       let elapsed = Date().timeIntervalSince(framesDecoded.at)
       if elapsed >= 1 {
@@ -794,8 +802,40 @@
       // still playing.
       if let old = self.view, old.player === player { old.player = nil }
       self.view = view
-      if !detachedForBackground { view.player = player }
+      if !detachedForBackground, sharedView == nil { view.player = player }
       if offersPictureInPicture { makePictureInPicture(for: view) }
+    }
+
+    /// Into the all-streams Picture in Picture window (see MultiviewPictureInPicture): the
+    /// picture moves there and keeps playing while Kestrel is in the background.
+    func show(in shared: IVSPlayerView) {
+      guard !stopped, sharedView !== shared else { return }
+      backgroundSettleTask?.cancel()
+      backgroundSettleTask = nil
+      audioOnlyTask?.cancel()
+      audioOnlyTask = nil
+      if let view, view.player === player { view.player = nil }
+      sharedView = shared
+      detachedForBackground = false
+      if audioOnlyForBackground {
+        audioOnlyForBackground = false
+        applyChosen(smoothly: true)
+      }
+      shared.player = player
+      if pausedForBackground {
+        pausedForBackground = false
+        goLive()
+      }
+    }
+
+    /// Back in the tile's own view (the PiP window closed). Still in the background: settles as
+    /// usual (heard streams keep their sound, the others pause).
+    func showInTile() {
+      guard let shared = sharedView else { return }
+      if shared.player === player { shared.player = nil }
+      sharedView = nil
+      if let view, !detachedForBackground { view.player = player }
+      if UIApplication.shared.applicationState == .background { enteredBackground() }
     }
 
     private func makePictureInPicture(for view: IVSPlayerView) {
@@ -836,7 +876,7 @@
 
     private func settleInBackground() {
       guard !stopped, !suspended, UIApplication.shared.applicationState == .background,
-        !proxy.pictureInPictureStarting, !(pip?.isPictureInPictureActive ?? false)
+        !proxy.pictureInPictureStarting, !(pip?.isPictureInPictureActive ?? false), sharedView == nil
       else { return }
       if AppSettings.shared.backgroundAudio, !(tile && userMuted) {
         // Keep the sound: take the picture off screen, and if it stays in the background a while,

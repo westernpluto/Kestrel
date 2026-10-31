@@ -10,6 +10,7 @@
 
 import AVKit
 import SwiftUI
+import UIKit
 
 @MainActor
 final class MultiviewModel: ObservableObject, Identifiable {
@@ -36,7 +37,16 @@ final class MultiviewModel: ObservableObject, Identifiable {
   @Published private(set) var running = false
   /// Open the stream picker as soon as the screen shows.
   @Published var wantsPicker = false
+  /// Every stream is in one Picture in Picture window (see MultiviewPictureInPicture).
+  @Published private(set) var pictureInPictureActive = false
   private var hidden = false
+  /// The pictures' last sizes (to fit the streams to them again after PiP).
+  private var lastFit: (heights: [String: CGFloat], scale: CGFloat)?
+  /// The view under the pictures on screen (the all-streams PiP window grows from it).
+  private weak var pictureSource: UIView?
+  #if canImport(AmazonIVSPlayer)
+    private lazy var sharedPiP = MultiviewPictureInPicture(model: self)
+  #endif
 
   nonisolated init() {}
 
@@ -73,6 +83,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
     if heard { heardIDs.insert(channel.id) }
     if selectedID == nil { select(channel.id) }
     if running { Task { await player.start() } }
+    updatePictureInPicture()
     AppModel.shared.objectWillChange.send()
   }
 
@@ -94,6 +105,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
     // Don't leave it silent because the one heard went.
     if wasHeard, heardIDs.isEmpty, let next = selectedID { heardIDs.insert(next) }
     applySound()
+    updatePictureInPicture()
     AppModel.shared.objectWillChange.send()
   }
 
@@ -104,12 +116,14 @@ final class MultiviewModel: ObservableObject, Identifiable {
     for tile in tiles { Task { await tile.player.start() } }
     applySound()
     if let selectedID { startChat(for: selectedID) }
+    updatePictureInPicture()
   }
 
   /// Stops everything but keeps the streams (another stream is being watched on its own); a tap
   /// on the dock starts them again.
   func park() {
     guard running else { return }
+    stopPictureInPicture()
     running = false
     for tile in tiles { tile.player.stop() }
     tiles = tiles.map { Tile(channel: $0.channel, player: makePlayer($0.channel, heard: heardIDs.contains($0.id))) }
@@ -121,7 +135,8 @@ final class MultiviewModel: ObservableObject, Identifiable {
   /// carries on as it was).
   func setHidden(_ isHidden: Bool) {
     hidden = isHidden
-    if isHidden { for tile in tiles { tile.player.setMaxHeight(Self.hiddenHeight) } }
+    if isHidden, !pictureInPictureActive { for tile in tiles { tile.player.setMaxHeight(Self.hiddenHeight) } }
+    updatePictureInPicture()
   }
 
   /// Picks a stream: its chat shows (and it's the big one in focus). If only one is heard, the sound
@@ -129,8 +144,8 @@ final class MultiviewModel: ObservableObject, Identifiable {
   func select(_ id: String) {
     guard tiles.contains(where: { $0.id == id }) else { return }
     selectedID = id
-    // Picture in Picture follows the picked stream (iOS shows one picture at a time).
-    for tile in tiles { tile.player.pictureInPictureAllowed = tile.id == id }
+    // Picture in Picture follows the picked stream (unless all of them go in it together).
+    updatePictureInPicture()
     if heardIDs.count <= 1 {
       heardIDs = [id]
       applySound()
@@ -152,8 +167,16 @@ final class MultiviewModel: ObservableObject, Identifiable {
     applySound()
   }
 
-  /// The picked stream in Picture in Picture (the others carry on: heard ones keep their sound).
+  /// Picture in Picture: every stream together (Settings › Playback, experimental), or the picked
+  /// one (the others carry on: heard ones keep their sound).
   func togglePictureInPicture() {
+    #if canImport(AmazonIVSPlayer)
+      if picturesTogether || sharedPiP.isActive {
+        updatePictureInPicture()
+        sharedPiP.toggle()
+        return
+      }
+    #endif
     guard running, let selectedID, let tile = tiles.first(where: { $0.id == selectedID }) else { return }
     tile.player.pictureInPictureAllowed = true
     tile.player.togglePictureInPicture()
@@ -173,11 +196,65 @@ final class MultiviewModel: ObservableObject, Identifiable {
 
   private func applySound() {
     for tile in tiles { tile.player.setMuted(!heardIDs.contains(tile.id)) }
+    #if canImport(AmazonIVSPlayer)
+      sharedPiP.sync()
+    #endif
+  }
+
+  // MARK: Picture in Picture
+
+  /// Leaving the app puts every stream in one PiP window (Settings › Playback, experimental; it
+  /// needs the low-latency player), rather than just the picked one.
+  var picturesTogether: Bool {
+    #if canImport(AmazonIVSPlayer)
+      return AppSettings.shared.multiviewPiPAll && tiles.count > 1
+    #else
+      return false
+    #endif
+  }
+
+  /// Sets up whichever Picture in Picture applies now.
+  func updatePictureInPicture() {
+    let together = picturesTogether
+    for tile in tiles { tile.player.pictureInPictureAllowed = !together && tile.id == selectedID }
+    #if canImport(AmazonIVSPlayer)
+      sharedPiP.fit(count: tiles.count)
+      sharedPiP.setEnabled(together && running && !hidden, source: pictureSource)
+      sharedPiP.sync()
+    #endif
+  }
+
+  /// The multi-view screen's pictures came on screen (or went).
+  func setPictureSource(_ view: UIView?) {
+    guard view !== pictureSource else { return }
+    pictureSource = view
+    updatePictureInPicture()
+  }
+
+  /// The all-streams window opened or closed: small pictures while it's up (it's small), then
+  /// each as sharp as its place on screen again.
+  func pictureInPictureChanged(_ active: Bool) {
+    pictureInPictureActive = active
+    if active {
+      let cap = tiles.count <= 2 ? 480 : 360
+      for tile in tiles { tile.player.setMaxHeight(cap) }
+    } else if let lastFit, !hidden {
+      fit(heights: lastFit.heights, scale: lastFit.scale)
+    } else if hidden {
+      for tile in tiles { tile.player.setMaxHeight(Self.hiddenHeight) }
+    }
+  }
+
+  private func stopPictureInPicture() {
+    #if canImport(AmazonIVSPlayer)
+      sharedPiP.stop()
+    #endif
   }
 
   /// Each stream no sharper than its picture is shown (see `MultiviewLayout.heightCap`).
   func fit(heights: [String: CGFloat], scale: CGFloat) {
-    guard !hidden else { return }
+    lastFit = (heights, scale)
+    guard !hidden, !pictureInPictureActive else { return }
     for tile in tiles {
       guard let points = heights[tile.id] else { continue }
       let featured = tile.id == selectedID || heardIDs.contains(tile.id)
@@ -186,6 +263,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
   }
 
   func stopAll() {
+    stopPictureInPicture()
     for tile in tiles { tile.player.stop() }
     chat?.stop()
     running = false
@@ -268,6 +346,7 @@ struct MultiviewScreen: View {
   /// On screen: playing, turnable, the picker up if there's hardly anything to watch yet.
   private func opened() {
     pull = 0
+    model.updatePictureInPicture()
     if app.playing != nil { app.playing = nil }
     OrientationLock.playerVisible(true)
     model.setHidden(false)
@@ -302,6 +381,12 @@ struct MultiviewScreen: View {
             Keyboard.dismiss()
             showChrome()
           }
+
+        // Where the all-streams Picture in Picture window grows from and goes back to.
+        PictureInPictureAnchor(model: model)
+          .frame(width: areas.grid.width, height: areas.grid.height)
+          .offset(x: areas.grid.minX, y: areas.grid.minY)
+          .allowsHitTesting(false)
 
         if model.tiles.isEmpty {
           emptyState
@@ -342,6 +427,20 @@ struct MultiviewScreen: View {
         }
       }
       .simultaneousGesture(pullDown)
+
+      if model.pictureInPictureActive {
+        // The pictures are in the PiP window meanwhile.
+        VStack(spacing: 8) {
+          Image(systemName: "pip").font(.system(size: 30, weight: .semibold))
+          Text("Playing in Picture in Picture").font(.subheadline.weight(.semibold))
+        }
+        .foregroundColor(.white.opacity(0.75))
+        .frame(width: areas.grid.width, height: areas.grid.height)
+        .background(Color.black)
+        .offset(x: areas.grid.minX, y: areas.grid.minY)
+        .allowsHitTesting(false)
+        .transition(.opacity)
+      }
 
       if let chat = model.chat, showChat {
         // Down to the window's bottom edge, like the player's chat: the message box keeps clear
@@ -462,7 +561,10 @@ struct MultiviewScreen: View {
         }
       }
       if AVPictureInPictureController.isPictureInPictureSupported(), model.selectedID != nil {
-        barButton("pip.enter", label: "Picture in Picture (the picked stream)") {
+        barButton(
+          model.pictureInPictureActive ? "pip.exit" : "pip.enter",
+          label: model.picturesTogether ? "Picture in Picture (all the streams)" : "Picture in Picture (the picked stream)"
+        ) {
           model.togglePictureInPicture()
           showChrome()
         }
@@ -911,6 +1013,35 @@ struct MultiviewPicker: View {
       }
       model.add(channel)
       name = ""
+    }
+  }
+}
+
+/// Hands multi-view the view under its pictures: the all-streams Picture in Picture window grows
+/// from it and goes back to it.
+struct PictureInPictureAnchor: UIViewRepresentable {
+  let model: MultiviewModel
+
+  func makeUIView(context: Context) -> AnchorView {
+    let view = AnchorView()
+    view.isUserInteractionEnabled = false
+    view.onWindow = { [weak model] view in model?.setPictureSource(view) }
+    return view
+  }
+
+  func updateUIView(_ view: AnchorView, context: Context) {}
+
+  static func dismantleUIView(_ view: AnchorView, coordinator: Coordinator) {
+    view.onWindow?(nil)
+    view.onWindow = nil
+  }
+
+  final class AnchorView: UIView {
+    var onWindow: (@MainActor (UIView?) -> Void)?
+
+    override func didMoveToWindow() {
+      super.didMoveToWindow()
+      onWindow?(window == nil ? nil : self)
     }
   }
 }
