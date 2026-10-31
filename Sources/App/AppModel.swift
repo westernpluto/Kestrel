@@ -257,11 +257,6 @@ enum PlaybackTarget: Identifiable, Hashable {
   }
 }
 
-struct MultiviewRequest: Identifiable, Equatable {
-  let id = UUID()
-  var channels: [Channel]
-}
-
 /// The app's sections (not `Tab`: that's a SwiftUI type in newer SDKs).
 enum AppTab: Hashable {
   case following, browse, search, settings
@@ -285,23 +280,50 @@ enum Route: Hashable {
 
 final class AppModel: ObservableObject {
   static let shared = AppModel()
-  /// What's playing. Setting it (even to what's already in the mini player) opens the player (and
-  /// closes multi-view: one or the other).
+  /// What's playing. Setting it (even to what's already in the mini player) opens the player.
+  /// (Multi-view, if it's open, steps aside into its dock, stopped: one thing plays at a time.)
   @Published var playing: PlaybackTarget? {
     didSet {
-      if playing != nil {
-        playerMinimized = false
-        if multiview != nil { multiview = nil }
-      }
+      if playing != nil { playerMinimized = false }
     }
   }
-  /// Multi-view (several live streams at once): the streams it opened with; nil while closed.
-  @Published var multiview: MultiviewRequest?
+  /// Multi-view (several live streams at once): open, on screen or tucked into its dock; nil while
+  /// closed.
+  @Published private(set) var multiview: MultiviewModel?
+  /// Multi-view is tucked away: a row of the streamers' pictures where the mini player sits.
+  @Published var multiviewMinimized = false
 
-  /// Opens multi-view with these streams (the player closes: its stream can be one of them).
+  /// Opens multi-view on screen with these streams added (the player closes: its stream can be
+  /// one of them).
+  @MainActor
   func openMultiview(_ channels: [Channel]) {
     playing = nil
-    multiview = MultiviewRequest(channels: channels)
+    let session = multiview ?? MultiviewModel()
+    for channel in channels { session.add(channel) }
+    if channels.count < 2 || session.tiles.count < 2 { session.wantsPicker = true }
+    multiview = session
+    multiviewMinimized = false
+  }
+
+  /// Adds a stream to multi-view without leaving what you're doing: it's collected in the dock
+  /// (which appears if it wasn't open), to watch together once the dock is tapped.
+  @MainActor
+  func addToMultiview(_ channel: Channel) {
+    if let session = multiview {
+      session.add(channel)
+    } else {
+      let session = MultiviewModel()
+      session.add(channel)
+      multiviewMinimized = true
+      multiview = session
+    }
+  }
+
+  @MainActor
+  func closeMultiview() {
+    multiview?.stopAll()
+    multiview = nil
+    multiviewMinimized = false
   }
   /// The player is shrunk into the mini player above the tab bar.
   @Published var playerMinimized = false

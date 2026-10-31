@@ -1216,6 +1216,17 @@ func testRecordingPlaylist() {
   check(live.contains("#EXT-X-TARGETDURATION:2"), live)
   let done = StreamRecorder.playlistText(entries: entries, ended: true)
   check(done.contains("#EXT-X-PLAYLIST-TYPE:VOD") && done.hasSuffix("#EXT-X-ENDLIST\n"), done)
+  // Dated: the first stretch and the one after the jump carry when they were broadcast.
+  let t0 = Date(timeIntervalSince1970: 1_761_800_000)
+  let dated = StreamRecorder.playlistText(entries: entries, dates: [t0, t0 + 2, t0 + 30], ended: true)
+  check(dated.components(separatedBy: "#EXT-X-PROGRAM-DATE-TIME:").count == 3, dated)
+  check(dated.contains("#EXT-X-DISCONTINUITY\n#EXT-X-PROGRAM-DATE-TIME:" + HLSDate.format(t0 + 30)), dated)
+  var info = RecordingInfo(
+    id: "a", login: "a", channelName: "A", quality: "", startedAt: t0 + 5, duration: 0, bytes: 0, gaps: 0)
+  check(info.streamOffset == nil)
+  info.streamStartedAt = t0 - 3600
+  info.firstSegmentAt = t0
+  check(info.streamOffset == 3600)
   check(StreamProxy.isPlainName("000001.ts") && StreamProxy.isPlainName("ab-12_3"))
   check(!StreamProxy.isPlainName("..") && !StreamProxy.isPlainName("a/b") && !StreamProxy.isPlainName(".hidden"))
 }

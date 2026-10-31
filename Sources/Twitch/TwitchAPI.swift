@@ -370,6 +370,19 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     }
   }
 
+  /// Live streams carrying a tag (Twitch's own tags, e.g. "speedrun"), most watched first.
+  func tagStreams(_ tag: String, first: Int = 30) async throws -> [LiveStream] {
+    let data = try await query(
+      """
+      query null($tags: [String!], $sort: StreamSort, $first: Int) {
+        streams(first: $first, options: { sort: $sort, freeformTags: $tags }) {
+          edges { node { \(Self.streamFields) } }
+        }
+      }
+      """, variables: ["tags": [tag], "sort": "VIEWER_COUNT", "first": first])
+    return data["streams"]["edges"].array.compactMap { Self.stream($0["node"]) }
+  }
+
   func searchCategories(_ text: String, first: Int = 25) async throws -> [Category] {
     let data = try await query(
       """

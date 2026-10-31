@@ -132,26 +132,101 @@ struct CategoryView: View {
   }
 }
 
+/// The most watched live streams right now (a couple of hundred), kept for a couple of minutes:
+/// what Search shows before anything's typed, and what it looks through for titles, tags and
+/// categories (Twitch's own search only knows channel and category names).
+@MainActor
+final class LiveIndex {
+  static let shared = LiveIndex()
+  private(set) var streams: [LiveStream] = []
+  private var fetchedAt = Date.distantPast
+  private var loading: Task<[LiveStream], Never>?
+
+  func load(force: Bool = false) async -> [LiveStream] {
+    if !force, !streams.isEmpty, Date().timeIntervalSince(fetchedAt) < 120 { return streams }
+    if let loading { return await loading.value }
+    let task = Task { () -> [LiveStream] in
+      var all: [LiveStream] = []
+      var cursor: String?
+      // Big pages if Twitch allows them, its usual ones if not.
+      var size = 100
+      for _ in 0..<6 {
+        do {
+          let page = try await TwitchAPI.shared.topStreams(after: cursor, first: size)
+          all += page.items
+          cursor = page.cursor
+          if !page.hasNextPage || cursor == nil || all.count >= 200 { break }
+        } catch {
+          guard size > 30, all.isEmpty else { break }
+          size = 30
+        }
+      }
+      return all
+    }
+    loading = task
+    let result = await task.value
+    loading = nil
+    if !result.isEmpty {
+      // Each channel once (a stream can show up on two pages while viewer counts move).
+      var seen = Set<String>()
+      streams = result.filter { seen.insert($0.channel.id).inserted }
+      fetchedAt = Date()
+    }
+    return streams
+  }
+
+  /// Every word of the search is somewhere in the stream's title, tags, category or name.
+  static func matches(_ stream: LiveStream, words: [String]) -> Bool {
+    let text = ([stream.title, stream.channel.name, stream.channel.login, stream.category?.name ?? ""] + stream.tags)
+      .joined(separator: " ")
+    return words.allSatisfy { text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+  }
+}
+
+/// Channels opened from Search, newest first (the search page shows them before anything's typed).
+struct RecentChannel: Codable, Hashable, Identifiable {
+  var id: String
+  var login: String
+  var name: String
+  var image: String?
+
+  init(_ channel: Channel) {
+    id = channel.id
+    login = channel.login
+    name = channel.name
+    image = channel.profileImageURL
+  }
+
+  var channel: Channel { Channel(id: id, login: login, displayName: name, profileImageURL: image) }
+}
+
 @MainActor
 final class SearchModel: ObservableObject {
   @Published var text = ""
-  /// Earlier searches, newest first.
-  @Published private(set) var history: [String] = UserDefaults.standard.stringArray(forKey: SearchModel.historyKey) ?? []
-  private static let historyKey = "searchHistory.v1"
+  /// Streamers opened from Search, newest first.
+  @Published private(set) var recent: [RecentChannel] = SearchModel.loadRecent()
+  private static let recentKey = "searchRecentChannels.v1"
   @Published private(set) var channels: [ChannelSearchResult] = []
+  /// Live streams whose title, tags or category match.
+  @Published private(set) var streams: [LiveStream] = []
   @Published private(set) var categories: [Category] = []
+  /// The most watched streams right now (shown before anything's typed).
+  @Published private(set) var top: [LiveStream] = []
   @Published private(set) var isLoading = false
   @Published private(set) var error: String?
   private var task: Task<Void, Never>?
   /// When the results on screen were fetched (who's live changes: old results get refreshed).
   private var searchedAt = Date.distantPast
 
+  var query: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+
   /// - Parameter debounce: wait a moment first (while typing).
   func search(debounce: Bool = true) {
     task?.cancel()
-    let query = text.trimmingCharacters(in: .whitespaces)
+    let query = self.query
     guard query.count >= 2 else {
       channels = []
+      streams = []
       categories = []
       error = nil
       return
@@ -161,10 +236,16 @@ final class SearchModel: ObservableObject {
       guard !Task.isCancelled else { return }
       isLoading = true
       defer { isLoading = false }
+      let words = query.split(whereSeparator: \.isWhitespace).map(String.init)
+      async let c = TwitchAPI.shared.searchChannels(query)
+      async let g = TwitchAPI.shared.searchCategories(query, first: 10)
+      // A single word may be a tag ("speedrun", "English").
+      async let tagged: [LiveStream] = words.count == 1 ? ((try? await TwitchAPI.shared.tagStreams(query)) ?? []) : []
+      let index = Task { await LiveIndex.shared.load() }
       do {
-        async let c = TwitchAPI.shared.searchChannels(query)
-        async let g = TwitchAPI.shared.searchCategories(query, first: 10)
         let (foundChannels, foundCategories) = try await (c, g)
+        let fromTags = await tagged
+        let live = await index.value
         guard !Task.isCancelled else { return }
         // Live channels first, then by followers.
         channels = foundChannels.sorted { a, b in
@@ -172,6 +253,15 @@ final class SearchModel: ObservableObject {
           return (a.followers ?? 0) > (b.followers ?? 0)
         }
         categories = foundCategories
+        // Streams that match by title, tag or category, most watched first (a channel found by
+        // name already has its own row).
+        let named = Set(channels.map(\.channel.id))
+        var seen = Set<String>()
+        streams = (fromTags + live.filter { LiveIndex.matches($0, words: words) })
+          .filter { !named.contains($0.channel.id) && seen.insert($0.channel.id).inserted }
+          .sorted { $0.viewers > $1.viewers }
+          .prefix(40)
+          .map { $0 }
         error = nil
         searchedAt = Date()
       } catch {
@@ -180,130 +270,227 @@ final class SearchModel: ObservableObject {
     }
   }
 
+  /// What's on before anything's typed.
+  func loadTop(force: Bool = false) async {
+    let live = await LiveIndex.shared.load(force: force)
+    top = Array(live.prefix(30))
+  }
+
   /// Back on the search after a while: fetch the results again (live or not, viewers).
   func refreshIfStale() {
-    guard text.trimmingCharacters(in: .whitespaces).count >= 2, Date().timeIntervalSince(searchedAt) > 20 else { return }
+    guard query.count >= 2, Date().timeIntervalSince(searchedAt) > 20 else { return }
     search(debounce: false)
   }
 
   /// Pull to refresh.
   func refresh() async {
-    search(debounce: false)
-    await task?.value
+    if query.count >= 2 {
+      search(debounce: false)
+      await task?.value
+    } else {
+      await loadTop(force: true)
+    }
   }
 
-  /// Keeps the current search in the history (when it was submitted or a result opened).
-  func remember() {
-    let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard query.count >= 2 else { return }
-    history.removeAll { $0.caseInsensitiveCompare(query) == .orderedSame }
-    history.insert(query, at: 0)
-    history = Array(history.prefix(25))
-    UserDefaults.standard.set(history, forKey: Self.historyKey)
+  /// A streamer was opened from Search: first in the recent row.
+  func remember(_ channel: Channel) {
+    recent.removeAll { $0.id == channel.id }
+    recent.insert(RecentChannel(channel), at: 0)
+    recent = Array(recent.prefix(16))
+    if let data = try? JSONEncoder().encode(recent) { UserDefaults.standard.set(data, forKey: Self.recentKey) }
   }
 
-  func forget(_ entries: [String]) {
-    history.removeAll { entries.contains($0) }
-    UserDefaults.standard.set(history, forKey: Self.historyKey)
+  func forget(_ channel: RecentChannel) {
+    recent.removeAll { $0.id == channel.id }
+    if let data = try? JSONEncoder().encode(recent) { UserDefaults.standard.set(data, forKey: Self.recentKey) }
   }
 
-  func clearHistory() {
-    history = []
-    UserDefaults.standard.removeObject(forKey: Self.historyKey)
+  func clearRecent() {
+    recent = []
+    UserDefaults.standard.removeObject(forKey: Self.recentKey)
+  }
+
+  private static func loadRecent() -> [RecentChannel] {
+    guard let data = UserDefaults.standard.data(forKey: recentKey) else { return [] }
+    return (try? JSONDecoder().decode([RecentChannel].self, from: data)) ?? []
   }
 }
 
+/// Search: streamers you've looked up before and what's most watched right now until you type;
+/// then channels by name, live streams by title, tag or category, and categories.
 struct SearchView: View {
   @StateObject private var model = SearchModel()
   @EnvironmentObject private var app: AppModel
 
   var body: some View {
     List {
-      if model.text.trimmingCharacters(in: .whitespaces).isEmpty, !model.history.isEmpty {
-        Section {
-          ForEach(model.history, id: \.self) { entry in
-            Button {
-              model.text = entry
-              model.remember()
-            } label: {
-              HStack(spacing: 12) {
-                Image(systemName: "clock.arrow.circlepath").foregroundColor(.secondary)
-                Text(entry).foregroundColor(.primary)
-                Spacer()
-                Image(systemName: "arrow.up.left").font(.footnote).foregroundColor(.secondary)
-              }
-              .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+      if model.query.isEmpty {
+        if !model.recent.isEmpty { recentRow }
+        if !model.top.isEmpty {
+          Section {
+            ForEach(model.top) { stream in liveRow(stream) }
+          } header: {
+            Text("Live now")
           }
-          .onDelete { offsets in model.forget(offsets.map { model.history[$0] }) }
-        } header: {
-          HStack {
-            Text("Recent searches")
-            Spacer()
-            Button("Clear") { withAnimation { model.clearHistory() } }
-              .font(.footnote.weight(.semibold))
-              .textCase(nil)
-          }
+        } else {
+          ProgressView().frame(maxWidth: .infinity).padding(.vertical, 30).listRowBackground(Color.clear)
         }
-      }
-      if !model.categories.isEmpty {
-        Section("Categories") {
-          ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
-              ForEach(model.categories) { category in
-                NavigationLink(value: Route.category(category)) { CategoryTile(category: category).frame(width: 96) }
-                  .buttonStyle(.plain)
-              }
-            }
-            .padding(.vertical, 4)
-          }
-        }
-      }
-      if !model.channels.isEmpty {
-        Section("Channels") {
-          ForEach(model.channels) { result in
-            HStack {
-              NavigationLink(value: Route.channel(result.channel)) {
-                ChannelRow(
-                  channel: result.channel,
-                  subtitle: result.followers.map { "\(Format.viewers($0)) followers" },
-                  liveViewers: result.liveViewers)
-              }
-            }
-            .swipeActions {
-              if result.liveViewers != nil {
-                Button("Watch") { app.playing = .live(result.channel) }.tint(.accentTeal)
-              }
-            }
-          }
-        }
-      }
-      if let error = model.error { ErrorBanner(message: error) { model.search() } }
-      if model.text.count >= 2, !model.isLoading, model.channels.isEmpty, model.categories.isEmpty, model.error == nil {
-        EmptyState(systemImage: "magnifyingglass", title: "No results", message: "Try a different name.")
+      } else {
+        results
       }
       Section { MiniPlayerSpacer() }
     }
     .listStyle(.insetGrouped)
     .environment(\.defaultMinListRowHeight, 1)
     .refreshable { [model] in await detachedRefresh { await model.refresh() } }
+    .task { await model.loadTop() }
     .onAppear { model.refreshIfStale() }
     .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
       model.refreshIfStale()
     }
-    .overlay { if model.isLoading && model.channels.isEmpty { ProgressView() } }
-    .searchable(text: $model.text, placement: .navigationBarDrawer(displayMode: .always), prompt: "Channels and categories")
+    .searchable(text: $model.text, placement: .navigationBarDrawer(displayMode: .always), prompt: "Streamers, titles, tags, categories")
     .autocorrectionDisabled()
     .textInputAutocapitalization(.never)
     .onChange(of: model.text) { _ in model.search() }
-    .onSubmit(of: .search) {
-      model.search()
-      model.remember()
-    }
-    // Opening a result keeps the search in the history.
-    .onChange(of: app.searchPath.count) { count in if count > 0 { model.remember() } }
+    .onSubmit(of: .search) { model.search(debounce: false) }
     .navigationTitle("Search")
+  }
+
+  // MARK: Before typing
+
+  /// Streamers looked up before, as a row of pictures (hold one to remove it).
+  private var recentRow: some View {
+    Section {
+      ScrollView(.horizontal, showsIndicators: false) {
+        HStack(alignment: .top, spacing: 14) {
+          ForEach(model.recent) { recent in
+            NavigationLink(value: Route.channel(recent.channel)) {
+              VStack(spacing: 5) {
+                Avatar(url: recent.image, size: 52)
+                Text(recent.name).font(.caption2.weight(.medium)).foregroundColor(.primary).lineLimit(1)
+                  .frame(width: 64)
+              }
+              .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .simultaneousGesture(TapGesture().onEnded { model.remember(recent.channel) })
+            .contextMenu {
+              Button(role: .destructive) { withAnimation { model.forget(recent) } } label: { Label("Remove", systemImage: "xmark") }
+            }
+          }
+        }
+        .padding(.vertical, 6)
+      }
+      .listRowInsets(EdgeInsets(top: 0, leading: 14, bottom: 0, trailing: 14))
+    } header: {
+      HStack {
+        Text("Recent")
+        Spacer()
+        Button("Clear") { withAnimation { model.clearRecent() } }
+          .font(.footnote.weight(.semibold))
+          .textCase(nil)
+      }
+    }
+  }
+
+  // MARK: Results
+
+  @ViewBuilder
+  private var results: some View {
+    if !model.channels.isEmpty {
+      Section("Channels") {
+        ForEach(model.channels.prefix(8)) { result in
+          NavigationLink(value: Route.channel(result.channel)) {
+            ChannelRow(
+              channel: result.channel,
+              subtitle: result.followers.map { "\(Format.viewers($0)) followers" },
+              liveViewers: result.liveViewers)
+          }
+          .simultaneousGesture(TapGesture().onEnded { model.remember(result.channel) })
+          .swipeActions {
+            if result.liveViewers != nil {
+              Button("Watch") {
+                model.remember(result.channel)
+                app.playing = .live(result.channel)
+              }
+              .tint(.accentTeal)
+            }
+          }
+        }
+      }
+    }
+    if !model.streams.isEmpty {
+      Section("Live streams") {
+        ForEach(model.streams) { stream in liveRow(stream) }
+      }
+    }
+    if !model.categories.isEmpty {
+      Section("Categories") {
+        ScrollView(.horizontal, showsIndicators: false) {
+          HStack(spacing: 12) {
+            ForEach(model.categories) { category in
+              NavigationLink(value: Route.category(category)) { CategoryTile(category: category).frame(width: 96) }
+                .buttonStyle(.plain)
+            }
+          }
+          .padding(.vertical, 4)
+        }
+      }
+    }
+    if let error = model.error { ErrorBanner(message: error) { model.search() } }
+    if model.query.count >= 2, !model.isLoading, model.channels.isEmpty, model.streams.isEmpty, model.categories.isEmpty,
+      model.error == nil
+    {
+      EmptyState(systemImage: "magnifyingglass", title: "No results", message: "Try a streamer's name, a word from a title, or a tag.")
+    }
+    if model.isLoading, model.channels.isEmpty, model.streams.isEmpty {
+      ProgressView().frame(maxWidth: .infinity).padding(.vertical, 20).listRowBackground(Color.clear)
+    }
+  }
+
+  /// A live stream, compactly: who, what, and how many are watching. Tap to watch; hold for more.
+  private func liveRow(_ stream: LiveStream) -> some View {
+    Button {
+      model.remember(stream.channel)
+      app.playing = .live(stream.channel)
+    } label: {
+      HStack(spacing: 12) {
+        Avatar(url: stream.channel.profileImageURL, size: 40)
+          .overlay(alignment: .bottomTrailing) {
+            Circle().fill(Color.liveRed).frame(width: 11, height: 11).overlay(Circle().stroke(.black, lineWidth: 2))
+          }
+        VStack(alignment: .leading, spacing: 2) {
+          HStack(spacing: 6) {
+            Text(stream.channel.name).font(.subheadline.weight(.semibold)).foregroundColor(.primary)
+            Spacer(minLength: 4)
+            Text(Format.viewers(stream.viewers)).font(.caption.monospacedDigit()).foregroundColor(.secondary)
+          }
+          .lineLimit(1)
+          if !stream.title.isEmpty {
+            Text(stream.title).font(.caption).foregroundColor(.secondary).lineLimit(1)
+          }
+          if let category = stream.category {
+            Text(category.name).font(.caption2).foregroundColor(.accentTeal).lineLimit(1)
+          }
+        }
+      }
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .contextMenu {
+      Button {
+        model.remember(stream.channel)
+        app.playing = .live(stream.channel)
+      } label: { Label("Watch", systemImage: "play.fill") }
+      MultiviewMenuButton(channel: stream.channel)
+      Button {
+        model.remember(stream.channel)
+        app.push(.channel(stream.channel))
+      } label: { Label("Open channel", systemImage: "person.crop.circle") }
+      if let category = stream.category {
+        Button { app.push(.category(category)) } label: { Label(category.name, systemImage: "square.grid.2x2") }
+      }
+    }
   }
 }
 

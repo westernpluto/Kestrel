@@ -80,9 +80,9 @@ struct RootView: View {
           .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
           .zIndex(1)
       }
-      if let request = app.multiview {
-        MultiviewScreen(request: request)
-          .id(request.id)
+      if let session = app.multiview {
+        MultiviewScreen(model: session)
+          .id(session.id)
           .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
           .zIndex(2)
       }
@@ -156,13 +156,7 @@ struct KeyboardDismisser: UIViewRepresentable {
 }
 
 /// Puts the keyboard away, on the next turn of the main loop (not from inside a SwiftUI gesture or
-/// update).
-///
-/// iOS 26 and later drop the keyboard at once, without its slide, when an app lets go of the text
-/// it's typing into (an iOS bug, reported to Apple as FB20611108; nothing an app does around that
-/// call brings the slide back). Changing which keyboard a text view uses is a different path, and
-/// iOS still animates it: so the message box first trades the keyboard for an empty one, which
-/// slides the keyboard down, and lets go once it's off screen (see `EmoteTextView.slideKeyboardAway`).
+/// update, where UIKit can't animate it).
 enum Keyboard {
   private static var pending = false
 
@@ -171,9 +165,7 @@ enum Keyboard {
     pending = true
     DispatchQueue.main.async {
       pending = false
-      guard let responder = FirstResponder.current else { return }
-      if #available(iOS 26, *), let box = responder as? EmoteTextView, box.slideKeyboardAway() { return }
-      responder.resignFirstResponder()
+      FirstResponder.current?.resignFirstResponder()
     }
   }
 }
@@ -281,11 +273,20 @@ struct TabBarProbe: UIViewRepresentable {
     }
 
     private func measure() {
-      guard let window, let bar = tabBarController()?.tabBar, !bar.isHidden, bar.window != nil else { return }
+      guard let window, let bar = tabBarController()?.tabBar else { return }
+      // Hidden, or replaced by a side bar the system draws itself: nothing along the bottom.
+      guard !bar.isHidden, bar.alpha > 0.01, bar.window != nil else {
+        DispatchQueue.main.async { [weak self] in self?.report?(0) }
+        return
+      }
       let frame = bar.convert(bar.bounds, to: window)
-      guard frame.height > 0 else { return }
-      let covered = window.bounds.maxY - frame.minY
-      guard covered > 20, covered < 200 else { return }
+      guard frame.height > 0, frame.width > 0 else { return }
+      // Only a bar along the bottom takes room from the mini player's corner. iPhone Duo's inner
+      // display (and iPad) puts it down the side or along the top instead: then the mini player
+      // sits right in the bottom corner (it was kept up as if a bottom bar were there).
+      let alongBottom = frame.width > frame.height && frame.maxY >= window.bounds.maxY - 60
+      let covered = alongBottom ? window.bounds.maxY - frame.minY : 0
+      guard covered == 0 || (covered > 20 && covered < 200) else { return }
       DispatchQueue.main.async { [weak self] in self?.report?(covered.rounded()) }
     }
 

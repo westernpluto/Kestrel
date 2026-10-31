@@ -173,10 +173,132 @@ struct StreamTile: View {
 
   var body: some View {
     if columns > 1 {
-      StreamCard(stream: stream, showChannel: true, showCategory: showCategory)
+      // Several cards share one list row here: UIKit's own hold menu, so holding a card lifts just
+      // that card (SwiftUI's lifted the whole row).
+      HoldMenuTile(cornerRadius: 10, menu: { StreamMenu.make(stream) }) {
+        StreamCard(stream: stream, showChannel: true, showCategory: showCategory, holdMenu: false)
+      }
     } else {
       StreamRow(stream: stream, showCategory: showCategory)
     }
+  }
+}
+
+/// What holding a live stream offers.
+enum StreamMenu {
+  @MainActor
+  static func make(_ stream: LiveStream) -> UIMenu {
+    let app = AppModel.shared
+    let channel = stream.channel
+    var items: [UIMenuElement] = [
+      UIAction(title: "Watch", image: UIImage(systemName: "play.fill")) { _ in
+        Task { @MainActor in app.playing = .live(channel) }
+      },
+      multiviewAction(channel),
+      UIAction(title: "Open channel", image: UIImage(systemName: "person.crop.circle")) { _ in
+        Task { @MainActor in app.push(.channel(channel)) }
+      },
+    ]
+    if let category = stream.category {
+      items.append(
+        UIAction(title: category.name, image: UIImage(systemName: "square.grid.2x2")) { _ in
+          Task { @MainActor in app.push(.category(category)) }
+        })
+    }
+    return UIMenu(children: items)
+  }
+
+  @MainActor
+  static func multiviewAction(_ channel: Channel) -> UIAction {
+    let app = AppModel.shared
+    let added = app.multiview?.contains(channel) ?? false
+    let full = app.multiview?.isFull ?? false
+    let action = UIAction(
+      title: added ? "In multi-view" : "Add to multi-view", image: UIImage(systemName: added ? "checkmark" : "rectangle.split.2x2")
+    ) { _ in
+      Task { @MainActor in app.addToMultiview(channel) }
+    }
+    if added || full { action.attributes = .disabled }
+    return action
+  }
+}
+
+/// A view with UIKit's hold menu on it alone: the preview is exactly this view, wherever it sits
+/// (in a list row shared with other tiles, SwiftUI's menu lifted the whole row). Taps go through to
+/// the SwiftUI content as usual.
+struct HoldMenuTile<Content: View>: UIViewRepresentable {
+  var cornerRadius: CGFloat = 12
+  var menu: () -> UIMenu?
+  @ViewBuilder var content: () -> Content
+
+  private var hosted: AnyView {
+    AnyView(
+      content()
+        .environmentObject(AppModel.shared)
+        .environment(\.colorScheme, .dark)
+        .tint(.accentTeal))
+  }
+
+  func makeUIView(context: Context) -> HoldMenuHostView {
+    let view = HoldMenuHostView(rootView: hosted)
+    view.menu = menu
+    view.cornerRadius = cornerRadius
+    return view
+  }
+
+  func updateUIView(_ view: HoldMenuHostView, context: Context) {
+    view.host.rootView = hosted
+    view.menu = menu
+    view.cornerRadius = cornerRadius
+  }
+
+  func sizeThatFits(_ proposal: ProposedViewSize, uiView view: HoldMenuHostView, context: Context) -> CGSize? {
+    // (Asked for its ideal size, it answers for the width it has, or a card's usual width.)
+    let proposed = proposal.width.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+    let width = proposed ?? (view.bounds.width > 0 ? view.bounds.width : 320)
+    let size = view.host.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude))
+    return CGSize(width: width, height: size.height.rounded(.up))
+  }
+}
+
+/// Holds HoldMenuTile's SwiftUI content, with the hold menu on it.
+final class HoldMenuHostView: UIView, UIContextMenuInteractionDelegate {
+  let host: UIHostingController<AnyView>
+  var menu: (() -> UIMenu?)?
+  var cornerRadius: CGFloat = 12
+
+  init(rootView: AnyView) {
+    host = UIHostingController(rootView: rootView)
+    super.init(frame: .zero)
+    backgroundColor = .clear
+    host.view.backgroundColor = .clear
+    if #available(iOS 16.4, *) { host.safeAreaRegions = [] }
+    host.view.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(host.view)
+    NSLayoutConstraint.activate([
+      host.view.leadingAnchor.constraint(equalTo: leadingAnchor), host.view.trailingAnchor.constraint(equalTo: trailingAnchor),
+      host.view.topAnchor.constraint(equalTo: topAnchor), host.view.bottomAnchor.constraint(equalTo: bottomAnchor),
+    ])
+    addInteraction(UIContextMenuInteraction(delegate: self))
+  }
+
+  required init?(coder: NSCoder) { fatalError() }
+
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint
+  ) -> UIContextMenuConfiguration? {
+    guard let menu = menu?() else { return nil }
+    return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in menu }
+  }
+
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction, configuration: UIContextMenuConfiguration,
+    highlightPreviewForItemWithIdentifier identifier: any NSCopying
+  ) -> UITargetedPreview? {
+    let parameters = UIPreviewParameters()
+    parameters.backgroundColor = .clear
+    parameters.visiblePath = UIBezierPath(roundedRect: bounds.insetBy(dx: -4, dy: -4), cornerRadius: cornerRadius + 4)
+    return UITargetedPreview(view: self, parameters: parameters)
   }
 }
 
@@ -256,12 +378,28 @@ struct StreamRow: View {
     .buttonStyle(PressableStyle(scale: 0.98))
     .contextMenu {
       Button { app.playing = .live(stream.channel) } label: { Label("Watch", systemImage: "play.fill") }
-      Button { app.openMultiview([stream.channel]) } label: { Label("Watch with others", systemImage: "rectangle.split.2x2") }
+      MultiviewMenuButton(channel: stream.channel)
       Button { app.push(.channel(stream.channel)) } label: { Label("Open channel", systemImage: "person.crop.circle") }
       if let category = stream.category {
         Button { app.push(.category(category)) } label: { Label(category.name, systemImage: "square.grid.2x2") }
       }
     }
+  }
+}
+
+/// "Add to multi-view" in a SwiftUI hold menu (checked once it's in).
+struct MultiviewMenuButton: View {
+  let channel: Channel
+  @EnvironmentObject private var app: AppModel
+
+  var body: some View {
+    let added = app.multiview?.contains(channel) ?? false
+    Button {
+      app.addToMultiview(channel)
+    } label: {
+      Label(added ? "In multi-view" : "Add to multi-view", systemImage: added ? "checkmark" : "rectangle.split.2x2")
+    }
+    .disabled(added || (app.multiview?.isFull ?? false))
   }
 }
 
@@ -312,6 +450,8 @@ struct StreamCard: View {
   let stream: LiveStream
   var showChannel = false
   var showCategory = true
+  /// Its own SwiftUI hold menu (off when HoldMenuTile gives it UIKit's).
+  var holdMenu = true
   @EnvironmentObject private var app: AppModel
 
   var body: some View {
@@ -361,9 +501,9 @@ struct StreamCard: View {
     }
     .buttonStyle(PressableStyle(scale: 0.98))
     .contextMenu {
-      if showChannel {
+      if showChannel, holdMenu {
         Button { app.playing = .live(stream.channel) } label: { Label("Watch", systemImage: "play.fill") }
-        Button { app.openMultiview([stream.channel]) } label: { Label("Watch with others", systemImage: "rectangle.split.2x2") }
+        MultiviewMenuButton(channel: stream.channel)
         Button { app.push(.channel(stream.channel)) } label: { Label("Open channel", systemImage: "person.crop.circle") }
         if let category = stream.category {
           Button { app.push(.category(category)) } label: { Label(category.name, systemImage: "square.grid.2x2") }
@@ -408,6 +548,9 @@ struct CategoryTile: View {
         Text("\(Format.viewers(category.viewers)) watching").font(.caption2).foregroundColor(.secondary)
       }
     }
+    // The whole tile takes the tap, box art included (pictures don't take touches themselves, so
+    // without this only the text did).
+    .contentShape(Rectangle())
   }
 }
 

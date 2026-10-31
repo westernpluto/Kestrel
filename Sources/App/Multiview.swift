@@ -2,12 +2,17 @@
 // Twitch Theater): every picture as big as the space allows, one stream heard at a time (tap a
 // picture to listen to it and see its chat), a focus layout with one big picture, and each
 // picture fetched no sharper than it's shown, to spare data.
+//
+// It can be tucked away while you browse: then it's a row of the streamers' pictures where the
+// mini player sits (the ones you're hearing lit up), and a tap brings it back. Holding a stream
+// anywhere in the app offers "Add to multi-view", which collects streams there before any of them
+// starts; a tap on the row then starts watching them together.
 
 import AVKit
 import SwiftUI
 
 @MainActor
-final class MultiviewModel: ObservableObject {
+final class MultiviewModel: ObservableObject, Identifiable {
   struct Tile: Identifiable {
     let channel: Channel
     let player: PlayerModel
@@ -16,7 +21,10 @@ final class MultiviewModel: ObservableObject {
 
   static let maxTiles = 4
   static let volumeSteps: [Float] = [1, 0.75, 0.5, 0.25]
+  /// Tucked away (or waiting to start): nothing's on screen, so nothing sharper than this is fetched.
+  static let hiddenHeight = 160
 
+  nonisolated let id = UUID()
   @Published private(set) var tiles: [Tile] = []
   /// The stream picked last: its chat shows, and it's the big one in the focus layout.
   @Published private(set) var selectedID: String?
@@ -24,6 +32,11 @@ final class MultiviewModel: ObservableObject {
   @Published private(set) var heardIDs: Set<String> = []
   @Published private(set) var volumes: [String: Float] = [:]
   @Published private(set) var chat: ChatController?
+  /// Playing. Streams added while collecting them from around the app wait until it's opened.
+  @Published private(set) var running = false
+  /// Open the stream picker as soon as the screen shows.
+  @Published var wantsPicker = false
+  private var hidden = false
 
   nonisolated init() {}
 
@@ -35,17 +48,31 @@ final class MultiviewModel: ObservableObject {
 
   func volume(_ id: String) -> Float { volumes[id] ?? 1 }
 
-  func add(_ channel: Channel) {
-    guard !channel.login.isEmpty, !isFull, !contains(channel) else { return }
+  /// Heard and actually playing (what the dock lights up).
+  func isSounding(_ id: String) -> Bool {
+    guard running, heardIDs.contains(id), let tile = tiles.first(where: { $0.id == id }) else { return false }
+    return tile.player.phase == .playing && !tile.player.isPaused && !tile.player.isBuffering
+  }
+
+  private func makePlayer(_ channel: Channel, heard: Bool) -> PlayerModel {
     let player = PlayerModel(target: .live(channel))
     player.isTile = true
+    player.setMuted(!heard)
+    if let volume = volumes[channel.id] { player.setVolume(volume) }
+    if hidden { player.setMaxHeight(Self.hiddenHeight) }
+    return player
+  }
+
+  func add(_ channel: Channel) {
+    guard !channel.login.isEmpty, !isFull, !contains(channel) else { return }
     // The first one is heard; the others start quiet.
     let heard = tiles.isEmpty
-    player.setMuted(!heard)
+    let player = makePlayer(channel, heard: heard)
     tiles.append(Tile(channel: channel, player: player))
     if heard { heardIDs.insert(channel.id) }
     if selectedID == nil { select(channel.id) }
-    Task { await player.start() }
+    if running { Task { await player.start() } }
+    AppModel.shared.objectWillChange.send()
   }
 
   func remove(_ id: String) {
@@ -66,18 +93,50 @@ final class MultiviewModel: ObservableObject {
     // Don't leave it silent because the one heard went.
     if wasHeard, heardIDs.isEmpty, let next = selectedID { heardIDs.insert(next) }
     applySound()
+    AppModel.shared.objectWillChange.send()
+  }
+
+  /// Starts every stream (and the picked one's chat).
+  func start() {
+    guard !running else { return }
+    running = true
+    for tile in tiles { Task { await tile.player.start() } }
+    applySound()
+    if let selectedID { startChat(for: selectedID) }
+  }
+
+  /// Stops everything but keeps the streams (another stream is being watched on its own); a tap
+  /// on the dock starts them again.
+  func park() {
+    guard running else { return }
+    running = false
+    for tile in tiles { tile.player.stop() }
+    tiles = tiles.map { Tile(channel: $0.channel, player: makePlayer($0.channel, heard: heardIDs.contains($0.id))) }
+    chat?.stop()
+    chat = nil
+  }
+
+  /// Tucked away or back on screen: while hidden, every picture is fetched small (the sound
+  /// carries on as it was).
+  func setHidden(_ isHidden: Bool) {
+    hidden = isHidden
+    if isHidden { for tile in tiles { tile.player.setMaxHeight(Self.hiddenHeight) } }
   }
 
   /// Picks a stream: its chat shows (and it's the big one in focus). If only one is heard, the sound
   /// moves to it too, like a regular multi-stream page; with several heard, they stay as they are.
   func select(_ id: String) {
-    guard let tile = tiles.first(where: { $0.id == id }) else { return }
+    guard tiles.contains(where: { $0.id == id }) else { return }
     selectedID = id
     if heardIDs.count <= 1 {
       heardIDs = [id]
       applySound()
     }
-    guard chat?.channel.id != tile.channel.id else { return }
+    if running { startChat(for: id) }
+  }
+
+  private func startChat(for id: String) {
+    guard let tile = tiles.first(where: { $0.id == id }), chat?.channel.id != tile.channel.id else { return }
     chat?.stop()
     let next = ChatController(channel: tile.channel)
     chat = next
@@ -108,6 +167,7 @@ final class MultiviewModel: ObservableObject {
 
   /// Each stream no sharper than its picture is shown (see `MultiviewLayout.heightCap`).
   func fit(heights: [String: CGFloat], scale: CGFloat) {
+    guard !hidden else { return }
     for tile in tiles {
       guard let points = heights[tile.id] else { continue }
       let featured = tile.id == selectedID || heardIDs.contains(tile.id)
@@ -118,152 +178,228 @@ final class MultiviewModel: ObservableObject {
   func stopAll() {
     for tile in tiles { tile.player.stop() }
     chat?.stop()
+    running = false
   }
 }
 
 struct MultiviewScreen: View {
-  let request: MultiviewRequest
-  @StateObject private var model = MultiviewModel()
+  @ObservedObject var model: MultiviewModel
   @StateObject private var keyboard = KeyboardObserver()
   @EnvironmentObject private var app: AppModel
   @Environment(\.displayScale) private var displayScale
   @AppStorage("multiview.chat") private var chatShown = true
   @AppStorage("multiview.focus") private var focus = false
   @State private var picking = false
-  @State private var started = false
+  /// The bar, names, sound buttons and the outline around the picked stream: they fade after a
+  /// few seconds so it's just the streams (a tap brings them back).
+  @State private var chromeVisible = true
+  @State private var hideTask: Task<Void, Never>?
 
   private static let spring = Animation.spring(response: 0.4, dampingFraction: 0.86)
+
+  private var minimized: Bool { app.multiviewMinimized }
 
   var body: some View {
     GeometryReader { geometry in
       let size = geometry.size
       let safeBottom = geometry.safeAreaInsets.bottom
-      let landscape = size.width > size.height
-      let bar: CGFloat = landscape ? 38 : 44
-      let showChat = chatShown && model.chat != nil
-      let keyboardSpace = keyboard.overlap > 0 ? max(0, keyboard.overlap + 14 - safeBottom) : 0
-      let areas = Self.areas(
-        size: size, safeBottom: safeBottom, bar: bar, landscape: landscape, chat: showChat, keyboardSpace: keyboardSpace,
-        count: model.tiles.count, focus: focus)
-      let rects = layout(in: areas.grid.size)
-
       ZStack(alignment: .topLeading) {
-        Color.black
-          .frame(width: size.width, height: size.height + geometry.safeAreaInsets.bottom)
-          .onTapGesture { Keyboard.dismiss() }
-
-        if model.tiles.isEmpty {
-          emptyState
-            .frame(width: areas.grid.width, height: areas.grid.height)
-            .offset(x: areas.grid.minX, y: areas.grid.minY)
+        if minimized {
+          dockLayer(size: size, safeBottom: safeBottom)
+        } else {
+          expanded(size: size, safeBottom: safeBottom)
+            .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .bottomTrailing)))
         }
-        ForEach(Array(model.tiles.enumerated()), id: \.element.id) { index, tile in
-          let rect = index < rects.count ? rects[index] : .zero
-          MultiviewTileView(
-            player: tile.player, channel: tile.channel, heard: model.heardIDs.contains(tile.id),
-            selected: tile.id == model.selectedID, volume: model.volume(tile.id),
-            several: model.heardIDs.count > 1 || (model.heardIDs.count == 1 && !model.heardIDs.contains(tile.id)),
-            select: { withAnimation(Self.spring) { model.select(tile.id) } },
-            toggleSound: { model.toggleSound(tile.id) },
-            listenOnly: { withAnimation(Self.spring) { model.listenOnly(tile.id) } },
-            setVolume: { model.setVolume($0, for: tile.id) },
-            makeMain: {
-              withAnimation(Self.spring) {
-                model.select(tile.id)
-                focus = true
-              }
-            },
-            openInPlayer: { app.playing = .live(tile.channel) },
-            remove: { withAnimation(Self.spring) { model.remove(tile.id) } }
-          )
-          .frame(width: rect.width, height: rect.height)
-          .offset(x: areas.grid.minX + rect.minX, y: areas.grid.minY + rect.minY)
-          .transition(.opacity.combined(with: .scale(scale: 0.92)))
-        }
-
-        if let chat = model.chat, showChat {
-          // Down to the window's bottom edge, like the player's chat: the message box keeps clear
-          // of the home indicator and the keyboard by padding.
-          chatColumn(chat, bottomInset: keyboard.overlap > 0 ? keyboard.overlap + 14 : safeBottom, safeBottom: safeBottom)
-            .frame(width: areas.chat.width, height: areas.chat.height)
-            .offset(x: areas.chat.minX, y: areas.chat.minY)
-            .transition(.move(edge: landscape ? .trailing : .bottom).combined(with: .opacity))
-        }
-
-        topBar
-          .frame(width: areas.bar.width, height: areas.bar.height)
-          .offset(x: areas.bar.minX, y: areas.bar.minY)
       }
       .frame(width: size.width, height: size.height, alignment: .topLeading)
-      .animation(Self.spring, value: showChat)
-      .animation(Self.spring, value: focus)
-      .animation(Self.spring, value: model.tiles.map(\.id))
-      .task(id: capsKey(rects)) {
-        var heights: [String: CGFloat] = [:]
-        for (index, tile) in model.tiles.enumerated() where index < rects.count { heights[tile.id] = rects[index].height }
-        model.fit(heights: heights, scale: displayScale)
-      }
     }
     .ignoresSafeArea(.keyboard)
-    .background(Color.black.ignoresSafeArea())
-    .preferredColorScheme(.dark)
-    .statusBarHidden(true)
-    .persistentSystemOverlays(.hidden)
-    .sheet(isPresented: $picking) { MultiviewPicker(model: model) }
-    .task {
-      guard !started else { return }
-      started = true
-      OrientationLock.playerVisible(true)
-      for channel in request.channels { model.add(channel) }
-      // Opened with one stream (or none): straight to picking the others.
-      if request.channels.count < 2 { picking = true }
+    .modifier(ImmersiveChrome(active: !minimized))
+    .animation(Self.spring, value: minimized)
+    .sheet(isPresented: $picking, onDismiss: { showChrome() }) { MultiviewPicker(model: model) }
+    .onAppear {
+      if !minimized { opened() } else { model.setHidden(true) }
+    }
+    .onChange(of: minimized) { isMinimized in
+      if isMinimized {
+        Keyboard.dismiss()
+        model.setHidden(true)
+        if app.playing == nil || app.playerMinimized { OrientationLock.playerVisible(false) }
+      } else {
+        opened()
+      }
+    }
+    .onChange(of: model.wantsPicker) { wants in
+      if wants, !minimized {
+        model.wantsPicker = false
+        picking = true
+      }
+    }
+    // A stream opened on its own: multi-view steps aside into its dock, stopped, until it's
+    // tapped again (one thing plays at a time).
+    .onChange(of: app.playing?.id) { playing in
+      guard playing != nil else { return }
+      model.park()
+      if !minimized { app.multiviewMinimized = true }
     }
     .onDisappear {
       model.stopAll()
-      if app.playing == nil { OrientationLock.playerVisible(false) }
+      if app.playing == nil || app.playerMinimized { OrientationLock.playerVisible(false) }
+    }
+  }
+
+  /// On screen: playing, turnable, the picker up if there's hardly anything to watch yet.
+  private func opened() {
+    if app.playing != nil { app.playing = nil }
+    OrientationLock.playerVisible(true)
+    model.setHidden(false)
+    model.start()
+    showChrome()
+    if model.wantsPicker || model.tiles.count < 2 {
+      model.wantsPicker = false
+      picking = true
+    }
+  }
+
+  // MARK: On screen
+
+  @ViewBuilder
+  private func expanded(size: CGSize, safeBottom: CGFloat) -> some View {
+    let landscape = size.width > size.height
+    let bar: CGFloat = landscape ? 40 : 44
+    let showChat = chatShown && model.chat != nil
+    let keyboardSpace = keyboard.overlap > 0 ? max(0, keyboard.overlap + 14 - safeBottom) : 0
+    let areas = Self.areas(
+      size: size, safeBottom: safeBottom, landscape: landscape, chat: showChat, keyboardSpace: keyboardSpace,
+      count: model.tiles.count, focus: focus)
+    let rects = layout(in: areas.grid.size)
+    let chrome = chromeVisible || keyboard.overlap > 0 || model.tiles.isEmpty
+
+    ZStack(alignment: .topLeading) {
+      Color.black
+        .frame(width: size.width, height: size.height + safeBottom)
+        .contentShape(Rectangle())
+        .onTapGesture {
+          Keyboard.dismiss()
+          showChrome()
+        }
+
+      if model.tiles.isEmpty {
+        emptyState
+          .frame(width: areas.grid.width, height: areas.grid.height)
+          .offset(x: areas.grid.minX, y: areas.grid.minY)
+      }
+      ForEach(Array(model.tiles.enumerated()), id: \.element.id) { index, tile in
+        let rect = index < rects.count ? rects[index] : .zero
+        MultiviewTileView(
+          player: tile.player, channel: tile.channel, heard: model.heardIDs.contains(tile.id),
+          selected: tile.id == model.selectedID, volume: model.volume(tile.id),
+          several: model.heardIDs.count > 1 || (model.heardIDs.count == 1 && !model.heardIDs.contains(tile.id)),
+          chrome: chrome,
+          tap: {
+            // The first tap just brings the controls back; with them showing, it picks the stream.
+            if chromeVisible { withAnimation(Self.spring) { model.select(tile.id) } }
+            showChrome()
+          },
+          toggleSound: {
+            model.toggleSound(tile.id)
+            showChrome()
+          },
+          listenOnly: { withAnimation(Self.spring) { model.listenOnly(tile.id) } },
+          setVolume: { model.setVolume($0, for: tile.id) },
+          makeMain: {
+            withAnimation(Self.spring) {
+              model.select(tile.id)
+              focus = true
+            }
+            showChrome()
+          },
+          openInPlayer: { app.playing = .live(tile.channel) },
+          remove: { withAnimation(Self.spring) { model.remove(tile.id) } }
+        )
+        .frame(width: rect.width, height: rect.height)
+        .offset(x: areas.grid.minX + rect.minX, y: areas.grid.minY + rect.minY)
+        .transition(.opacity.combined(with: .scale(scale: 0.92)))
+      }
+
+      if let chat = model.chat, showChat {
+        // Down to the window's bottom edge, like the player's chat: the message box keeps clear
+        // of the home indicator and the keyboard by padding.
+        chatColumn(chat, bottomInset: keyboard.overlap > 0 ? keyboard.overlap + 14 : safeBottom, safeBottom: safeBottom)
+          .frame(width: areas.chat.width, height: areas.chat.height)
+          .offset(x: areas.chat.minX, y: areas.chat.minY)
+          .transition(.move(edge: landscape ? .trailing : .bottom).combined(with: .opacity))
+      }
+
+      // Over the pictures, fading with the rest of the controls.
+      topBar
+        .frame(width: areas.grid.width, height: bar)
+        .background(
+          LinearGradient(colors: [.black.opacity(0.75), .black.opacity(0)], startPoint: .top, endPoint: .bottom)
+            .padding(.bottom, -16)
+            .allowsHitTesting(false)
+        )
+        .offset(x: areas.grid.minX, y: areas.grid.minY)
+        .opacity(chrome ? 1 : 0)
+        .allowsHitTesting(chrome)
+        .animation(.easeInOut(duration: 0.3), value: chrome)
+    }
+    .frame(width: size.width, height: size.height, alignment: .topLeading)
+    .animation(Self.spring, value: showChat)
+    .animation(Self.spring, value: focus)
+    .animation(Self.spring, value: model.tiles.map(\.id))
+    .task(id: capsKey(rects)) {
+      var heights: [String: CGFloat] = [:]
+      for (index, tile) in model.tiles.enumerated() where index < rects.count { heights[tile.id] = rects[index].height }
+      model.fit(heights: heights, scale: displayScale)
+    }
+  }
+
+  /// Shows the controls, and hides them again after a few seconds without a touch.
+  private func showChrome() {
+    hideTask?.cancel()
+    if !chromeVisible { withAnimation(.easeInOut(duration: 0.25)) { chromeVisible = true } }
+    hideTask = Task {
+      try? await Task.sleep(nanoseconds: 3_500_000_000)
+      guard !Task.isCancelled, !picking else { return }
+      withAnimation(.easeInOut(duration: 0.4)) { chromeVisible = false }
     }
   }
 
   // MARK: Layout
 
   private struct Areas {
-    var bar: CGRect
     var grid: CGRect
     var chat: CGRect
   }
 
-  /// Landscape: the pictures with the bar over them, chat in a column on the right. Portrait: the
-  /// bar, the pictures (no taller than they need), chat under them (room kept above the keyboard).
+  /// Landscape: the pictures at full height, chat in a column on the right. Portrait: the pictures
+  /// at the top (no taller than they need), chat under them (room kept above the keyboard). The
+  /// bar lies over the top of the pictures.
   private static func areas(
-    size: CGSize, safeBottom: CGFloat, bar: CGFloat, landscape: Bool, chat: Bool, keyboardSpace: CGFloat, count: Int,
-    focus: Bool
+    size: CGSize, safeBottom: CGFloat, landscape: Bool, chat: Bool, keyboardSpace: CGFloat, count: Int, focus: Bool
   ) -> Areas {
     if landscape {
       let chatWidth = chat ? min(max(size.width * 0.3, 250), 380).rounded() : 0
       let gridWidth = size.width - chatWidth - (chat ? 1 : 0)
       return Areas(
-        bar: CGRect(x: 0, y: 0, width: gridWidth, height: bar),
-        grid: CGRect(x: 0, y: bar, width: gridWidth, height: size.height - bar),
+        grid: CGRect(x: 0, y: 0, width: gridWidth, height: size.height),
         chat: CGRect(x: size.width - chatWidth, y: 0, width: chatWidth, height: size.height + safeBottom))
     }
-    let below = size.height - bar
     guard chat else {
-      return Areas(
-        bar: CGRect(x: 0, y: 0, width: size.width, height: bar), grid: CGRect(x: 0, y: bar, width: size.width, height: below),
-        chat: .zero)
+      return Areas(grid: CGRect(x: 0, y: 0, width: size.width, height: size.height), chat: .zero)
     }
     // As tall as the pictures need, leaving chat at least a little room (more without the keyboard).
     let roomForChat: CGFloat = keyboardSpace > 0 ? 150 : 230
-    let limit = max(100, min(below * 0.66, below - keyboardSpace - roomForChat))
+    let limit = max(100, min(size.height * 0.66, size.height - keyboardSpace - roomForChat))
     let probe = CGSize(width: size.width, height: limit)
     let rects =
       focus && count > 1 ? MultiviewLayout.focus(count: count, main: 0, in: probe) : MultiviewLayout.grid(count: count, in: probe)
     let used = rects.isEmpty ? min(limit, (size.width * 9 / 16).rounded()) : (rects.map(\.maxY).max() ?? 0) - (rects.map(\.minY).min() ?? 0)
     let gridHeight = max(100, min(limit, used))
     return Areas(
-      bar: CGRect(x: 0, y: 0, width: size.width, height: bar),
-      grid: CGRect(x: 0, y: bar, width: size.width, height: gridHeight),
-      chat: CGRect(x: 0, y: bar + gridHeight + 1, width: size.width, height: max(0, below - gridHeight - 1 + safeBottom)))
+      grid: CGRect(x: 0, y: 0, width: size.width, height: gridHeight),
+      chat: CGRect(x: 0, y: gridHeight + 1, width: size.width, height: max(0, size.height - gridHeight - 1 + safeBottom)))
   }
 
   private func layout(in size: CGSize) -> [CGRect] {
@@ -277,14 +413,16 @@ struct MultiviewScreen: View {
 
   private func capsKey(_ rects: [CGRect]) -> String {
     zip(model.tiles, rects).map { "\($0.id):\(Int($1.height))" }.joined(separator: ",")
-      + "|\(model.selectedID ?? "")|\(model.heardIDs.sorted().joined(separator: ","))"
+      + "|\(model.selectedID ?? "")|\(model.heardIDs.sorted().joined(separator: ","))|\(model.running)"
   }
 
   // MARK: Pieces
 
   private var topBar: some View {
     HStack(spacing: 2) {
-      barButton("chevron.down", label: "Close multi-view") { app.multiview = nil }
+      barButton("chevron.down", label: "Tuck multi-view away") {
+        withAnimation(Self.spring) { app.multiviewMinimized = true }
+      }
       Text("Multi-view").font(.headline)
       Text("\(model.tiles.count)/\(MultiviewModel.maxTiles)").font(.subheadline.monospacedDigit()).foregroundColor(.secondary)
         .padding(.leading, 4)
@@ -293,20 +431,24 @@ struct MultiviewScreen: View {
         barButton(
           focus ? "rectangle.grid.2x2" : "rectangle.inset.topleft.filled",
           label: focus ? "Equal sizes" : "One big picture"
-        ) { focus.toggle() }
+        ) {
+          focus.toggle()
+          showChrome()
+        }
       }
       if model.chat != nil {
         barButton(chatShown ? "bubble.left.fill" : "bubble.left", label: chatShown ? "Hide chat" : "Show chat", highlighted: chatShown) {
           chatShown.toggle()
+          showChrome()
         }
       }
       barButton("plus", label: "Add a stream") { picking = true }
         .disabled(model.isFull)
         .opacity(model.isFull ? 0.4 : 1)
+      barButton("xmark", label: "Close multi-view") { app.closeMultiview() }
     }
     .padding(.horizontal, 6)
     .foregroundColor(.white)
-    .background(Color.black.opacity(0.85))
   }
 
   private func barButton(_ icon: String, label: String, highlighted: Bool = false, action: @escaping () -> Void) -> some View {
@@ -316,6 +458,7 @@ struct MultiviewScreen: View {
         .foregroundColor(highlighted ? .accentTeal : .white)
         .frame(width: 40, height: 36)
         .contentShape(Rectangle())
+        .shadow(color: .black.opacity(0.5), radius: 3)
     }
     .buttonStyle(PressableStyle(scale: 0.85))
     .accessibilityLabel(label)
@@ -344,7 +487,7 @@ struct MultiviewScreen: View {
     VStack(spacing: 12) {
       Image(systemName: "rectangle.split.2x2").font(.system(size: 40, weight: .semibold)).foregroundColor(.accentTeal)
       Text("Watch up to \(MultiviewModel.maxTiles) streams at once").font(.headline)
-      Text("Tap a picture for its sound and chat, tap a speaker to hear several at once, double-tap to make one the big one.")
+      Text("Or hold any stream in the app and pick Add to multi-view: they gather in the corner until you open them.")
         .font(.footnote).foregroundColor(.secondary).multilineTextAlignment(.center)
       Button {
         picking = true
@@ -356,6 +499,140 @@ struct MultiviewScreen: View {
       }
     }
     .padding(24)
+  }
+
+  // MARK: Tucked away
+
+  /// The dock where the mini player sits (above it when a stream is in the mini player too).
+  @ViewBuilder
+  private func dockLayer(size: CGSize, safeBottom: CGFloat) -> some View {
+    let mini = PlayerLayout.mini(safe: size, bottomInset: safeBottom, tabBar: app.tabBarHeight)
+    let playerShowing = app.playing != nil && !app.playerMinimized
+    let bottom = app.playing != nil ? mini.minY - 10 : mini.maxY
+    MultiviewDock(
+      model: model,
+      open: {
+        withAnimation(Self.spring) {
+          if app.playing != nil { app.playing = nil }
+          app.multiviewMinimized = false
+        }
+      },
+      close: { withAnimation(Self.spring) { app.closeMultiview() } }
+    )
+    .fixedSize()
+    .frame(width: size.width - 20, height: max(0, bottom), alignment: .bottomTrailing)
+    .offset(x: 10, y: 0)
+    .opacity(playerShowing ? 0 : 1)
+    .allowsHitTesting(!playerShowing)
+    .transition(.opacity.combined(with: .scale(scale: 0.6, anchor: .bottomTrailing)))
+  }
+}
+
+/// Multi-view tucked away: the streamers' pictures in a row (lit up while heard). Tap to open it;
+/// hold for more.
+struct MultiviewDock: View {
+  @ObservedObject var model: MultiviewModel
+  var open: () -> Void
+  var close: () -> Void
+
+  var body: some View {
+    HStack(spacing: 6) {
+      ForEach(model.tiles) { tile in
+        DockAvatar(tile: tile, model: model)
+      }
+      Image(systemName: model.running ? "chevron.up" : "play.fill")
+        .font(.system(size: model.running ? 13 : 14, weight: .bold))
+        .foregroundColor(model.running ? .white.opacity(0.8) : .accentTeal)
+        .frame(width: 26, height: 40)
+    }
+    .padding(.leading, 6)
+    .padding(.trailing, 4)
+    .padding(.vertical, 5)
+    .background(.ultraThinMaterial, in: Capsule())
+    .background(Color.black.opacity(0.45), in: Capsule())
+    .overlay(Capsule().stroke(Color.white.opacity(0.14), lineWidth: 1))
+    .shadow(color: .black.opacity(0.45), radius: 10, y: 4)
+    .contentShape(Capsule())
+    .onTapGesture(perform: open)
+    .contextMenu {
+      Button(action: open) { Label(model.running ? "Open multi-view" : "Watch them together", systemImage: "rectangle.split.2x2") }
+      ForEach(model.tiles) { tile in
+        Button(role: .destructive) {
+          withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { model.remove(tile.id) }
+          if model.tiles.isEmpty { close() }
+        } label: {
+          Label("Remove \(tile.channel.name)", systemImage: "minus.circle")
+        }
+      }
+      Button(role: .destructive, action: close) { Label("Close multi-view", systemImage: "xmark") }
+    }
+    .animation(.spring(response: 0.35, dampingFraction: 0.85), value: model.tiles.map(\.id))
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel("Multi-view: \(model.tiles.map(\.channel.name).joined(separator: ", "))")
+    .accessibilityHint(model.running ? "Opens multi-view" : "Starts watching them together")
+    .accessibilityAddTraits(.isButton)
+  }
+}
+
+/// One streamer in the dock: their picture, ringed and with a moving sound badge while it's heard.
+private struct DockAvatar: View {
+  let tile: MultiviewModel.Tile
+  @ObservedObject var model: MultiviewModel
+  @ObservedObject private var player: PlayerModel
+
+  init(tile: MultiviewModel.Tile, model: MultiviewModel) {
+    self.tile = tile
+    self.model = model
+    _player = ObservedObject(wrappedValue: tile.player)
+  }
+
+  var body: some View {
+    let sounding = model.isSounding(tile.id)
+    Avatar(url: player.channel?.profileImageURL ?? tile.channel.profileImageURL, size: 38)
+      .opacity(model.running ? 1 : 0.85)
+      .overlay(Circle().stroke(sounding ? Color.accentTeal : Color.white.opacity(0.18), lineWidth: sounding ? 2.5 : 1))
+      .overlay(alignment: .bottomTrailing) {
+        if sounding {
+          SoundBadge().offset(x: 3, y: 3).transition(.scale.combined(with: .opacity))
+        }
+      }
+      .scaleEffect(sounding ? 1.04 : 1)
+      .animation(.spring(response: 0.3, dampingFraction: 0.7), value: sounding)
+  }
+}
+
+/// A small moving waveform: this one's being heard.
+private struct SoundBadge: View {
+  var body: some View {
+    Group {
+      if #available(iOS 17.0, *) {
+        Image(systemName: "waveform").symbolEffect(.variableColor.iterative, options: .repeating)
+      } else {
+        Image(systemName: "waveform")
+      }
+    }
+    .font(.system(size: 8, weight: .heavy))
+    .foregroundColor(.black)
+    .frame(width: 16, height: 16)
+    .background(Color.accentTeal, in: Circle())
+    .overlay(Circle().stroke(Color.black.opacity(0.6), lineWidth: 1))
+  }
+}
+
+/// Multi-view on screen hides the status bar and the home indicator; tucked away it leaves them be.
+private struct ImmersiveChrome: ViewModifier {
+  let active: Bool
+
+  func body(content: Content) -> some View {
+    if active {
+      content
+        .background(Color.black.ignoresSafeArea())
+        .preferredColorScheme(.dark)
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
+    } else {
+      content
+    }
   }
 }
 
@@ -369,7 +646,9 @@ struct MultiviewTileView: View {
   let volume: Float
   /// Another stream is heard too (the menu then offers "only this one").
   let several: Bool
-  var select: () -> Void
+  /// The name, sound button and outline show (they fade with the rest of the controls).
+  var chrome = true
+  var tap: () -> Void
   var toggleSound: () -> Void
   var listenOnly: () -> Void
   var setVolume: (Float) -> Void
@@ -397,26 +676,34 @@ struct MultiviewTileView: View {
         .foregroundColor(.white)
       }
     }
-    .overlay(alignment: .topLeading) { nameTag.padding(6) }
+    .overlay(alignment: .topLeading) {
+      nameTag.padding(6)
+        .opacity(chrome ? 1 : 0)
+        .allowsHitTesting(chrome)
+    }
     .overlay(alignment: .bottomLeading) {
-      if heard, let latency = player.latency {
+      if heard, chrome, let latency = player.latency {
         Label(String(format: "%.1fs", latency), systemImage: "stopwatch")
           .font(.caption2.monospacedDigit())
           .labelStyle(StatLabelStyle())
           .padding(.horizontal, 6).padding(.vertical, 3)
           .background(.black.opacity(0.55), in: Capsule())
           .padding(6)
+          .transition(.opacity)
       }
     }
     .overlay {
       Rectangle()
-        .strokeBorder(selected ? Color.accentTeal : Color.white.opacity(0.06), lineWidth: selected ? 2 : 1)
+        .strokeBorder(
+          chrome && selected ? Color.accentTeal : Color.white.opacity(chrome ? 0.06 : 0), lineWidth: chrome && selected ? 2 : 1
+        )
         .allowsHitTesting(false)
     }
+    .animation(.easeInOut(duration: 0.3), value: chrome)
     .clipped()
     .contentShape(Rectangle())
     .onTapGesture(count: 2, perform: makeMain)
-    .onTapGesture(perform: select)
+    .onTapGesture(perform: tap)
     .contextMenu {
       Button(action: toggleSound) {
         Label(heard ? "Mute" : "Hear it too", systemImage: heard ? "speaker.slash" : "speaker.plus")

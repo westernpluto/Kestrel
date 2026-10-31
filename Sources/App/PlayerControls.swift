@@ -83,7 +83,9 @@ struct PlayerVideoArea: View {
         .animation(.easeInOut(duration: 0.25), value: model.phase)
         .animation(.easeInOut(duration: 0.2), value: model.coveringAd)
       if overlayAvailable, chatOverlay, chromeVisible, let chat {
-        ChatOverlay(chat: chat, clearance: controlInsets, tap: toggleControls)
+        ChatOverlay(
+          chat: chat, clearance: controlInsets, pictureInsets: pictureInsets, fill: model.fillsScreen,
+          controlsShown: controlsShown, tap: toggleControls)
           .transition(.opacity)
       }
       if settings.showVideoStats && !model.stats.isEmpty && chromeVisible {

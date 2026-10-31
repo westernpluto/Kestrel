@@ -39,6 +39,19 @@ struct RecordingInfo: Codable, Sendable, Identifiable, Equatable {
   var automatic: Bool? = nil
   /// Stopped by hand (not started again for the same broadcast).
   var stoppedByUser: Bool? = nil
+  /// When the broadcast began, and when the first moment recorded was broadcast: where the
+  /// recording sits in the stream ("from 1:12:40 in").
+  var streamStartedAt: Date? = nil
+  var firstSegmentAt: Date? = nil
+}
+
+extension RecordingInfo {
+  /// How far into the broadcast the recording begins, when that's known.
+  var streamOffset: Double? {
+    guard let streamStartedAt else { return nil }
+    let offset = (firstSegmentAt ?? startedAt).timeIntervalSince(streamStartedAt)
+    return offset >= 0 && offset < 7 * 24 * 3600 ? offset : nil
+  }
 }
 
 struct RecorderStatus: Sendable, Equatable {
@@ -70,6 +83,8 @@ actor StreamRecorder {
     var duration: Double
     var discontinuity: Bool
     var map: String?
+    /// When it was broadcast (Twitch's playlists say).
+    var date: Date?
   }
 
   private var variantURL: URL?
@@ -266,7 +281,8 @@ actor StreamRecorder {
           Entry(
             file: file, duration: item.segment.duration,
             discontinuity: pendingDiscontinuity || item.segment.discontinuity || (mapFile != nil && mapFile != previousMap),
-            map: mapFile))
+            map: mapFile, date: item.segment.pdt))
+        if info.firstSegmentAt == nil { info.firstSegmentAt = item.segment.pdt }
         pendingDiscontinuity = false
         info.duration += item.segment.duration
         info.bytes += Int64(data.count)
@@ -302,14 +318,16 @@ actor StreamRecorder {
 
   private func writePlaylist(ended: Bool) {
     try? Self.playlistText(
-      entries: entries.map { ($0.file, $0.duration, $0.discontinuity, $0.map) }, ended: ended
+      entries: entries.map { ($0.file, $0.duration, $0.discontinuity, $0.map) }, dates: entries.map(\.date), ended: ended
     ).write(to: directory.appendingPathComponent(Self.playlistName), atomically: true, encoding: .utf8)
   }
 
   /// The recording's playlist: an event playlist (it grows) while recording, a finished one after.
-  static func playlistText(entries: [(file: String, duration: Double, discontinuity: Bool, map: String?)], ended: Bool)
-    -> String
-  {
+  /// With the segments' broadcast times (`dates`), each stretch is dated, so the player knows when
+  /// in the stream every moment was (the recording's own clock restarts at zero).
+  static func playlistText(
+    entries: [(file: String, duration: Double, discontinuity: Bool, map: String?)], dates: [Date?] = [], ended: Bool
+  ) -> String {
     let longest = entries.map(\.duration).max() ?? 2
     var lines = [
       "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:\(max(1, Int(longest.rounded(.up))))",
@@ -320,6 +338,9 @@ actor StreamRecorder {
     var currentMap: String?
     for (index, entry) in entries.enumerated() {
       if entry.discontinuity, index > 0 { lines.append("#EXT-X-DISCONTINUITY") }
+      if index < dates.count, let date = dates[index], index == 0 || entry.discontinuity || dates[index - 1] == nil {
+        lines.append("#EXT-X-PROGRAM-DATE-TIME:" + HLSDate.format(date))
+      }
       if let map = entry.map, map != currentMap {
         lines.append("#EXT-X-MAP:URI=\"\(map)\"")
         currentMap = map

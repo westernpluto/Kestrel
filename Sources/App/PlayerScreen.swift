@@ -303,6 +303,7 @@ final class KeyboardObserver: ObservableObject {
   @Published private(set) var overlap: CGFloat = 0
   /// The keyboard's height the last time it was up (the emote picker takes its place).
   private(set) static var lastHeight: CGFloat?
+  private static var lastNoAnimationLog = Date.distantPast
   private var tokens: [NSObjectProtocol] = []
 
   /// The keyboard's own motion: UIKit runs it on a stiff spring squeezed into the notification's
@@ -343,6 +344,13 @@ final class KeyboardObserver: ObservableObject {
     let value = hiding ? 0 : min(bounds.height * 0.62, max(0, bounds.maxY - frame.minY))
     if value > 40 { Self.lastHeight = value }
     let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
+    // For the record (Settings › Activity log): iOS itself said the keyboard wouldn't slide.
+    if note.name != UIResponder.keyboardDidChangeFrameNotification, duration <= 0.01, abs(value - overlap) > 40,
+      Date().timeIntervalSince(Self.lastNoAnimationLog) > 10
+    {
+      Self.lastNoAnimationLog = Date()
+      ActivityLog.shared.add("Keyboard \(value > 0 ? "came up" : "went away") without its slide (iOS reported no animation)")
+    }
     guard abs(value - overlap) > 0.5 else { return }
     // "Did" notifications only correct a missed "will"; a zero duration means the keyboard itself
     // isn't animating (moving with it is the point).
@@ -789,12 +797,15 @@ struct PlayerLayout: Equatable {
     return moved
   }
 
-  /// The mini player: a small floating video just above the tab bar, bottom right.
-  /// - Parameter tabBar: how much of the screen's bottom the tab bar covers.
+  /// The mini player: a small floating video in the bottom right corner, just above the tab bar
+  /// when the bar runs along the bottom.
+  /// - Parameter tabBar: how much of the screen's bottom the tab bar covers (0: it's elsewhere).
   static func mini(safe: CGSize, bottomInset: CGFloat, tabBar: CGFloat) -> CGRect {
     let width = (min(safe.width, 520) * 0.5).rounded()
     let height = (width * 9 / 16).rounded()
-    let bottom = safe.height + bottomInset - max(tabBar, 49 + bottomInset) - 10
+    // No bottom bar: just clear of the home indicator.
+    let covered = tabBar > 0 ? max(tabBar, 49 + bottomInset) : bottomInset
+    let bottom = safe.height + bottomInset - covered - 10
     return CGRect(x: safe.width - width - 10, y: bottom - height, width: width, height: height)
   }
 
@@ -1103,7 +1114,7 @@ struct PlayerScreen: View {
       model.stop()
       chat.stop()
       // (Multi-view taking over keeps the phone free to turn.)
-      if app.multiview == nil { OrientationLock.playerVisible(false) }
+      if app.multiview == nil || app.multiviewMinimized { OrientationLock.playerVisible(false) }
     }
   }
 

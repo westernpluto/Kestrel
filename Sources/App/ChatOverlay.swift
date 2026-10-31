@@ -1,63 +1,61 @@
-// Full screen with chat put away: a small, see-through chat over the video (read-only), like
-// Twitch's chat overlay. Drag it to any corner; drag the grip on its inner corner to make it taller
-// or shorter, wider or narrower; hold it for how see-through it is.
+// Full screen with chat put away: chat over the video, read-only, like Twitch's chat overlay.
+//
+// Where it goes follows the picture, not the screen. When the picture leaves a good band of black
+// beside it (iPhone Duo's inner display held upright, or a wide screen around a 16:9 picture),
+// chat fills that band and covers none of the video. Otherwise it's a see-through box in a corner
+// of the picture itself, a small margin from its edges, stepping clear of the controls only while
+// they're showing (so most of the time it sits right in the corner). Drag it to another corner;
+// drag the grip on its inner corner (shown with the controls) to resize it; hold it for how
+// see-through it is.
 
 import SwiftUI
 
 struct ChatOverlay: View {
   let chat: ChatController
-  /// Room to keep clear at the edges (the camera, the controls' bars).
+  /// The controls' insets from the video area's edges (the camera, the bars).
   var clearance: EdgeInsets
+  /// Where the picture sits in the area (iPhone Duo's outer screen keeps it clear of the camera).
+  var pictureInsets = EdgeInsets()
+  /// The picture fills the whole area (zoomed).
+  var fill = false
+  /// The controls are on screen: keep clear of their bars.
+  var controlsShown = true
   /// A tap on the overlay counts as a tap on the video (shows or hides the controls).
   var tap: () -> Void
   /// 0 top left, 1 top right, 2 bottom left, 3 bottom right.
   @AppStorage("chatOverlay.corner") private var corner = 2
   @AppStorage("chatOverlay.opacity") private var opacity = 0.4
   /// Its size, as shares of the room it can have (so it fits whichever screen it's on).
-  @AppStorage("chatOverlay.width") private var widthShare = 0.42
-  @AppStorage("chatOverlay.height") private var heightShare = 0.62
+  @AppStorage("chatOverlay.width.v2") private var widthShare = 0.36
+  @AppStorage("chatOverlay.height.v2") private var heightShare = 0.55
   @State private var drag: CGSize = .zero
   /// The grip being dragged: the size it started at.
   @State private var resizingFrom: CGSize?
   @State private var resized: CGSize?
 
-  /// Above the seek bar and below the top bar, so the controls never cover it.
-  private static let barRoom: (top: CGFloat, bottom: CGFloat) = (50, 76)
+  private static let margin: CGFloat = 10
+  /// Room the controls' top bar and bottom row (with a seek bar) take from the area's edges.
+  private static let barRoom: (top: CGFloat, bottom: CGFloat) = (46, 74)
   private static let minimum = CGSize(width: 170, height: 90)
-  private static let defaults = (width: 0.42, height: 0.62)
+  private static let defaults = (width: 0.36, height: 0.55)
+  /// A band of black this deep beside the picture is room enough for chat of its own.
+  private static let band: (vertical: CGFloat, horizontal: CGFloat) = (140, 220)
 
   var body: some View {
     GeometryReader { geometry in
-      let room = room(in: geometry.size)
-      let box = resized ?? boxSize(in: room)
-      let origin = position(of: box, in: geometry.size)
-      messages
-        .frame(width: box.width, height: box.height)
-        .background(Color.black.opacity(opacity), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-          RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .stroke(Color.white.opacity(resizingFrom == nil ? 0.08 : 0.35), lineWidth: 1)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .onTapGesture(perform: tap)
-        .gesture(
-          DragGesture(minimumDistance: 8, coordinateSpace: .global)
-            .onChanged { drag = $0.translation }
-            .onEnded { value in
-              // To the corner it was thrown toward.
-              let x = origin.x + box.width / 2 + value.predictedEndTranslation.width
-              let y = origin.y + box.height / 2 + value.predictedEndTranslation.height
-              let newCorner = (x > geometry.size.width / 2 ? 1 : 0) + (y > geometry.size.height / 2 ? 2 : 0)
-              let landing = position(of: box, in: geometry.size, corner: newCorner)
-              // Keep it where the finger left it, then let it glide into the corner.
-              drag = CGSize(width: origin.x + value.translation.width - landing.x, height: origin.y + value.translation.height - landing.y)
-              corner = newCorner
-              withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) { drag = .zero }
-            }
-        )
-        .overlay(alignment: gripAlignment) { grip(box: box, room: room) }
-        .contextMenu { menu }
-        .offset(x: origin.x + drag.width, y: origin.y + drag.height)
+      let picture = pictureRect(in: geometry.size)
+      if let band = band(in: geometry.size, picture: picture) {
+        messages
+          .padding(.horizontal, 4)
+          .frame(width: band.width, height: band.height)
+          .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .contentShape(Rectangle())
+          .onTapGesture(perform: tap)
+          .offset(x: band.minX, y: band.minY)
+          .animation(.spring(response: 0.35, dampingFraction: 0.88), value: band)
+      } else {
+        floating(in: geometry.size, picture: picture)
+      }
     }
     .accessibilityElement(children: .contain)
     .accessibilityLabel("Chat overlay")
@@ -73,6 +71,125 @@ struct ChatOverlay: View {
           startPoint: .top, endPoint: .bottom)
       )
       .allowsHitTesting(false)
+  }
+
+  // MARK: Where the picture is
+
+  /// The picture: the area less its insets, then a 16:9 frame fitted inside (or all of it, zoomed).
+  private func pictureRect(in area: CGSize) -> CGRect {
+    let full = CGRect(origin: .zero, size: area)
+    guard !fill else { return full }
+    let inner = CGRect(
+      x: pictureInsets.leading, y: pictureInsets.top,
+      width: max(0, area.width - pictureInsets.leading - pictureInsets.trailing),
+      height: max(0, area.height - pictureInsets.top - pictureInsets.bottom))
+    guard inner.width > 0, inner.height > 0 else { return full }
+    let width = min(inner.width, inner.height * 16 / 9)
+    let height = width * 9 / 16
+    return CGRect(x: inner.midX - width / 2, y: inner.midY - height / 2, width: width, height: height).integral
+  }
+
+  /// A band of black beside the picture deep enough for chat (below it first): chat fills it,
+  /// clear of the controls' bars while they show.
+  private func band(in area: CGSize, picture: CGRect) -> CGRect? {
+    let m = Self.margin
+    let below = area.height - picture.maxY
+    let above = picture.minY
+    let left = picture.minX
+    let right = area.width - picture.maxX
+    let leading = max(clearance.leading, m)
+    let trailing = max(clearance.trailing, m)
+    let topLimit = controlsShown ? clearance.top + Self.barRoom.top : max(clearance.top, m)
+    let bottomLimit = area.height - (controlsShown ? clearance.bottom + Self.barRoom.bottom : max(clearance.bottom, m))
+    if below >= Self.band.vertical {
+      let top = picture.maxY + m
+      guard bottomLimit - top >= Self.minimum.height else { return nil }
+      return CGRect(x: leading, y: top, width: area.width - leading - trailing, height: bottomLimit - top)
+    }
+    if above >= Self.band.vertical {
+      let bottom = picture.minY - m
+      guard bottom - topLimit >= Self.minimum.height else { return nil }
+      return CGRect(x: leading, y: topLimit, width: area.width - leading - trailing, height: bottom - topLimit)
+    }
+    if max(left, right) >= Self.band.horizontal {
+      let onRight = right >= left
+      let x = onRight ? picture.maxX + m : leading
+      let width = onRight ? area.width - trailing - x : picture.minX - m - x
+      guard width >= Self.minimum.width, bottomLimit - topLimit >= Self.minimum.height else { return nil }
+      return CGRect(x: x, y: topLimit, width: width, height: bottomLimit - topLimit)
+    }
+    return nil
+  }
+
+  // MARK: Over the picture
+
+  @ViewBuilder
+  private func floating(in area: CGSize, picture: CGRect) -> some View {
+    let room = room(in: area, picture: picture)
+    let box = resized ?? boxSize(in: room.size)
+    let origin = position(of: box, in: room)
+    messages
+      .frame(width: box.width, height: box.height)
+      .background(Color.black.opacity(opacity), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+      .overlay(
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .stroke(Color.white.opacity(resizingFrom == nil ? 0.08 : 0.35), lineWidth: 1)
+      )
+      .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+      .onTapGesture(perform: tap)
+      .gesture(
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
+          .onChanged { drag = $0.translation }
+          .onEnded { value in
+            // To the corner it was thrown toward.
+            let x = origin.x + box.width / 2 + value.predictedEndTranslation.width
+            let y = origin.y + box.height / 2 + value.predictedEndTranslation.height
+            let newCorner = (x > room.midX ? 1 : 0) + (y > room.midY ? 2 : 0)
+            let landing = position(of: box, in: room, corner: newCorner)
+            // Keep it where the finger left it, then let it glide into the corner.
+            drag = CGSize(width: origin.x + value.translation.width - landing.x, height: origin.y + value.translation.height - landing.y)
+            corner = newCorner
+            withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) { drag = .zero }
+          }
+      )
+      .overlay(alignment: gripAlignment) {
+        grip(box: box, room: room.size)
+          .opacity(controlsShown || resizingFrom != nil ? 1 : 0)
+          .allowsHitTesting(controlsShown)
+      }
+      .contextMenu { menu }
+      .offset(x: origin.x + drag.width, y: origin.y + drag.height)
+      .animation(.spring(response: 0.35, dampingFraction: 0.88), value: room)
+  }
+
+  /// The most the box can take: the picture (less a margin), and only while the controls show,
+  /// out from under their bars.
+  private func room(in area: CGSize, picture: CGRect) -> CGRect {
+    let m = Self.margin
+    var top = picture.minY + m
+    var bottom = picture.maxY - m
+    if controlsShown {
+      top = max(top, clearance.top + Self.barRoom.top)
+      bottom = min(bottom, area.height - clearance.bottom - Self.barRoom.bottom)
+    }
+    let left = max(picture.minX + m, clearance.leading)
+    let right = min(picture.maxX - m, area.width - clearance.trailing)
+    return CGRect(x: left, y: top, width: max(Self.minimum.width, right - left), height: max(Self.minimum.height, bottom - top))
+  }
+
+  private func boxSize(in room: CGSize) -> CGSize {
+    CGSize(
+      width: min(max(room.width * widthShare, Self.minimum.width), room.width).rounded(),
+      height: min(max(room.height * heightShare, Self.minimum.height), room.height).rounded())
+  }
+
+  private func position(of box: CGSize, in room: CGRect, corner: Int? = nil) -> CGPoint {
+    let corner = corner ?? self.corner
+    let left = room.minX
+    let right = room.maxX - box.width
+    let top = room.minY
+    let bottom = room.maxY - box.height
+    return CGPoint(x: corner % 2 == 0 ? left : right, y: corner < 2 ? top : max(top, bottom))
   }
 
   // MARK: Resizing
@@ -142,29 +259,5 @@ struct ChatOverlay: View {
     } label: {
       Label("Full height", systemImage: "arrow.up.and.down")
     }
-  }
-
-  // MARK: Layout
-
-  /// The most it can take: between the bars, clear of the edges.
-  private func room(in area: CGSize) -> CGSize {
-    CGSize(
-      width: max(Self.minimum.width, area.width - clearance.leading - clearance.trailing - 16),
-      height: max(Self.minimum.height, area.height - clearance.top - clearance.bottom - Self.barRoom.top - Self.barRoom.bottom))
-  }
-
-  private func boxSize(in room: CGSize) -> CGSize {
-    CGSize(
-      width: min(max(room.width * widthShare, Self.minimum.width), room.width).rounded(),
-      height: min(max(room.height * heightShare, Self.minimum.height), room.height).rounded())
-  }
-
-  private func position(of box: CGSize, in area: CGSize, corner: Int? = nil) -> CGPoint {
-    let corner = corner ?? self.corner
-    let left = clearance.leading + 8
-    let right = area.width - clearance.trailing - 8 - box.width
-    let top = clearance.top + Self.barRoom.top
-    let bottom = area.height - clearance.bottom - Self.barRoom.bottom - box.height
-    return CGPoint(x: corner % 2 == 0 ? left : right, y: corner < 2 ? top : max(top, bottom))
   }
 }

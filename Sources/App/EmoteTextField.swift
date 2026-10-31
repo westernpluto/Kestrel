@@ -79,9 +79,12 @@ struct EmoteTextField: UIViewRepresentable {
   func updateUIView(_ view: EmoteTextView, context: Context) {
     let coordinator = context.coordinator
     coordinator.parent = self
-    view.placeholder = placeholder
-    view.isEditable = enabled
-    view.allowsFocus = enabled
+    // Only what changed. This runs on every redraw of the chat panel, including each step of the
+    // keyboard coming up or going away; setting the text view's editability again (even to the
+    // same value) makes UIKit refresh its keyboard, which can cut the keyboard's slide short.
+    if view.placeholder != placeholder { view.placeholder = placeholder }
+    if view.isEditable != enabled { view.isEditable = enabled }
+    if view.allowsFocus != enabled { view.allowsFocus = enabled }
     if !enabled, view.isFirstResponder { view.resignFirstResponder() }
     // Changed from outside (an emote picked, a name completed, sent and cleared).
     if coordinator.plain(of: view).text != text {
@@ -280,53 +283,6 @@ final class EmoteTextView: UITextView {
   var allowsFocus = true
 
   override var canBecomeFirstResponder: Bool { allowsFocus && super.canBecomeFirstResponder }
-
-  // MARK: Putting the keyboard away with its slide (iOS 26+, see Keyboard.dismiss)
-
-  /// The keyboard is sliding off; the box lets go of it once it's gone.
-  private var slidingAway = false
-  private var letGo: DispatchWorkItem?
-
-  /// Trades the keyboard for an empty one (which iOS animates: the keyboard slides down), then lets
-  /// go. Returns false when that doesn't apply (not typing, or already on the way out).
-  func slideKeyboardAway() -> Bool {
-    guard isFirstResponder, !slidingAway, inputView == nil, window != nil else { return false }
-    slidingAway = true
-    inputView = UIView(frame: .zero)
-    reloadInputViews()
-    let work = DispatchWorkItem { [weak self] in
-      guard let self, self.slidingAway else { return }
-      _ = self.resignFirstResponder()
-    }
-    letGo = work
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
-    return true
-  }
-
-  @discardableResult
-  override func resignFirstResponder() -> Bool {
-    let resigned = super.resignFirstResponder()
-    if slidingAway || inputView != nil {
-      // The real keyboard again next time.
-      slidingAway = false
-      letGo?.cancel()
-      letGo = nil
-      inputView = nil
-    }
-    return resigned
-  }
-
-  /// A touch on the box while the keyboard is sliding off brings it straight back.
-  override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-    if slidingAway, isFirstResponder {
-      slidingAway = false
-      letGo?.cancel()
-      letGo = nil
-      inputView = nil
-      reloadInputViews()
-    }
-    super.touchesBegan(touches, with: event)
-  }
 
   var placeholder: String = "" {
     didSet { placeholderLabel.text = placeholder }

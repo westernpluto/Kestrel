@@ -79,7 +79,8 @@ final class RecordingStore: ObservableObject {
     let info = RecordingInfo(
       id: id, login: login, channelName: channel.name, channelID: channel.id, profileImageURL: channel.profileImageURL,
       title: stream?.title, category: stream?.category?.name, quality: "", startedAt: Date(), endedAt: nil, duration: 0,
-      bytes: 0, gaps: 0, endReason: nil, streamID: streamID ?? stream?.id, automatic: automatic)
+      bytes: 0, gaps: 0, endReason: nil, streamID: streamID ?? stream?.id, automatic: automatic,
+      streamStartedAt: stream?.startedAt)
     let settings = AppSettings.shared
     var config = LowLatencyConfig()
     config.adFreeProxies = settings.adFreeProxyHosts
@@ -350,7 +351,13 @@ struct RecordingRow: View {
   }
 
   private var details: String {
-    var parts = [Format.relative(info.startedAt), Format.duration(Int(info.duration))]
+    var parts = [Format.relative(info.startedAt)]
+    // Where it sits in the broadcast, on the stream's own clock.
+    if let offset = info.streamOffset {
+      parts.append("\(Format.duration(Int(offset)))–\(Format.duration(Int(offset + info.duration))) of the stream")
+    } else {
+      parts.append(Format.duration(Int(info.duration)))
+    }
     if info.bytes > 0 { parts.append(RecordingsView.size(info.bytes)) }
     if !info.quality.isEmpty { parts.append(info.quality) }
     if info.gaps > 0 { parts.append(info.gaps == 1 ? "1 jump" : "\(info.gaps) jumps") }
@@ -503,13 +510,32 @@ struct RecordingPlayerScreen: View {
     }
   }
 
+  /// The stream's own clock at the recording's start (so every moment shows when in the broadcast
+  /// it was, not how far into the recording): from the dated playlist, or worked out from when the
+  /// recording began.
+  private var streamBase: Double? {
+    if let date = playback.currentDate, let start = info.streamStartedAt {
+      let base = date.timeIntervalSince(start) - playback.position
+      if base >= -5, base < 7 * 24 * 3600 { return max(0, base) }
+    }
+    return info.streamOffset
+  }
+
   private var bottomBar: some View {
-    VStack(spacing: 2) {
+    let base = streamBase
+    return VStack(spacing: 2) {
+      if let base, playback.end > 0 {
+        BroadcastStrip(
+          start: base, end: base + playback.end, position: base + playback.position,
+          live: recording, liveNow: info.streamStartedAt.map { Date().timeIntervalSince($0) })
+          .padding(.horizontal, 8)
+          .padding(.bottom, 6)
+      }
       if playback.end > 0 {
         SeekBar(
           position: playback.position, duration: playback.end, storyboard: nil,
-          label: { [recording, playback] time in
-            recording && playback.end - time < 15 ? "Latest" : Format.duration(Int(time))
+          label: { [recording, playback, base] time in
+            recording && playback.end - time < 15 ? "Latest" : Format.duration(Int((base ?? 0) + time))
           },
           onStart: { hideTask?.cancel() },
           onCommit: { time in
@@ -520,8 +546,20 @@ struct RecordingPlayerScreen: View {
         .padding(.horizontal, 4)
       }
       HStack(spacing: 10) {
-        Text("\(Format.duration(Int(playback.position))) / \(Format.duration(Int(playback.end)))")
-          .font(.caption.monospacedDigit())
+        if let base {
+          // On the stream's clock: when in the broadcast this is.
+          HStack(spacing: 5) {
+            Image(systemName: "clock").font(.system(size: 10, weight: .bold)).foregroundColor(.white.opacity(0.7))
+            Text(Format.duration(Int(base + playback.position))).font(.caption.monospacedDigit().weight(.semibold))
+            Text("into the stream").font(.caption2).foregroundColor(.white.opacity(0.6))
+          }
+          .lineLimit(1)
+          .fixedSize()
+          .accessibilityElement(children: .combine)
+        } else {
+          Text("\(Format.duration(Int(playback.position))) / \(Format.duration(Int(playback.end)))")
+            .font(.caption.monospacedDigit())
+        }
         if recording {
           // How far behind the newest recorded part, and a jump there.
           Button {
@@ -586,6 +624,48 @@ struct RecordingPlayerScreen: View {
 }
 
 /// The recording's picture (with Picture in Picture).
+/// The whole broadcast as a thin line, with the stretch this recording covers lit and where
+/// playback is in it: "recorded from 0:42:10 to 1:30:05 of the stream" at a glance.
+struct BroadcastStrip: View {
+  /// On the stream's clock (seconds since it went live).
+  let start: Double
+  let end: Double
+  let position: Double
+  /// Still recording: the stream is live, now `liveNow` seconds in.
+  let live: Bool
+  var liveNow: Double?
+
+  var body: some View {
+    let total = max(end, live ? (liveNow ?? end) : end, 1)
+    VStack(alignment: .leading, spacing: 4) {
+      HStack(spacing: 6) {
+        Text("Recorded \(Format.duration(Int(start)))–\(live ? "now" : Format.duration(Int(end))) of the stream")
+        Spacer(minLength: 6)
+        Text(live ? "Live · \(Format.duration(Int(total)))" : Format.duration(Int(total)))
+      }
+      .font(.caption2.monospacedDigit())
+      .foregroundColor(.white.opacity(0.65))
+      .lineLimit(1)
+      GeometryReader { geometry in
+        let width = geometry.size.width
+        ZStack(alignment: .leading) {
+          Capsule().fill(Color.white.opacity(0.14))
+          Capsule().fill(Color.white.opacity(0.38))
+            .frame(width: max(3, width * CGFloat((end - start) / total)))
+            .offset(x: width * CGFloat(start / total))
+          Circle().fill(Color.accentTeal)
+            .frame(width: 8, height: 8)
+            .offset(x: width * CGFloat(min(position, total) / total) - 4)
+        }
+      }
+      .frame(height: 4)
+    }
+    .allowsHitTesting(false)
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel("Recorded from \(Format.duration(Int(start))) of the stream")
+  }
+}
+
 struct RecordingVideoSurface: UIViewRepresentable {
   let playback: RecordingPlayback
   var fill: Bool
@@ -613,6 +693,8 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
   @Published private(set) var isPaused = false
   @Published private(set) var buffering = true
   @Published private(set) var pictureInPictureActive = false
+  /// When what's showing was broadcast (from the recording's dated playlist).
+  @Published private(set) var currentDate: Date?
   private var id = ""
   private var statusObservation: NSKeyValueObservation?
   private var pipObservation: NSKeyValueObservation?
@@ -676,6 +758,7 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
     } else if current.isFinite {
       position = current
     }
+    if seekingTo == nil, let date = item.currentDate(), date != currentDate { currentDate = date }
     let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate || seekingTo != nil
     if waiting != buffering { buffering = waiting }
     let paused = player.timeControlStatus == .paused && seekingTo == nil
