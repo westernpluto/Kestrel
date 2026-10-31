@@ -92,7 +92,9 @@ struct LiveCatchUp: Sendable {
   private static let shrinkAfterGrowth: TimeInterval = 30
   /// Just started: whatever's over the margin is the join point's lag, not a burst of video, so
   /// it's caught up more keenly (it settles within seconds).
-  static let startWindow: TimeInterval = 20
+  static let startWindow: TimeInterval = 40
+  /// The first seconds' readings aren't learned from (the player is still filling up, in bursts).
+  static let learnAfterStart: TimeInterval = 3
 
   /// - Parameter targetBuffer: the margin to start from (what this channel needed lately, so it
   ///   doesn't have to stall to learn it again); otherwise the least the connection allows.
@@ -175,9 +177,11 @@ struct LiveCatchUp: Sendable {
     } else if excess > (rate > 1 ? Self.settle : Self.deadband), latency > targetBuffer + 0.3, maxRate > 1,
       buffer > Self.nearlyDry + 0.15
     {
-      // More than needed: faster in proportion, easing off toward the margin.
-      let top = Double(min(excess > 4 ? Self.rates.fast : Self.rates.medium, maxRate))
-      next = min(top, 1 + max(Self.minStep, excess * (starting ? Self.startGain : Self.gain)))
+      // More than needed: faster in proportion, easing off toward the margin. Just started and
+      // well back (a fresh start's slow first connections): up to 1.2× for the first few seconds.
+      let far = excess > 4 || (starting && excess > 2)
+      let top = Double(min(far ? Self.rates.fast : Self.rates.medium, maxRate))
+      next = min(top, 1 + max(starting ? Self.minStep * 1.5 : Self.minStep, excess * (starting ? Self.startGain : Self.gain)))
     }
     // In hundredths: the player isn't told about every wobble.
     next = (next * 100).rounded() / 100
@@ -190,7 +194,7 @@ struct LiveCatchUp: Sendable {
   /// arrived is what the buffer gained plus what was played. A hiccup deeper than the margin allows
   /// for raises it at once.
   private mutating func track(_ buffer: Double, position: Double?, now: Date) {
-    guard let previous = last else { return }
+    guard let previous = last, now.timeIntervalSince(startedAt) >= Self.learnAfterStart else { return }
     let elapsed = now.timeIntervalSince(previous.at)
     guard elapsed > 0, elapsed < 3 else { return }
     let played: Double

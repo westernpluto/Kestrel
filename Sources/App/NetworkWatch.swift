@@ -92,6 +92,43 @@ final class NetworkWatch: @unchecked Sendable {
     DispatchQueue.main.async {
       ActivityLog.shared.add("Connection: \(kind.rawValue)\(path.isConstrained ? " (Low Data Mode)" : "")")
       NotificationCenter.default.post(name: Self.changed, object: nil)
+      if kind != .none { PlaybackWarmup.run(force: true) }
     }
+  }
+}
+
+/// Opens the connections a stream starts with before one's asked for: Twitch's GraphQL (the
+/// stream's token), its playlist servers (usher, and the one near you) and the ad-free server. On a
+/// fresh start each was a new connection (name lookup, TCP, TLS) made one after another before the
+/// first picture: the stream started that much further behind live. Done when Kestrel comes to the
+/// front and when the connection changes.
+enum PlaybackWarmup {
+  /// (Called on the main thread.)
+  private static var lastRun = Date.distantPast
+
+  static func run(force: Bool = false) {
+    guard force || Date().timeIntervalSince(lastRun) > 45 else { return }
+    lastRun = Date()
+    let settings = AppSettings.shared
+    let playback = settings.sharedPlaybackClient()
+    var hosts = ["usher.ttvnw.net"]
+    if let near = NearbyPlaylists.cachedHost { hosts.append(near) }
+    hosts += settings.adFreeProxyHosts.prefix(1)
+    let api: HTTPClient = TwitchAPI.shared.playbackHTTP ?? TwitchAPI.shared.http
+    // The playlist server on this iPhone, too.
+    _ = try? StreamProxy.shared.ensureRunning()
+    Task.detached(priority: .utility) {
+      await withTaskGroup(of: Void.self) { group in
+        for host in hosts { group.addTask { await touch(host, with: playback) } }
+        group.addTask { await touch("gql.twitch.tv", with: api) }
+      }
+    }
+  }
+
+  private static func touch(_ host: String, with client: HTTPClient) async {
+    guard let url = URL(string: "https://\(host)/") else { return }
+    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)
+    request.httpMethod = "HEAD"
+    _ = try? await client.data(for: request)
   }
 }

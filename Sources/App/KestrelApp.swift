@@ -29,6 +29,7 @@ struct KestrelApp: App {
     .onChange(of: scenePhase) { phase in
       switch phase {
       case .active:
+        PlaybackWarmup.run()
         LiveNotifier.shared.appBecameActive()
         AutoRecorder.shared.appBecameActive()
       case .background:

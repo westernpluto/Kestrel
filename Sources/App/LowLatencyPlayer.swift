@@ -83,6 +83,9 @@
     private var settlingUntil = Date.distantPast
     /// Just back from an ad-free copy to the main stream (see `apply`).
     private var switchedBackAt: Date?
+    /// Since when this load has been playing, and whether how far from live it started is logged.
+    private var playingSince: Date?
+    private var reportedStart = false
     /// Switches to audio only after a while in the background (not right away: a quick trip to
     /// Notification Center or another app shouldn't cost the picture a rebuffer on return).
     private var audioOnlyTask: Task<Void, Never>?
@@ -114,7 +117,6 @@
     /// buffer's end position: it's what's left once it's seen below the playhead.
     private var bufferedIsRemaining = false
     /// Kept across reloads, so going live again doesn't open new connections to Twitch.
-    private var http: (client: HTTPClient, proxy: HTTPProxy?)?
     /// Twitch's playlist server for this stream, as the stats show it.
     private var videoServer: String?
     private var serverCheckedAt = Date.distantPast
@@ -292,18 +294,15 @@
     private func startPlayback(_ url: URL) {
       catchUp.restart()
       playedSinceLoad = false
+      playingSince = nil
+      reportedStart = false
       if player.playbackRate != 1 { player.playbackRate = 1 }
       player.load(url)
     }
 
-    /// One HTTP client for this stream's playlists, kept while the proxy setting stays the same.
+    /// The playlists' HTTP client: shared by every stream, so its connections are already open.
     private func playbackHTTP() -> HTTPClient {
-      let settings = AppSettings.shared
-      let proxy = settings.playbackProxy
-      if let http, http.proxy == proxy { return http.client }
-      let client = settings.playbackClient(timeout: 8)
-      http = (client, proxy)
-      return client
+      AppSettings.shared.sharedPlaybackClient()
     }
 
     private func failed(_ message: String, byPlayer: Bool) {
@@ -393,6 +392,7 @@
           }
         }
       case .playing:
+        if playingSince == nil { playingSince = Date() }
         playedSinceLoad = true
         model.isBuffering = false
         setWaitingForStream(false)
@@ -632,6 +632,13 @@
         buffer: bufferAhead, latency: latency, playing: steering, position: position.isFinite ? position : nil)
       if player.playbackRate != rate { player.playbackRate = rate }
       noteMargin()
+      // For the record: how far from live it started (and how much of that is video in hand, which
+      // catching up can win back, rather than video arriving late, which it can't).
+      if !reportedStart, let since = playingSince, Date().timeIntervalSince(since) > 3, let latency, !tile {
+        reportedStart = true
+        let held = bufferAhead.map { String(format: ", %.1f s in hand", $0) } ?? ""
+        ActivityLog.shared.add("\(login) started \(String(format: "%.1f", latency)) s from live\(held)")
+      }
 
       // The session can go back to the ad-free server's playlist server mid-stream.
       if let session, Date().timeIntervalSince(serverCheckedAt) > 5 {
@@ -716,13 +723,24 @@
     }
 
     /// Seconds of video buffered ahead of what's showing.
+    /// IVS documents `buffered` as what's left ahead of the playhead, but has also behaved like the
+    /// buffer's end position: once it's seen below the playhead it can only be what's left. Until
+    /// then (the first seconds of a stream, with the playhead near its start) taking it for an end
+    /// position read far too little in hand: it slowed down instead of catching up, took the
+    /// shrinking reading for a hiccup and kept more in hand, and every stream started seconds
+    /// further behind. So until it's known, what's left is taken to be the larger reading that
+    /// still fits how far behind live it is (what's in hand can't be more than that).
     private var bufferAhead: Double? {
       let buffered = player.buffered.seconds
-      let position = player.position.seconds
       guard buffered.isFinite, buffered >= 0 else { return nil }
-      guard position.isFinite else { return buffered }
+      let position = player.position.seconds
+      guard position.isFinite, position > 0 else { return buffered }
       if buffered + 0.5 < position { bufferedIsRemaining = true }
-      return bufferedIsRemaining ? buffered : max(0, buffered - position)
+      if bufferedIsRemaining { return buffered }
+      let endReading = max(0, buffered - position)
+      let latency = player.liveLatency.seconds
+      guard latency.isFinite, latency > 0 else { return endReading }
+      return max(endReading, min(buffered, latency - 0.3))
     }
 
     /// Video stats for the overlay.

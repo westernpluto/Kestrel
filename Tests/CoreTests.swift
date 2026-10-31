@@ -1061,7 +1061,7 @@ func testLiveCatchUp() {
   check(catchUp.update(buffer: 2.5, latency: 3.5, playing: true, now: t0) == 1)
   // Far more than needed in hand (well after the start): faster in proportion, easing off as it
   // nears the margin (never faster again on the way down), stopping at it without overshooting.
-  var t = t0.addingTimeInterval(25)
+  var t = t0.addingTimeInterval(45)
   var buffer = 4.2
   var rates: [Float] = []
   var lowest = buffer
@@ -1096,12 +1096,28 @@ func testLiveCatchUp() {
     if closeAt == nil, joined <= start.targetBuffer + 0.2 { closeAt = st }
   }
   check((closeAt ?? .distantFuture) <= t0.addingTimeInterval(30), "close to live within seconds: \(String(describing: closeAt))")
+  // A fresh start a few seconds behind (the first connections are slow): up to 1.2× at first,
+  // close to live within half a minute.
+  var fresh = LiveCatchUp(now: t0)
+  var f = t0.addingTimeInterval(1)
+  var freshHeld = 4.0
+  var freshRates: [Float] = []
+  var freshCloseAt: Date?
+  while f < t0.addingTimeInterval(90) {
+    f += 0.5
+    let rate = fresh.update(buffer: freshHeld, latency: freshHeld + 1, playing: true, now: f)
+    freshRates.append(rate)
+    freshHeld -= Double(rate - 1) * 0.5
+    if freshCloseAt == nil, freshHeld <= fresh.targetBuffer + 0.2 { freshCloseAt = f }
+  }
+  check(freshRates.max() == LiveCatchUp.rates.fast, "quicker when far back at the start")
+  check((freshCloseAt ?? .distantFuture) <= t0.addingTimeInterval(35), "close to live in half a minute: \(String(describing: freshCloseAt))")
 
   // Video arriving in pieces: the reading goes up and down around an average a little over the
   // margin. Hardly any steering for that (it used to speed up after every piece), never slower,
   // and never near running dry.
   var pieces = LiveCatchUp(targetBuffer: 1, now: t0)
-  var p = t0.addingTimeInterval(25)
+  var p = t0.addingTimeInterval(45)
   var inPieces = 0.8
   var changes = 0
   var lastRate: Float = 1
@@ -1123,7 +1139,7 @@ func testLiveCatchUp() {
 
   // More than needed, lasting: caught up, gently.
   var surplus = LiveCatchUp(targetBuffer: 1, now: t0)
-  var s = t0.addingTimeInterval(25)
+  var s = t0.addingTimeInterval(45)
   var surplusRates: [Float] = []
   for _ in 0..<10 {
     surplusRates.append(surplus.update(buffer: 2.4, latency: 3.3, playing: true, now: s))
@@ -1134,7 +1150,7 @@ func testLiveCatchUp() {
   // A hiccup: 1.5 s of no video arriving (the buffer drains at normal speed). The margin grows to
   // cover it as it happens; then playback slows a touch to build the margin back, and stops there.
   var hiccup = LiveCatchUp(now: t0)
-  var h = t0.addingTimeInterval(25)
+  var h = t0.addingTimeInterval(45)
   var held = 2.0
   hiccup.update(buffer: held, latency: 0.8, playing: true, now: h)
   for _ in 0..<3 {
@@ -1162,7 +1178,7 @@ func testLiveCatchUp() {
   check((atNormal?.needed ?? 0) >= 1.5, "the hiccup is remembered")
   // Well behind live already: never slower.
   var behind = LiveCatchUp(now: t0)
-  check(behind.update(buffer: 0.2, latency: 6, playing: true, now: t0.addingTimeInterval(25)) == 1)
+  check(behind.update(buffer: 0.2, latency: 6, playing: true, now: t0.addingTimeInterval(45)) == 1)
 
   // A stall: more in hand from now on, then a pause before steering again.
   var stall = LiveCatchUp(now: t0)

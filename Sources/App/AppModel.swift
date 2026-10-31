@@ -183,6 +183,23 @@ final class AppSettings: ObservableObject {
     URLSessionHTTPClient(timeout: timeout, proxy: playbackProxy)
   }
 
+  private let sharedLock = NSLock()
+  private var sharedPlayback: (proxy: HTTPProxy?, client: HTTPClient)?
+
+  /// One client for every live stream's playlists (per proxy setting): its connections to Twitch's
+  /// and the ad-free server's servers stay open from one stream to the next, and are opened ahead
+  /// (PlaybackWarmup), so a stream starts closer to live. (Each stream had its own, and paid for
+  /// new connections every time; on a fresh start that put it a few seconds further behind.)
+  func sharedPlaybackClient() -> HTTPClient {
+    let proxy = playbackProxy
+    sharedLock.lock()
+    defer { sharedLock.unlock() }
+    if let sharedPlayback, sharedPlayback.proxy == proxy { return sharedPlayback.client }
+    let client = URLSessionHTTPClient(timeout: 8, proxy: proxy)
+    sharedPlayback = (proxy, client)
+    return client
+  }
+
   /// Playback tokens go through the user's proxy too: Twitch decides about ads by where the
   /// token request comes from.
   func applyProxy() {
