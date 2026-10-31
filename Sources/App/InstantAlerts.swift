@@ -80,8 +80,6 @@ final class InstantAlerts: ObservableObject {
     return URL(string: "ntfy://\(host)/\(topic)")
   }
 
-  var webURL: URL? { serverURL?.appendingPathComponent(topic) }
-
   // MARK: Setting up
 
   /// Puts the relay in the Cloudflare account the token belongs to (or updates it), and hands it

@@ -72,6 +72,8 @@
     private var detachedForBackground = false
     private var audioOnlyForBackground = false
     private var pausedForBackground = false
+    /// Just back from the background: stalls until then are the return's doing.
+    private var settlingUntil = Date.distantPast
     /// Switches to audio only after a while in the background (not right away: a quick trip to
     /// Notification Center or another app shouldn't cost the picture a rebuffer on return).
     private var audioOnlyTask: Task<Void, Never>?
@@ -352,11 +354,15 @@
         model.isBuffering = true
         // Ran dry mid-stream (not a start, a pause or a quality switch): keep a bigger margin.
         if playedSinceLoad, !pausedForBackground, Date().timeIntervalSince(lastQualitySwitch) > 3 {
-          catchUp.stalled()
           lastStall = Date()
-          noteMargin()
           if player.playbackRate != 1 { player.playbackRate = 1 }
-          if chosen == nil, steadyAuto.stalled() { applyAutoCap() }
+          if Date() < settlingUntil {
+            catchUp.hold(for: 3)
+          } else {
+            catchUp.stalled()
+            noteMargin()
+            if chosen == nil, steadyAuto.stalled() { applyAutoCap() }
+          }
         }
       case .playing:
         playedSinceLoad = true
@@ -480,7 +486,7 @@
         if let index = menuQualities.firstIndex(where: { Self.label($0) == label }) {
           chosen = index
         } else if applePlayerOnly.contains(where: { $0.label == label }) {
-          model?.switchToApplePlayer(quality: label, reason: "picked \(label)", automatic: false)
+          model?.switchToApplePlayer(quality: label, reason: "picked \(label)")
           return
         }
       }
@@ -497,7 +503,7 @@
       if let index, index >= Self.applePlayerQualityBase {
         let offset = index - Self.applePlayerQualityBase
         guard offset < applePlayerOnly.count else { return }
-        model?.switchToApplePlayer(quality: applePlayerOnly[offset].label, reason: "picked \(applePlayerOnly[offset].label)", automatic: false)
+        model?.switchToApplePlayer(quality: applePlayerOnly[offset].label, reason: "picked \(applePlayerOnly[offset].label)")
         return
       }
       chosen = index
@@ -876,10 +882,41 @@
         audioOnlyForBackground = false
         applyChosen(smoothly: true)
       }
+      // Coming back disturbs the streams for a moment (the others starting up, the picture
+      // returning from PiP): a stall now isn't the stream's doing, so it doesn't teach a bigger
+      // margin (which kept the stream further behind, and slowed it to build the margin).
+      settlingUntil = Date().addingTimeInterval(8)
+      // Heard: make sure the sound has somewhere to go (a call or another app may have taken it).
+      if !userMuted { try? AVAudioSession.sharedInstance().setActive(true) }
+      if player.muted != (userMuted || (model?.coveringAd ?? false)) { player.muted = userMuted || (model?.coveringAd ?? false) }
       if pausedForBackground {
-        pausedForBackground = false
-        goLive()
+        // Multi-view's quiet streams come back one after another, not all at once: starting
+        // together, they took the bandwidth from the one still playing, which stalled. (Each
+        // stays paused until its turn.)
+        let delay = tile ? Self.nextResumeDelay() : 0
+        if delay == 0 {
+          pausedForBackground = false
+          goLive()
+        } else {
+          Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let controller = self, controller.pausedForBackground, !controller.stopped, !controller.suspended,
+              UIApplication.shared.applicationState != .background
+            else { return }
+            controller.pausedForBackground = false
+            controller.goLive()
+          }
+        }
       }
+    }
+
+    private static var resumeTurns: (count: Int, since: Date) = (0, .distantPast)
+
+    /// The wait before the next paused multi-view stream starts again: 1, 2.2, 3.4… seconds.
+    private static func nextResumeDelay() -> Double {
+      if Date().timeIntervalSince(resumeTurns.since) > 6 { resumeTurns = (0, Date()) }
+      resumeTurns.count += 1
+      return 1 + Double(resumeTurns.count - 1) * 1.2
     }
   }
 

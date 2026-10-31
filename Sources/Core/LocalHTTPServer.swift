@@ -267,6 +267,8 @@ final class StreamProxy: @unchecked Sendable {
   private var recordingsRoot: URL?
   private var server: LocalHTTPServer?
   private var lastPort: UInt16 = 0
+  /// When the server last answered a ping.
+  private var lastAnswered = Date.distantPast
 
   /// Starts the server if needed and returns its port.
   func ensureRunning() throws -> UInt16 {
@@ -418,14 +420,37 @@ final class StreamProxy: @unchecked Sendable {
 
 extension StreamProxy {
   /// Pings the server and restarts it if iOS reclaimed the socket while the app was suspended.
+  /// A restart cuts off every stream playing through it, so a slow answer isn't taken for a dead
+  /// server: several streams starting at once (multi-view coming back from the background) kept it
+  /// busy past the first wait, and the restart stalled the stream still playing. It's asked again,
+  /// longer, first; and not at all if it answered a moment ago.
   func ensureResponsive() async {
-    if let port = try? ensureRunning(), let url = URL(string: "http://127.0.0.1:\(port)/ping") {
-      if let result = try? await URLSessionHTTPClient(timeout: 1.5).data(for: URLRequest(url: url)),
+    guard let port = try? ensureRunning() else {
+      _ = try? restart()
+      return
+    }
+    if Date().timeIntervalSince(answeredAt) < 5 { return }
+    for timeout in [1.5, 3.0] {
+      if let url = URL(string: "http://127.0.0.1:\(port)/ping"),
+        let result = try? await URLSessionHTTPClient(timeout: timeout).data(for: URLRequest(url: url)),
         result.1.statusCode == 200
       {
+        noteAnswered()
         return
       }
     }
     _ = try? restart()
+  }
+
+  private var answeredAt: Date {
+    lock.lock()
+    defer { lock.unlock() }
+    return lastAnswered
+  }
+
+  private func noteAnswered() {
+    lock.lock()
+    lastAnswered = Date()
+    lock.unlock()
   }
 }

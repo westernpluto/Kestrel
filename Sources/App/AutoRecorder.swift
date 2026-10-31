@@ -222,7 +222,7 @@ final class BackgroundKeepAlive {
     if running { return true }
     let session = AVAudioSession.sharedInstance()
     do {
-      if AppModel.shared.playing == nil {
+      if !AppModel.shared.playsMedia {
         // Alongside whatever else plays: music isn't interrupted, and Kestrel doesn't take over
         // the lock screen's controls.
         try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
@@ -250,7 +250,7 @@ final class BackgroundKeepAlive {
     running = false
     observers.forEach(NotificationCenter.default.removeObserver)
     observers = []
-    if AppModel.shared.playing == nil {
+    if !AppModel.shared.playsMedia {
       try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
       try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
     }

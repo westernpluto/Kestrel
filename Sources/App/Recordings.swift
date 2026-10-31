@@ -73,7 +73,12 @@ final class RecordingStore: ObservableObject {
     recordings.first { $0.videoID == videoID && active[$0.id] != nil }
   }
 
-  /// Downloads a VOD at a quality ("720p60"), into the list with the recordings.
+  /// A finished download of this video, if any.
+  func downloaded(_ videoID: String) -> RecordingInfo? {
+    recordings.first { $0.videoID == videoID && active[$0.id] == nil && $0.duration > 0 }
+  }
+
+  /// Downloads a VOD at a quality (see VODDownloadChoice), into the list with the recordings.
   func download(_ video: Video, quality label: String) {
     guard download(of: video.id) == nil else { return }
     let owner = video.owner ?? Channel(id: "", login: "twitch", displayName: "Twitch", profileImageURL: nil)
@@ -111,7 +116,8 @@ final class RecordingStore: ObservableObject {
     }
   }
 
-  /// The VOD's rendition with that label (or the best, if it's gone).
+  /// The VOD's rendition nearest a choice: the best at or under that height ("720p"), the best
+  /// ("Best"), or the sound alone ("Audio only").
   private static func vodRendition(videoID: String, label: String) async throws -> HLSVariant {
     let token = try await TwitchAPI.shared.videoToken(id: videoID)
     let url = Usher.vod(id: videoID, token: token, codecs: AppSettings.shared.codecs)
@@ -122,10 +128,16 @@ final class RecordingStore: ObservableObject {
           ? "This video is restricted (subscribers only or region locked)." : "Twitch returned HTTP \(response.statusCode).")
     }
     let master = HLSMaster.parse(text, base: response.url ?? url)
-    let variants = master.videoVariants + (master.audioVariant.map { [$0] } ?? [])
-    guard let pick = variants.first(where: { $0.label == label }) ?? variants.first else {
-      throw PlayerModel.VODError(errorDescription: "No playable qualities were found.")
+    let videos = master.videoVariants
+    let pick: HLSVariant?
+    if label == VODDownloadChoice.audio {
+      pick = master.audioVariant ?? videos.last
+    } else if let height = RecordQuality.height(label) {
+      pick = videos.first { min($0.width, $0.height) <= height } ?? videos.last
+    } else {
+      pick = videos.first ?? master.audioVariant
     }
+    guard let pick else { throw PlayerModel.VODError(errorDescription: "No playable qualities were found.") }
     return pick
   }
 
@@ -527,11 +539,13 @@ struct RecordingPlayerScreen: View {
     .statusBarHidden(!controlsShown)
     .onAppear {
       OrientationLock.playerVisible(true)
+      AppModel.shared.watchingRecording = true
       if let url { playback.start(url: url, id: info.id) }
       scheduleHide()
     }
     .onDisappear {
       playback.finish()
+      AppModel.shared.watchingRecording = false
       if AppModel.shared.playing == nil { OrientationLock.playerVisible(false) }
     }
   }
@@ -960,4 +974,26 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
     _ pictureInPictureController: AVPictureInPictureController,
     restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
   ) { completionHandler(true) }
+}
+
+/// What a VOD can be downloaded at, offered before its qualities are known (holding it in a list):
+/// the nearest the video has is used.
+enum VODDownloadChoice {
+  static let best = "Best"
+  static let audio = "Audio only"
+  static let all = [best, "1080p", "720p", "480p", "360p", audio]
+
+  /// Roughly how big a download of that length is at that choice.
+  static func size(_ label: String, seconds: Int) -> String {
+    let perHour: Double
+    switch label == best ? 1080 : RecordQuality.height(label) ?? 0 {
+    case 1080...: perHour = 3
+    case 720...: perHour = 1.5
+    case 480...: perHour = 0.6
+    case 360...: perHour = 0.3
+    default: perHour = 0.08
+    }
+    let gigabytes = perHour * max(Double(seconds) / 3600, 0.05)
+    return gigabytes >= 1 ? String(format: "≈%.1f GB", gigabytes) : String(format: "≈%.0f MB", gigabytes * 1000)
+  }
 }

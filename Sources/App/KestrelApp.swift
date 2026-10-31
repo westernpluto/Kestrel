@@ -227,8 +227,9 @@ struct MiniPlayerRoom: ViewModifier {
 
   func body(content: Content) -> some View {
     content
-      .background(TabBarProbe { height in
+      .background(TabBarProbe { height, rail in
         if abs(app.tabBarHeight - height) > 0.5 { app.tabBarHeight = height }
+        if !app.tabRail.equalTo(rail) { app.tabRail = rail }
       })
   }
 }
@@ -249,7 +250,8 @@ struct MiniPlayerSpacer: View {
 
 /// Reports how much of the screen's bottom the tab bar covers.
 struct TabBarProbe: UIViewRepresentable {
-  var report: (CGFloat) -> Void
+  /// How much of the bottom a bottom bar covers, and a side rail's frame (`.null` if none).
+  var report: (CGFloat, CGRect) -> Void
 
   func makeUIView(context: Context) -> ProbeView {
     let view = ProbeView()
@@ -263,7 +265,7 @@ struct TabBarProbe: UIViewRepresentable {
   }
 
   final class ProbeView: UIView {
-    var report: ((CGFloat) -> Void)?
+    var report: ((CGFloat, CGRect) -> Void)?
     private var measuring = false
 
     override func didMoveToWindow() {
@@ -289,21 +291,40 @@ struct TabBarProbe: UIViewRepresentable {
     }
 
     private func measure() {
-      guard let window, let bar = tabBarController()?.tabBar else { return }
-      // Hidden, or replaced by a side bar the system draws itself: nothing along the bottom.
-      guard !bar.isHidden, bar.alpha > 0.01, bar.window != nil else {
-        DispatchQueue.main.async { [weak self] in self?.report?(0) }
+      guard let window, let tabs = tabBarController() else { return }
+      // The safe area as it is now (with the status bar showing, most of the time): the mini
+      // player's corner goes by the widest seen (see MiniCorner).
+      MiniCorner.note(window.safeAreaInsets, size: window.bounds.size)
+      // The classic bar, or (hidden, newer iOS on a big screen) the bar the system draws instead.
+      let bar = tabs.tabBar
+      let shown: UIView? =
+        !bar.isHidden && bar.alpha > 0.01 && bar.window != nil ? bar : Self.drawnBar(in: tabs.view, depth: 0)
+      guard let shown else {
+        DispatchQueue.main.async { [weak self] in self?.report?(0, .null) }
         return
       }
-      let frame = bar.convert(bar.bounds, to: window)
+      let frame = shown.convert(shown.bounds, to: window)
       guard frame.height > 0, frame.width > 0 else { return }
       // Only a bar along the bottom takes room from the mini player's corner. iPhone Duo's inner
       // display (and iPad) puts it down the side or along the top instead: then the mini player
-      // sits right in the bottom corner (it was kept up as if a bottom bar were there).
+      // sits right in the bottom corner, beside a rail rather than above it.
       let alongBottom = frame.width > frame.height && frame.maxY >= window.bounds.maxY - 60
       let covered = alongBottom ? window.bounds.maxY - frame.minY : 0
       guard covered == 0 || (covered > 20 && covered < 200) else { return }
-      DispatchQueue.main.async { [weak self] in self?.report?(covered.rounded()) }
+      let rail = frame.height > frame.width && frame.width < 200 ? frame.integral : .null
+      DispatchQueue.main.async { [weak self] in self?.report?(covered.rounded(), rail) }
+    }
+
+    /// A visible tab bar the system draws in place of the hidden classic one.
+    private static func drawnBar(in view: UIView, depth: Int) -> UIView? {
+      guard depth < 4 else { return nil }
+      for sub in view.subviews where !sub.isHidden && sub.alpha > 0.01 && !(sub is UITabBar) {
+        if String(describing: type(of: sub)).contains("TabBar"), sub.bounds.width > 20, sub.bounds.height > 20 {
+          return sub
+        }
+        if let found = drawnBar(in: sub, depth: depth + 1) { return found }
+      }
+      return nil
     }
 
     private func tabBarController() -> UITabBarController? {

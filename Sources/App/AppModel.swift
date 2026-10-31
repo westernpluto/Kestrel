@@ -117,11 +117,9 @@ final class AppSettings: ObservableObject {
   }
 
   // Fixed choices (no longer settings): always try an ad-free copy, 360p if that's all there is;
-  // ask for HEVC/AV1 when the device decodes them; 7TV/BTTV/FFZ emotes on.
+  // ask for HEVC/AV1 when the device decodes them.
   let backupStreams = true
   let allowLowQualityBackup = true
-  let thirdPartyEmotes = true
-  let chatTimestamps = false
 
   private var initialized = false
 
@@ -289,6 +287,14 @@ final class AppModel: ObservableObject {
   @Published private(set) var multiview: MultiviewModel?
   /// Multi-view is tucked away: a row of the streamers' pictures where the mini player sits.
   @Published var multiviewMinimized = false
+  /// A recording is open in its own player (which isn't `playing`).
+  var watchingRecording = false
+
+  /// Kestrel is playing something itself: the player, multi-view or a recording. The audio session
+  /// is left on meanwhile (switching it off stops every sound playing, which is how multi-view went
+  /// silent on coming back from the background).
+  @MainActor
+  var playsMedia: Bool { playing != nil || (multiview?.running ?? false) || watchingRecording }
 
   /// Opens multi-view on screen with these streams added (the player closes: its stream can be
   /// one of them).
@@ -332,6 +338,17 @@ final class AppModel: ObservableObject {
   /// Height the tab bar takes up from the bottom of the screen (measured: it differs between
   /// iOS versions; the floating glass bar of iOS 26 is taller).
   @Published var tabBarHeight: CGFloat = 49
+  /// The tab bar when it runs down a side instead (iPhone Duo's inner screen), in window
+  /// coordinates; `.null` otherwise. The mini player sits beside it, never over it.
+  @Published var tabRail: CGRect = .null
+
+  /// An offline channel's chat, in the player folded down to it (it offers the stream once they
+  /// go live).
+  @MainActor
+  func openChat(_ channel: Channel) {
+    PlayerModel.openedOffline.insert(channel.login.lowercased())
+    playing = .live(channel)
+  }
 
   /// Shrinks the player and opens the channel's page in the current section.
   func openChannel(_ channel: Channel) {

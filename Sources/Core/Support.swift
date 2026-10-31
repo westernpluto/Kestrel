@@ -120,12 +120,6 @@ final class OneShotSignal: @unchecked Sendable {
   private var fired = false
   private var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
-  var hasFired: Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    return fired
-  }
-
   func fire() {
     lock.lock()
     fired = true

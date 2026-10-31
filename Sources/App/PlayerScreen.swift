@@ -8,6 +8,7 @@
 // avoidance, which left the message box under the keyboard in a full-screen cover).
 
 import AVKit
+import Combine
 import SwiftUI
 
 // MARK: - Apple player surface
@@ -303,8 +304,6 @@ final class KeyboardObserver: ObservableObject {
   @Published private(set) var overlap: CGFloat = 0
   /// The keyboard's height the last time it was up (the emote picker takes its place).
   private(set) static var lastHeight: CGFloat?
-  private static var lastNoAnimationLog = Date.distantPast
-  private static var lastLandscapeHideLog = Date.distantPast
   private var tokens: [NSObjectProtocol] = []
 
   /// The keyboard's own motion: UIKit runs it on a stiff spring squeezed into the notification's
@@ -345,26 +344,6 @@ final class KeyboardObserver: ObservableObject {
     let value = hiding ? 0 : min(bounds.height * 0.62, max(0, bounds.maxY - frame.minY))
     if value > 40 { Self.lastHeight = value }
     let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
-    // For the record (Settings › Activity log): iOS itself said the keyboard wouldn't slide.
-    if note.name != UIResponder.keyboardDidChangeFrameNotification, duration <= 0.01, abs(value - overlap) > 40,
-      Date().timeIntervalSince(Self.lastNoAnimationLog) > 10
-    {
-      Self.lastNoAnimationLog = Date()
-      ActivityLog.shared.add("Keyboard \(value > 0 ? "came up" : "went away") without its slide (iOS reported no animation)")
-    }
-    // For the record (Settings › Activity log): how iOS says it puts the keyboard away in
-    // landscape, where it's been seen to vanish at once (portrait slides fine).
-    if hiding, note.name == UIResponder.keyboardWillHideNotification, bounds.width > bounds.height, overlap > 40,
-      Date().timeIntervalSince(Self.lastLandscapeHideLog) > 30
-    {
-      Self.lastLandscapeHideLog = Date()
-      let curve = (note.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? NSNumber)?.intValue ?? -1
-      let local = (note.userInfo?[UIResponder.keyboardIsLocalUserInfoKey] as? NSNumber)?.boolValue ?? true
-      ActivityLog.shared.add(
-        String(
-          format: "Keyboard away in landscape: iOS says %.2f s, curve %d, %.0f pt, end %.0f×%.0f at y %.0f, %@",
-          duration, curve, overlap, end.width, end.height, frame.minY, local ? "this app's" : "another app's"))
-    }
     guard abs(value - overlap) > 0.5 else { return }
     // "Did" notifications only correct a missed "will"; a zero duration means the keyboard itself
     // isn't animating (moving with it is the point).
@@ -800,6 +779,48 @@ struct PlayerLayout: Equatable {
       bottomRow: EdgeInsets(top: 0, leading: row.minX - low, bottom: 0, trailing: high - row.maxX))
   }
 
+  /// The offline banner's strip (see `folded`).
+  static let foldedStrip: CGFloat = 54
+
+  /// The channel is offline: chat only. The video's place folds into a strip (the offline banner)
+  /// and what's under it moves up; once the stream starts it opens back up, animated, so the video
+  /// slides into view beside chat. Phone landscape: chat across the whole screen under the strip.
+  func folded(safe: CGSize, insets: EdgeInsets) -> PlayerLayout {
+    var out = self
+    let strip = Self.foldedStrip
+    out.chatOverlay = false
+    out.panelVisible = true
+    out.pictureInsets = EdgeInsets()
+    out.topBarExtra = EdgeInsets()
+    out.bottomRowExtra = EdgeInsets()
+    if landscape && !large {
+      let left = -insets.leading
+      let width = safe.width + insets.leading + insets.trailing
+      let top = -insets.top
+      out.video = CGRect(x: left, y: top, width: width, height: insets.top + strip)
+      out.panel = CGRect(x: left, y: out.video.maxY, width: width, height: safe.height + insets.bottom - out.video.maxY)
+      out.panelPadding = EdgeInsets(
+        top: 2, leading: insets.leading + 8, bottom: panelPadding.bottom, trailing: insets.trailing + 8)
+      out.controls = EdgeInsets(top: insets.top, leading: insets.leading + 6, bottom: 0, trailing: insets.trailing + 6)
+      return out
+    }
+    // Portrait, or a large window: the strip at the top of the video's place.
+    let lost = video.height - strip
+    out.video = CGRect(x: video.minX, y: video.minY, width: video.width, height: strip)
+    out.info = info?.offsetBy(dx: 0, dy: -lost)
+    out.details = details.map { CGRect(x: $0.minX, y: $0.minY - lost, width: $0.width, height: $0.height + lost) }
+    if !landscape {
+      // Chat is under the video here (beside it in a large window held sideways).
+      out.panel = CGRect(x: panel.minX, y: panel.minY - lost, width: panel.width, height: panel.height + lost)
+    }
+    out.controls = EdgeInsets(top: 0, leading: controls.leading, bottom: 0, trailing: controls.trailing)
+    return out
+  }
+
+  func foldedIf(_ fold: Bool, safe: CGSize, insets: EdgeInsets) -> PlayerLayout {
+    fold ? folded(safe: safe, insets: insets) : self
+  }
+
   /// The same layout moved by (dx, dy) (into another safe area's coordinates).
   func shifted(dx: CGFloat, dy: CGFloat) -> PlayerLayout {
     guard dx != 0 || dy != 0 else { return self }
@@ -811,22 +832,49 @@ struct PlayerLayout: Equatable {
     return moved
   }
 
-  /// The mini player: a small floating video in the bottom right corner, just above the tab bar
-  /// when the bar runs along the bottom.
-  /// - Parameter tabBar: how much of the screen's bottom the tab bar covers (0: it's elsewhere).
-  static func mini(safe: CGSize, bottomInset: CGFloat, tabBar: CGFloat) -> CGRect {
-    let width = (min(safe.width, 520) * 0.5).rounded()
-    let height = (width * 9 / 16).rounded()
-    // No bottom bar: just clear of the home indicator.
-    let covered = tabBar > 0 ? max(tabBar, 49 + bottomInset) : bottomInset
-    let bottom = safe.height + bottomInset - covered - 10
-    return CGRect(x: safe.width - width - 10, y: bottom - height, width: width, height: height)
-  }
-
   /// Room to leave under scrolling content for the mini player.
   static var miniInset: CGFloat {
     let width = min(AppWindow.bounds.width, 520) * 0.5
     return (width * 9 / 16).rounded() + 20
+  }
+}
+
+/// The mini player's corner (the multi-view dock's too): bottom trailing, above a bottom tab bar,
+/// beside a side rail.
+enum MiniCorner {
+  private static var widest: [String: UIEdgeInsets] = [:]
+
+  /// Keeps the widest safe area seen for this window shape and turn: the one with the status bar
+  /// showing. The open player hides the bar (on iPhone Duo's inner screen, a strip down the side),
+  /// so while the player shrank the safe area was still the wider one: the mini player aimed into
+  /// the strip, over the tab rail, and jumped back once the bar returned.
+  static func note(_ insets: UIEdgeInsets, size: CGSize) {
+    let key = key(size)
+    let seen = widest[key] ?? insets
+    widest[key] = UIEdgeInsets(
+      top: max(seen.top, insets.top), left: max(seen.left, insets.left),
+      bottom: max(seen.bottom, insets.bottom), right: max(seen.right, insets.right))
+  }
+
+  /// The mini player's frame in window coordinates.
+  static func frame(window: CGSize, insets: UIEdgeInsets, tabBar: CGFloat, rail: CGRect) -> CGRect {
+    note(insets, size: window)
+    let steady = widest[key(window)] ?? insets
+    let width = (min(window.width - steady.left - steady.right, 520) * 0.5).rounded()
+    let height = (width * 9 / 16).rounded()
+    // No bottom bar: just clear of the home indicator.
+    let covered = tabBar > 0 ? max(tabBar, 49 + steady.bottom) : steady.bottom
+    let maxY = window.height - covered - 10
+    var maxX = window.width - steady.right - 10
+    if !rail.isNull, rail.midX > window.width / 2, rail.maxY > maxY - height, rail.minY < maxY {
+      maxX = min(maxX, rail.minX - 10)
+    }
+    return CGRect(x: maxX - width, y: maxY - height, width: width, height: height)
+  }
+
+  private static func key(_ size: CGSize) -> String {
+    let turn = AppWindow.current?.windowScene?.effectiveGeometry.interfaceOrientation.rawValue ?? 0
+    return "\(Int(size.width))x\(Int(size.height))/\(turn)"
   }
 }
 
@@ -910,12 +958,17 @@ struct PlayerScreen: View {
   /// Full screen in a large window (iPhone Duo's inner display): the video takes the whole window
   /// instead of the phone being turned.
   @State private var largeFullScreen = false
+  /// The channel is offline: just chat, the video folded into a strip until they're live again.
+  @State private var folded: Bool
 
   static let spring = Animation.spring(response: 0.38, dampingFraction: 0.86)
 
   init(target: PlaybackTarget) {
     self.target = target
     _session = StateObject(wrappedValue: PlayerSession(target: target))
+    var offline = false
+    if case .live(let channel) = target { offline = PlayerModel.openedOffline.contains(channel.login.lowercased()) }
+    _folded = State(initialValue: offline)
   }
 
   var body: some View {
@@ -925,22 +978,24 @@ struct PlayerScreen: View {
       let screenWidth = geometry.size.width + insets.leading + insets.trailing
       let screenHeight = geometry.size.height + insets.top + insets.bottom
       let large = OrientationLock.isLarge(CGSize(width: screenWidth, height: screenHeight))
-      let chatOpen = large ? !largeFullScreen : landscape && landscapeChat
+      let chatOpen = folded || (large ? !largeFullScreen : landscape && landscapeChat)
       // A large window held sideways hides the status bar while the player is open, and iPhone
       // Duo's status strip goes with it. Shrinking the player brings them back: laid out by the
       // insets of that moment, chat jumped to the other side of the strip mid-shrink. So the
       // layout keeps to the window as it is with the player open (no strip), shifted to where
       // the safe area is right now.
       let layoutInsets = large && landscape ? EdgeInsets(top: 0, leading: 0, bottom: insets.bottom, trailing: 0) : insets
+      let layoutSafe = CGSize(
+        width: screenWidth - layoutInsets.leading - layoutInsets.trailing,
+        height: screenHeight - layoutInsets.top - layoutInsets.bottom)
       let layout = PlayerLayout(
-        safe: CGSize(
-          width: screenWidth - layoutInsets.leading - layoutInsets.trailing,
-          height: screenHeight - layoutInsets.top - layoutInsets.bottom),
-        insets: layoutInsets, keyboard: keyboard.overlap, chatOpen: chatOpen,
+        safe: layoutSafe, insets: layoutInsets, keyboard: keyboard.overlap, chatOpen: chatOpen,
         chatWidth: resizedWidth ?? screenWidth * chatShare,
         cameraOnLeft: landscape && !large ? (InterfaceOrientationObserver.cameraOnLeftNow ?? orientation.cameraOnLeft) : nil,
-        large: large, theater: theater, chatOverVideo: chatOverVideo
-      ).shifted(dx: layoutInsets.leading - insets.leading, dy: layoutInsets.top - insets.top)
+        large: large, theater: theater && !folded, chatOverVideo: chatOverVideo && !folded
+      )
+      .foldedIf(folded, safe: layoutSafe, insets: layoutInsets)
+      .shifted(dx: layoutInsets.leading - insets.leading, dy: layoutInsets.top - insets.top)
       // The layout choice offered on the video, if any.
       let layoutToggle: LayoutToggle? =
         landscape && chatOpen
@@ -951,8 +1006,13 @@ struct PlayerScreen: View {
             onImage: "rectangle.righthalf.inset.filled", isOn: chatOverVideo))
         : nil
       let progress = layout.fullScreen ? 0 : (dragProgress ?? (app.playerMinimized ? 1 : 0))
-      let mini = PlayerLayout.mini(safe: geometry.size, bottomInset: insets.bottom, tabBar: app.tabBarHeight)
-        .offsetBy(dx: miniOffset.width, dy: miniOffset.height)
+      // In window coordinates, moved into the safe area's.
+      let mini = MiniCorner.frame(
+        window: CGSize(width: screenWidth, height: screenHeight),
+        insets: AppWindow.current?.safeAreaInsets
+          ?? UIEdgeInsets(top: insets.top, left: insets.leading, bottom: insets.bottom, right: insets.trailing),
+        tabBar: app.tabBarHeight, rail: app.tabRail
+      ).offsetBy(dx: miniOffset.width - insets.leading, dy: miniOffset.height - insets.top)
       let video = lerp(layout.video, mini, progress)
       let pullDistance = max(240, mini.minY - layout.video.minY)
       let expandedOpacity = Double(max(0, 1 - progress * 2.2))
@@ -1053,8 +1113,23 @@ struct PlayerScreen: View {
         .frame(width: video.width, height: video.height)
         .clipShape(RoundedRectangle(cornerRadius: 12 * progress, style: .continuous))
         .offset(x: video.minX, y: video.minY)
+        // Folded away while offline (it still shows as the mini player).
+        .opacity(folded ? Double(progress) : 1)
+        .allowsHitTesting(!folded || progress > 0)
 
-        if layout.landscape && layout.panelVisible && progress == 0 {
+        if folded {
+          OfflineBanner(model: model, minimize: minimize, close: close)
+            .padding(.leading, layout.controls.leading)
+            .padding(.trailing, layout.controls.trailing)
+            .padding(.top, layout.controls.top)
+            .frame(width: layout.video.width, height: layout.video.height)
+            .offset(x: layout.video.minX, y: layout.video.minY + progress * 140)
+            .opacity(expandedOpacity)
+            .allowsHitTesting(progress == 0)
+            .transition(.opacity)
+        }
+
+        if layout.landscape && layout.panelVisible && progress == 0 && !folded {
           resizeHandle(layout, screenWidth: screenWidth).zIndex(2)
         }
 
@@ -1116,6 +1191,13 @@ struct PlayerScreen: View {
       chat.start()
       await model.start()
     }
+    // Offline: fold the video away to chat; live again (and Watch tapped): it slides back open.
+    .onReceive(model.$phase.combineLatest(model.$expectsOffline).removeDuplicates { $0 == $1 }) { value in
+      let (phase, expects) = value
+      let fold = model.isLive && (phase == .offline || (phase == .loading && expects))
+      guard fold != folded else { return }
+      withAnimation(.spring(response: 0.55, dampingFraction: 0.88)) { folded = fold }
+    }
     .onChange(of: app.playerMinimized) { minimized in
       // The app is portrait; only the full-screen player turns.
       OrientationLock.playerVisible(!minimized)
@@ -1154,7 +1236,7 @@ struct PlayerScreen: View {
     OrientationLock.playerVisible(false)
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
       // Let other apps' audio carry on (fails harmlessly if something else is still playing).
-      if app.playing == nil { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+      if !app.playsMedia { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
     }
     withAnimation(.easeIn(duration: 0.2)) { closing = true }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
@@ -1289,5 +1371,73 @@ struct MiniPlayerOverlay: View {
       .shadow(color: .black.opacity(0.6), radius: 3)
       .padding(.horizontal, 2)
     }
+  }
+}
+
+/// The channel is offline: the player is folded down to chat, with this strip where the video
+/// was. When they go live it says so, and Watch opens the video back up beside chat.
+struct OfflineBanner: View {
+  @ObservedObject var model: PlayerModel
+  var minimize: () -> Void
+  var close: () -> Void
+  @State private var pulse = false
+
+  var body: some View {
+    HStack(spacing: 10) {
+      button("chevron.down", label: "Minimize", action: minimize)
+      if let live = model.liveAgain {
+        Circle()
+          .fill(Color.red)
+          .frame(width: 9, height: 9)
+          .scaleEffect(pulse ? 1.2 : 0.8)
+          .opacity(pulse ? 1 : 0.55)
+          .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: pulse)
+          .onAppear { pulse = true }
+        VStack(alignment: .leading, spacing: 1) {
+          Text("Live now").font(.subheadline.weight(.bold))
+          let detail = live.title.isEmpty ? live.category?.name ?? "" : live.title
+          if !detail.isEmpty { Text(detail).font(.caption).foregroundColor(.white.opacity(0.7)) }
+        }
+        .lineLimit(1)
+        Spacer(minLength: 6)
+        Button {
+          withAnimation(.spring(response: 0.55, dampingFraction: 0.88)) { model.watchLive() }
+        } label: {
+          Label("Watch", systemImage: "play.fill")
+            .font(.subheadline.weight(.bold))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(Color.accentTeal, in: Capsule())
+            .foregroundColor(.black)
+        }
+        .buttonStyle(PressableStyle(scale: 0.95))
+        .transition(.scale.combined(with: .opacity))
+      } else {
+        Image(systemName: "moon.zzz.fill").foregroundColor(.white.opacity(0.55))
+        VStack(alignment: .leading, spacing: 1) {
+          Text("Offline").font(.subheadline.weight(.bold))
+          Text("Chat's open. This lights up when they go live.")
+            .font(.caption).foregroundColor(.white.opacity(0.65))
+            .minimumScaleFactor(0.85)
+        }
+        .lineLimit(1)
+        Spacer(minLength: 6)
+      }
+      button("xmark", label: "Close", action: close)
+    }
+    .foregroundColor(.white)
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .animation(.spring(response: 0.4, dampingFraction: 0.8), value: model.liveAgain?.id)
+  }
+
+  private func button(_ systemImage: String, label: String, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      Image(systemName: systemImage)
+        .font(.system(size: 16, weight: .semibold))
+        .frame(width: 36, height: 36)
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(PressableStyle(scale: 0.9))
+    .accessibilityLabel(label)
   }
 }

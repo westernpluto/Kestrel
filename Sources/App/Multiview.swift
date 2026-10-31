@@ -533,7 +533,6 @@ struct MultiviewScreen: View {
 struct MultiviewDockSpot: View {
   @ObservedObject var model: MultiviewModel
   @EnvironmentObject private var app: AppModel
-  @State private var drag: CGSize = .zero
 
   private static let spring = Animation.spring(response: 0.4, dampingFraction: 0.86)
 
@@ -541,40 +540,18 @@ struct MultiviewDockSpot: View {
     let window = AppWindow.current
     let insets = window?.safeAreaInsets ?? .zero
     let bounds = window?.bounds.size ?? AppWindow.bounds.size
-    let safeWidth = bounds.width - insets.left - insets.right
-    // The same corner as the mini player (see PlayerLayout.mini), measured from the safe area.
-    let covered = app.tabBarHeight > 0 ? max(app.tabBarHeight, 49 + insets.bottom) : insets.bottom
-    let miniHeight = (min(safeWidth, 520) * 0.5 * 9 / 16).rounded()
-    let bottom = covered - insets.bottom + 10 + (app.playing != nil ? miniHeight + 10 : 0)
+    // The mini player's corner (above the mini player when there is one), as padding from the
+    // safe area's corner.
+    let corner = MiniCorner.frame(window: bounds, insets: insets, tabBar: app.tabBarHeight, rail: app.tabRail)
+    let bottom = bounds.height - insets.bottom - corner.maxY + (app.playing != nil ? corner.height + 10 : 0)
+    // Tap to open, hold for more. (Swipes on it opened or threw it away by accident.)
     MultiviewDock(model: model, open: open, close: close)
-      .offset(drag)
-      .simultaneousGesture(
-        DragGesture(minimumDistance: 10, coordinateSpace: .global)
-          .onChanged { drag = $0.translation }
-          .onEnded { value in
-            let predicted = value.predictedEndTranslation
-            if value.translation.height < -50 || predicted.height < -180 {
-              open()
-            } else if abs(predicted.width) > 160 || predicted.height > 140 {
-              // Thrown away, like the mini player.
-              withAnimation(.easeOut(duration: 0.22)) {
-                drag = CGSize(
-                  width: abs(predicted.width) > 160 ? (predicted.width > 0 ? 1 : -1) * bounds.width : 0,
-                  height: predicted.height > 140 ? 300 : 0)
-              }
-              DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { close() }
-            } else {
-              withAnimation(Self.spring) { drag = .zero }
-            }
-          }
-      )
-      .padding(.trailing, 10)
+      .padding(.trailing, max(10, bounds.width - insets.right - corner.maxX))
       .padding(.bottom, max(10, bottom))
   }
 
   private func open() {
     withAnimation(Self.spring) {
-      drag = .zero
       if app.playing != nil { app.playing = nil }
       app.multiviewMinimized = false
     }

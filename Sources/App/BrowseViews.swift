@@ -325,6 +325,8 @@ final class SearchModel: ObservableObject {
 struct SearchView: View {
   @StateObject private var model = SearchModel()
   @EnvironmentObject private var app: AppModel
+  /// Removing streamers from Recent: each picture shows a ✕, and a tap takes it off.
+  @State private var editingRecent = false
 
   var body: some View {
     List {
@@ -364,39 +366,83 @@ struct SearchView: View {
 
   // MARK: Before typing
 
-  /// Streamers looked up before, as a row of pictures (hold one to remove it).
+  /// Streamers looked up before, as a row of pictures. Edit (or holding one) puts a ✕ on each, and
+  /// a tap then takes just that one off.
   private var recentRow: some View {
     Section {
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(alignment: .top, spacing: 14) {
           ForEach(model.recent) { recent in
-            NavigationLink(value: Route.channel(recent.channel)) {
-              VStack(spacing: 5) {
-                Avatar(url: recent.image, size: 52)
-                Text(recent.name).font(.caption2.weight(.medium)).foregroundColor(.primary).lineLimit(1)
-                  .frame(width: 64)
-              }
-              .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .simultaneousGesture(TapGesture().onEnded { model.remember(recent.channel) })
-            .contextMenu {
-              Button(role: .destructive) { withAnimation { model.forget(recent) } } label: { Label("Remove", systemImage: "xmark") }
-            }
+            recentAvatar(recent)
           }
         }
         .padding(.vertical, 6)
+        .padding(.top, editingRecent ? 4 : 0)
       }
       .listRowInsets(EdgeInsets(top: 0, leading: 14, bottom: 0, trailing: 14))
     } header: {
-      HStack {
+      HStack(spacing: 16) {
         Text("Recent")
         Spacer()
-        Button("Clear") { withAnimation { model.clearRecent() } }
-          .font(.footnote.weight(.semibold))
-          .textCase(nil)
+        if editingRecent {
+          Button("Clear all", role: .destructive) {
+            withAnimation(.easeOut(duration: 0.2)) {
+              model.clearRecent()
+              editingRecent = false
+            }
+          }
+          .foregroundColor(.red)
+        }
+        Button(editingRecent ? "Done" : "Edit") {
+          withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { editingRecent.toggle() }
+        }
+      }
+      .font(.footnote.weight(.semibold))
+      .textCase(nil)
+    }
+  }
+
+  private func recentAvatar(_ recent: RecentChannel) -> some View {
+    VStack(spacing: 5) {
+      Avatar(url: recent.image, size: 52)
+        .overlay(alignment: .topTrailing) {
+          if editingRecent {
+            Image(systemName: "xmark.circle.fill")
+              .font(.system(size: 20, weight: .semibold))
+              .symbolRenderingMode(.palette)
+              .foregroundStyle(.white, Color(white: 0.35))
+              .background(Circle().fill(Color.black).padding(2))
+              .offset(x: 6, y: -6)
+              .transition(.scale.combined(with: .opacity))
+          }
+        }
+        .scaleEffect(editingRecent ? 0.92 : 1)
+      Text(recent.name).font(.caption2.weight(.medium)).foregroundColor(.primary).lineLimit(1)
+        .frame(width: 64)
+    }
+    .contentShape(Rectangle())
+    // Just this picture reacts (a link here lit up the whole row).
+    .onTapGesture {
+      if editingRecent {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+          model.forget(recent)
+          if model.recent.isEmpty { editingRecent = false }
+        }
+      } else {
+        model.remember(recent.channel)
+        app.push(.channel(recent.channel))
       }
     }
+    .onLongPressGesture(minimumDuration: 0.4) {
+      guard !editingRecent else { return }
+      UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+      withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { editingRecent = true }
+    }
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(recent.name)
+    .accessibilityAddTraits(.isButton)
+    .accessibilityHint(editingRecent ? "Removes it from Recent" : "Opens the channel")
+    .accessibilityAction(named: "Remove from Recent") { withAnimation { model.forget(recent) } }
   }
 
   // MARK: Results

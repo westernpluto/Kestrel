@@ -19,7 +19,32 @@ final class PlayerModel: ObservableObject {
 
   let target: PlaybackTarget
   let player = AVPlayer()
-  @Published var phase: Phase = .loading
+  @Published var phase: Phase = .loading {
+    didSet {
+      guard phase != oldValue else { return }
+      if phase == .offline {
+        watchForLive()
+      } else {
+        offlineWatch?.cancel()
+        offlineWatch = nil
+        if phase == .playing, expectsOffline {
+          // Opened for chat, but live after all: now it needs the sound (see `start`).
+          expectsOffline = false
+          try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+          try? AVAudioSession.sharedInstance().setActive(true)
+        }
+      }
+    }
+  }
+  /// Channels opened for their chat while known to be offline (ChannelView's Chat button): the
+  /// player starts folded away to chat instead of showing a big empty video first.
+  nonisolated(unsafe) static var openedOffline: Set<String> = []
+  /// Opened for chat while the channel was offline (see `openedOffline`).
+  @Published private(set) var expectsOffline = false
+  /// Offline: Twitch is asked every half minute whether they're live; this is their stream once
+  /// they are (the player offers to start it).
+  @Published private(set) var liveAgain: LiveStream?
+  private var offlineWatch: Task<Void, Never>?
   @Published var qualities: [Quality] = []
   @Published var selectedQuality: Int?
   @Published var adState: AdState = .none
@@ -158,8 +183,6 @@ final class PlayerModel: ObservableObject {
   private var directOffer: [HLSVariant] = []
   private var engineBeforeDirect: PlayerEngine?
   static let directQualityBase = 2000
-  /// False once the user picked a player by hand: don't switch players behind their back.
-  private(set) var mayAutoSwitchPlayer = true
 
   /// One of several streams in multi-view: no lock-screen controls or Picture in Picture of its
   /// own, Auto quality up to `tileMaxHeight`, sound only when it's the one listened to.
@@ -212,10 +235,11 @@ final class PlayerModel: ObservableObject {
 
   nonisolated init(target: PlaybackTarget) {
     self.target = target
-    if case .live = target {
+    if case .live(let channel) = target {
       // The low-latency (IVS) player when the build has it; the Apple player otherwise and as a
       // fallback.
       _engine = Published(initialValue: PlayerEngine.preferredDefault)
+      _expectsOffline = Published(initialValue: Self.openedOffline.contains(channel.login.lowercased()))
     } else {
       _engine = Published(initialValue: .standard)
     }
@@ -231,12 +255,16 @@ final class PlayerModel: ObservableObject {
     #if canImport(AmazonIVSPlayer)
       guard lowLatency == nil else { return }
     #endif
-    try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-    try? AVAudioSession.sharedInstance().setActive(true)
+    // Opened for chat while offline: nothing plays yet, so other apps' audio carries on.
+    if !expectsOffline {
+      try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+      try? AVAudioSession.sharedInstance().setActive(true)
+    }
     if !isTile { NowPlaying.shared.attach(self) }
     switch target {
     case .live(let channel):
       self.channel = channel
+      Self.openedOffline.remove(channel.login.lowercased())
       lastInfoRefresh = Date()
       Task { await refreshInfo() }
       #if canImport(AmazonIVSPlayer)
@@ -804,16 +832,6 @@ final class PlayerModel: ObservableObject {
     if case .video(let video) = target { WatchHistory.shared.save(videoID: video.id, position: seconds, length: duration, syncToTwitch: false) }
   }
 
-  func setEngine(_ newEngine: PlayerEngine) {
-    guard isLive, newEngine != engine, PlayerEngine.available.contains(newEngine) else { return }
-    mayAutoSwitchPlayer = false
-    teardownPlayback()
-    engine = newEngine
-    recentFailures = []
-    phase = .loading
-    Task { await start() }
-  }
-
   func retry() {
     recentFailures = []
     codecs = AppSettings.shared.codecs
@@ -861,6 +879,8 @@ final class PlayerModel: ObservableObject {
     if let rewindSource { StreamProxy.shared.remove(rewindSource.id) }
     NowPlaying.shared.detach(self)
     stopped = true
+    offlineWatch?.cancel()
+    offlineWatch = nil
     timer?.invalidate()
     timer = nil
     teardownPlayback()
@@ -1378,6 +1398,37 @@ final class PlayerModel: ObservableObject {
     }
   }
 
+  // MARK: - Offline: chat, and word when they go live
+
+  private func watchForLive() {
+    guard !isTile, offlineWatch == nil, !stopped, case .live(let channel) = target else { return }
+    liveAgain = nil
+    offlineWatch = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: 30_000_000_000)
+        // (Not while Kestrel's in the background: nothing would show it.)
+        guard !Task.isCancelled, UIApplication.shared.applicationState != .background else { continue }
+        guard let page = try? await TwitchAPI.shared.channelPage(login: channel.login), let stream = page.stream else {
+          continue
+        }
+        guard let model = self, !model.stopped, model.phase == .offline else { return }
+        model.channel = page.channel
+        model.stream = stream
+        model.liveAgain = stream
+        ActivityLog.shared.add("\(page.channel.name) went live")
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        return
+      }
+    }
+  }
+
+  /// They're live: start the stream (the player opens back up beside chat).
+  func watchLive() {
+    liveAgain = nil
+    expectsOffline = false
+    retry()
+  }
+
   private func refreshInfo() async {
     guard case .live(let channel) = target, let page = try? await TwitchAPI.shared.channelPage(login: channel.login) else {
       return
@@ -1411,9 +1462,8 @@ final class PlayerModel: ObservableObject {
 
     /// For this stream only (the setting stays): e.g. a 1440p rendition the low-latency player
     /// can't decode.
-    func switchToApplePlayer(quality label: String?, reason: String, automatic: Bool) {
+    func switchToApplePlayer(quality label: String?, reason: String) {
       guard engine == .lowLatency, !stopped else { return }
-      if automatic, !mayAutoSwitchPlayer { return }
       ActivityLog.shared.add("Switching to the Apple player: \(reason)")
       teardownPlayback()
       engine = .standard
