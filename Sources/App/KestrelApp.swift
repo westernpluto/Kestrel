@@ -64,6 +64,14 @@ struct RootView: View {
           .tabItem { Label("Settings", systemImage: "gearshape") }
           .tag(AppTab.settings)
       }
+      // Multi-view tucked away: its dock where the mini player sits, laid over the tabs on its own
+      // so the rest of the app stays usable.
+      .overlay(alignment: .bottomTrailing) {
+        if let session = app.multiview, app.multiviewMinimized {
+          MultiviewDockSpot(model: session)
+            .transition(.opacity.combined(with: .scale(scale: 0.6, anchor: .bottomTrailing)))
+        }
+      }
       .alert(
         "Following",
         isPresented: Binding(get: { following.notice != nil }, set: { if !$0 { following.notice = nil } })
@@ -80,15 +88,23 @@ struct RootView: View {
           .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
           .zIndex(1)
       }
-      if let session = app.multiview {
+      if let session = app.multiview, !app.multiviewMinimized {
         MultiviewScreen(model: session)
           .id(session.id)
-          .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
+          .transition(.opacity.combined(with: .scale(scale: 0.5, anchor: .bottomTrailing)))
           .zIndex(2)
       }
     }
     .animation(.spring(response: 0.42, dampingFraction: 0.88), value: app.playing?.id)
     .animation(.spring(response: 0.42, dampingFraction: 0.88), value: app.multiview?.id)
+    .animation(.spring(response: 0.42, dampingFraction: 0.88), value: app.multiviewMinimized)
+    // A stream opened on its own: multi-view steps aside into its dock, stopped, until the dock is
+    // tapped (one thing plays at a time).
+    .onChange(of: app.playing?.id) { playing in
+      guard playing != nil, let session = app.multiview else { return }
+      session.park()
+      if !app.multiviewMinimized { app.multiviewMinimized = true }
+    }
     .background(WindowSizeReporter())
     .background(KeyboardDismisser())
     // kestrel://live/<channel> (instant alerts), kestrel://recordings, …

@@ -37,9 +37,24 @@
     private var failures: [Date] = []
     private var adTimeline = AdTimeline()
     private var adState: AdState = .none
-    /// A multi-view tile: starts on Auto, no Picture in Picture, and pauses in the background
-    /// unless it's the one being listened to.
+    /// A multi-view tile: starts on Auto, no Picture in Picture (unless it's the picked one, see
+    /// `pictureInPictureAllowed`), and pauses in the background unless it's the one being heard.
     var tile = false
+    /// Multi-view: the picked stream can go into Picture in Picture (by the button, or by itself
+    /// when the app goes to the background).
+    var pictureInPictureAllowed = false {
+      didSet {
+        guard tile, oldValue != pictureInPictureAllowed else { return }
+        if pictureInPictureAllowed {
+          if let view, pip == nil { makePictureInPicture(for: view) }
+        } else if !(pip?.isPictureInPictureActive ?? false) {
+          pipObservation = nil
+          pipPossibleObservation = nil
+          pip = nil
+        }
+      }
+    }
+    private var offersPictureInPicture: Bool { !tile || pictureInPictureAllowed }
     /// Muted by choice (multi-view: every tile but the one being listened to).
     private var userMuted = false
     /// The tallest picture worth fetching (multi-view: as big as the tile is shown); nil for any.
@@ -67,6 +82,8 @@
     private var lastReload = Date.distantPast
     private var bufferingSince: Date?
     private var framesDecoded = (count: 0, at: Date())
+    /// The player's bandwidth estimate, and when it last changed.
+    private var bandwidthSeen: (value: Int, at: Date) = (0, Date())
     private var renderedFPS: Double?
     /// Paused while the viewer rewinds through the VOD.
     private var suspended = false
@@ -77,6 +94,8 @@
     private var steadyAuto = SteadyAutoQuality(count: 0)
     /// The cap last handed to the player (rank into the video qualities).
     private var appliedAutoCap: Int?
+    /// The stall-driven limit last told to the log.
+    private var lastLoggedSteady: Int?
     /// Played since the last load (buffering after that means the player ran dry).
     private var playedSinceLoad = false
     private var lastQualitySwitch = Date.distantPast
@@ -85,8 +104,6 @@
     private var bufferedIsRemaining = false
     /// Kept across reloads, so going live again doesn't open new connections to Twitch.
     private var http: (client: HTTPClient, proxy: HTTPProxy?)?
-    /// The frames the picture shows, for the MetalFX upscaler (see VideoUpscaler).
-    private(set) lazy var displayedFrames = DisplayedFrames { [weak self] in self?.view?.layer }
     /// Twitch's playlist server for this stream, as the stats show it.
     private var videoServer: String?
     private var serverCheckedAt = Date.distantPast
@@ -416,7 +433,9 @@
       guard cap != appliedAutoCap else { return }
       appliedAutoCap = cap
       player.setAutoMaxQuality(video[cap ?? 0])
-      if tile { return }
+      // (A limit for the picture's size, multi-view or the mini player, isn't news.)
+      if tile || cap != steady || steady == lastLoggedSteady { return }
+      lastLoggedSteady = steady
       if let cap, cap > 0 {
         ActivityLog.shared.add(
           "Auto quality: staying at \(Self.label(video[cap])) or lower for now (\(Self.label(video[cap - 1])) kept stalling)")
@@ -596,6 +615,8 @@
         lastFarJump = Date()
         reload(reason: String(format: "%.0f s behind live after a dropout", latency))
       }
+      // The picture's view lost the player somehow: give it back.
+      if let view, !detachedForBackground, view.player !== player { view.player = player }
       let decoded = player.videoFramesDecoded
       let elapsed = Date().timeIntervalSince(framesDecoded.at)
       if elapsed >= 1 {
@@ -635,7 +656,13 @@
       let size = player.videoSize
       if size.width > 0 { lines.append(StatLine(label: "Resolution", value: "\(Int(size.width))×\(Int(size.height))")) }
       lines.append(StatLine(label: "Bitrate", value: StatFormat.mbps(Double(player.videoBitrate))))
-      lines.append(StatLine(label: "Bandwidth", value: StatFormat.mbps(Double(player.bandwidthEstimate))))
+      // The player only measures the connection when video comes in faster than it plays; in
+      // low latency it arrives as it's made, so the figure mostly stays where it was measured.
+      let estimate = player.bandwidthEstimate
+      if estimate != bandwidthSeen.value { bandwidthSeen = (estimate, Date()) }
+      let stale = Date().timeIntervalSince(bandwidthSeen.at) > 20
+      lines.append(
+        StatLine(label: "Bandwidth", value: StatFormat.mbps(Double(estimate)) + (stale ? " (last measured)" : "")))
       lines.append(StatLine(label: "Buffer", value: StatFormat.seconds(bufferAhead)))
       let latency = player.liveLatency.seconds
       lines.append(StatLine(label: "Latency", value: StatFormat.seconds(latency.isFinite && latency >= 0 ? latency : nil)))
@@ -756,9 +783,13 @@
 
     func attach(_ view: IVSPlayerView) {
       guard self.view !== view else { return }
+      // Off the old picture first: one being taken down after the new one is up (a screen
+      // rebuilt mid-transition) took the video with it, leaving the new one black with the sound
+      // still playing.
+      if let old = self.view, old.player === player { old.player = nil }
       self.view = view
       if !detachedForBackground { view.player = player }
-      if !tile { makePictureInPicture(for: view) }
+      if offersPictureInPicture { makePictureInPicture(for: view) }
     }
 
     private func makePictureInPicture(for view: IVSPlayerView) {
@@ -838,7 +869,7 @@
         detachedForBackground = false
         view?.player = player
         // A fresh PiP controller for the picture that's back (the old one could stop working).
-        if let view, !tile, !(pip?.isPictureInPictureActive ?? false) { makePictureInPicture(for: view) }
+        if let view, offersPictureInPicture, !(pip?.isPictureInPictureActive ?? false) { makePictureInPicture(for: view) }
       }
       if audioOnlyForBackground {
         // Back to the picture without stopping the sound to rebuffer.

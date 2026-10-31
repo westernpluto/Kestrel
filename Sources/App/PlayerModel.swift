@@ -48,17 +48,6 @@ final class PlayerModel: ObservableObject {
   }
   @Published var audioOnly: AudioOnly?
 
-  /// Where the MetalFX upscaler takes the picture from (see VideoUpscaler): the VOD while
-  /// rewinding, else the player in use.
-  var upscaleSource: UpscaleFrameSource? {
-    if (isRewinding || rewindLinger) && rewindShowing { return rewindFrames }
-    #if canImport(AmazonIVSPlayer)
-      if let lowLatency { return lowLatency.displayedFrames }
-    #endif
-    return mainFrames
-  }
-  private lazy var mainFrames = PlayerItemFrames(player: player)
-  private lazy var rewindFrames = PlayerItemFrames(player: rewindPlayer)
   // VOD position, for the seek bar.
   @Published var position: Double = 0
   @Published private(set) var duration: Double = 0
@@ -175,6 +164,14 @@ final class PlayerModel: ObservableObject {
   /// One of several streams in multi-view: no lock-screen controls or Picture in Picture of its
   /// own, Auto quality up to `tileMaxHeight`, sound only when it's the one listened to.
   var isTile = false
+  /// Multi-view: this is the picked stream, the one that can go into Picture in Picture.
+  var pictureInPictureAllowed = false {
+    didSet {
+      #if canImport(AmazonIVSPlayer)
+        lowLatency?.pictureInPictureAllowed = pictureInPictureAllowed
+      #endif
+    }
+  }
   private(set) var userMuted = false
   private var tileMaxHeight: Int?
   private(set) var volume: Float = 1
@@ -900,6 +897,8 @@ final class PlayerModel: ObservableObject {
       guard let model = self else { return }
       Task { @MainActor in model.tick() }
     }
+    // Let iOS line it up with other work instead of waking just for it.
+    timer?.tolerance = 0.1
     notificationTokens.append(
       NotificationCenter.default.addObserver(
         forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
@@ -959,13 +958,13 @@ final class PlayerModel: ObservableObject {
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
         lowLatency.tick()
-        if wantsStats { stats = lowLatency.stats() + upscaleStats }
+        if wantsStats { stats = lowLatency.stats() }
         if isPaused != lowLatency.isPaused { isPaused = lowLatency.isPaused }
         if pictureInPictureActive != lowLatency.pictureInPictureActive { pictureInPictureActive = lowLatency.pictureInPictureActive }
         return
       }
     #endif
-    if wantsStats { stats = appleStats() + upscaleStats }
+    if wantsStats { stats = appleStats() }
     // Only once the item is ready and not mid-start or mid-seek: before that the player reports
     // "paused" while it loads, which used to stop VODs from ever starting.
     if pendingStart == nil, !seeking, player.currentItem?.status == .readyToPlay, phase == .playing {
@@ -1022,10 +1021,6 @@ final class PlayerModel: ObservableObject {
       ActivityLog.shared.add(String(format: "%.0f s behind live, jumping ahead", latency))
       goLive()
     }
-  }
-
-  private var upscaleStats: [StatLine] {
-    AppSettings.shared.upscale ? [StatLine(label: "Upscaling", value: UpscaleMonitor.status)] : []
   }
 
   /// Video stats for the Apple player.
@@ -1395,6 +1390,7 @@ final class PlayerModel: ObservableObject {
     private func startLowLatency(_ channel: Channel) {
       let controller = LowLatencyController(login: channel.login, codecs: codecs, model: self)
       controller.tile = isTile
+      controller.pictureInPictureAllowed = pictureInPictureAllowed
       lowLatency = controller
       controller.start()
       if userMuted { controller.setMuted(true) }

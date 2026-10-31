@@ -91,13 +91,17 @@ struct PlayerVideoArea: View {
       if settings.showVideoStats && !model.stats.isEmpty && chromeVisible {
         // An overlay, so its size never changes the video area's (it used to grow it and push
         // the controls off the top and bottom of a small video).
+        // Kept inside the picture and clear of the camera and the controls on every side, so it
+        // never runs under iPhone Duo's status strip or off the screen; the layout that fits is
+        // picked for the room there is.
         Color.clear
           .allowsHitTesting(false)
           .overlay(alignment: .topLeading) {
             StatsOverlay(lines: model.stats, close: { settings.showVideoStats = false })
-              .padding(.top, controlsShown ? 44 : 0)
-              .padding(.leading, controlInsets.leading + topBarExtra.leading)
-              .padding(.top, controlInsets.top)
+              .padding(.top, max(controlInsets.top + (controlsShown ? 44 : 0), pictureInsets.top))
+              .padding(.leading, max(controlInsets.leading + topBarExtra.leading, pictureInsets.leading))
+              .padding(.trailing, max(controlInsets.trailing, pictureInsets.trailing))
+              .padding(.bottom, max(controlInsets.bottom + (controlsShown ? 56 : 0), pictureInsets.bottom))
           }
           .clipped()
           .transition(.opacity)
@@ -207,10 +211,6 @@ struct PlayerVideoArea: View {
         ApplePlayerSurface(model: model, role: .rewind, fill: model.fillsScreen)
           .opacity((model.isRewinding || model.rewindLinger) && model.rewindShowing ? 1 : 0)
           .animation(.easeInOut(duration: 0.25), value: model.rewindShowing)
-      }
-      // Upscaled with MetalFX, over the regular picture (which shows whenever it's not needed).
-      if settings.upscale, model.audioOnly == nil {
-        UpscaledVideoView(source: model.upscaleSource, fill: model.fillsScreen)
       }
     }
     .opacity(model.phase == .playing ? 1 : 0)
@@ -530,6 +530,12 @@ struct PlayerControls: View {
     let qualities = model.menuQualities
     let login = model.channel?.login ?? ""
     let canRecord = model.isLive && !model.isRewinding && !login.isEmpty
+    // A VOD can be saved to watch offline.
+    var vod: Video?
+    if case .video(let video) = model.target { vod = video }
+    let labels = model.qualities.map(\.label)
+    let downloadOptions =
+      vod == nil ? [] : RecordQuality.options(from: labels) + labels.filter { $0.lowercased().contains("audio") }.prefix(1)
     return PlayerSettingsMenu(
       qualities: qualities,
       selected: model.menuSelectedQuality,
@@ -539,7 +545,12 @@ struct PlayerControls: View {
       recordOptions: canRecord ? RecordQuality.options(from: model.qualities.map(\.label)) : [],
       recording: canRecord ? recordings.isRecording(login) : nil,
       autoRecord: autoRecorder.rule(for: login) != nil,
-      upscale: settings.upscale,
+      downloadOptions: downloadOptions,
+      downloading: vod.map { recordings.download(of: $0.id) != nil } ?? false,
+      downloadHours: Double(vod?.lengthSeconds ?? 0) / 3600,
+      startDownload: { [recordings] (label: String) in
+        if let vod { recordings.download(vod, quality: label) }
+      },
       skipMuted: model.currentMutedParts.isEmpty ? nil : settings.skipMutedParts,
       select: { [model] in model.selectQuality($0) },
       setLowLatency: { [model] in model.setLowLatency($0) },
@@ -555,7 +566,6 @@ struct PlayerControls: View {
         if let channel = model.channel { autoRecorder.schedule(channel, maxHeight: height) }
       },
       unscheduleRecording: { [autoRecorder] in autoRecorder.unschedule(login) },
-      setUpscale: { [settings] in settings.upscale = $0 },
       setSkipMuted: { [settings] in settings.skipMutedParts = $0 },
       opened: { [interacted] in interacted(12) }
     )
@@ -623,7 +633,7 @@ struct PlayerControls: View {
               .accessibilityLabel("\(Format.viewers(viewers)) watching")
           }
           if level < 2, let started = model.stream?.startedAt {
-            Label { UptimeText(since: started) } icon: { Image(systemName: "clock") }
+            Label { UptimeText(since: started, ticking: visible) } icon: { Image(systemName: "clock") }
               .accessibilityLabel("Live for \(Format.uptime(since: started) ?? "")")
           }
         }
@@ -790,11 +800,16 @@ struct StatLabelStyle: LabelStyle {
 /// redraws each second, not the controls around it).
 struct UptimeText: View {
   let since: Date
+  /// Off while it's not on screen (the controls faded out): no redrawing every second for nothing.
+  var ticking = true
 
   var body: some View {
-    TimelineView(.periodic(from: since, by: 1)) { context in
-      Text(Format.clock(Int(max(0, context.date.timeIntervalSince(since)))))
-        .monospacedDigit()
+    if ticking {
+      TimelineView(.periodic(from: since, by: 1)) { context in
+        Text(Format.clock(Int(max(0, context.date.timeIntervalSince(since))))).monospacedDigit()
+      }
+    } else {
+      Text(Format.clock(Int(max(0, Date().timeIntervalSince(since))))).monospacedDigit()
     }
   }
 }
@@ -1232,7 +1247,12 @@ struct PlayerSettingsMenu: View, Equatable {
   var recording: Bool?
   /// This channel is recorded whenever it goes live (see AutoRecorder).
   var autoRecord: Bool
-  var upscale: Bool
+  /// A VOD: qualities it can be downloaded at (empty: not offered), and whether it's downloading.
+  var downloadOptions: [String] = []
+  var downloading = false
+  /// The VOD's length, for how big each download would be.
+  var downloadHours: Double = 0
+  var startDownload: (String) -> Void = { _ in }
   /// Skip muted parts by themselves (nil: the video has none).
   var skipMuted: Bool?
   var select: (PlayerModel.Quality) -> Void
@@ -1242,15 +1262,28 @@ struct PlayerSettingsMenu: View, Equatable {
   var stopRecording: () -> Void
   var scheduleRecording: (Int) -> Void
   var unscheduleRecording: () -> Void
-  var setUpscale: (Bool) -> Void
   var setSkipMuted: (Bool) -> Void
   var opened: () -> Void
+
+  /// Roughly how big a download of that length is at that quality.
+  static func size(_ label: String, hours: Double) -> String {
+    let perHour: Double
+    switch RecordQuality.height(label) ?? 0 {
+    case 1080...: perHour = 3
+    case 720...: perHour = 1.5
+    case 480...: perHour = 0.6
+    case 360...: perHour = 0.3
+    default: perHour = label.lowercased().contains("audio") ? 0.08 : 0.1
+    }
+    let gigabytes = perHour * max(hours, 0.05)
+    return gigabytes >= 1 ? String(format: "≈%.1f GB", gigabytes) : String(format: "≈%.0f MB", gigabytes * 1000)
+  }
 
   static func == (a: Self, b: Self) -> Bool {
     a.qualities == b.qualities && a.selected == b.selected && a.showLowLatency == b.showLowLatency
       && a.lowLatency == b.lowLatency && a.showStats == b.showStats
       && a.recordOptions == b.recordOptions && a.recording == b.recording && a.autoRecord == b.autoRecord
-      && a.upscale == b.upscale && a.skipMuted == b.skipMuted
+      && a.skipMuted == b.skipMuted && a.downloadOptions == b.downloadOptions && a.downloading == b.downloading
   }
 
   var body: some View {
@@ -1304,15 +1337,21 @@ struct PlayerSettingsMenu: View, Equatable {
           Label(recording ? "Recording" : "Record", systemImage: recording ? "record.circle.fill" : "record.circle")
         }
       }
-      Menu {
-        Toggle(isOn: Binding(get: { upscale }, set: setUpscale)) {
-          Label("Upscale (MetalFX)", systemImage: "wand.and.stars")
+      if downloading {
+        Label("Downloading (in Recordings)", systemImage: "arrow.down.circle.fill")
+      } else if !downloadOptions.isEmpty {
+        Menu {
+          Section("Saved on this iPhone to watch offline, in Recordings") {
+            ForEach(downloadOptions, id: \.self) { label in
+              Button("\(label) · \(Self.size(label, hours: downloadHours))") { startDownload(label) }
+            }
+          }
+        } label: {
+          Label("Download", systemImage: "arrow.down.circle")
         }
-        Toggle(isOn: Binding(get: { showStats }, set: setStats)) {
-          Label("Video stats", systemImage: "chart.bar.xaxis")
-        }
-      } label: {
-        Label("More", systemImage: "ellipsis.circle")
+      }
+      Toggle(isOn: Binding(get: { showStats }, set: setStats)) {
+        Label("Video stats", systemImage: "chart.bar.xaxis")
       }
     } label: {
       Image(systemName: "gearshape.fill")

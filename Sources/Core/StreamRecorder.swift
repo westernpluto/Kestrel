@@ -43,6 +43,8 @@ struct RecordingInfo: Codable, Sendable, Identifiable, Equatable {
   /// recording sits in the stream ("from 1:12:40 in").
   var streamStartedAt: Date? = nil
   var firstSegmentAt: Date? = nil
+  /// A downloaded VOD (not a recording of a live stream): the video's id.
+  var videoID: String? = nil
 }
 
 extension RecordingInfo {

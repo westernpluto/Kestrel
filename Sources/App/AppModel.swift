@@ -103,8 +103,6 @@ final class AppSettings: ObservableObject {
   @Published var autoQuality: Bool { didSet { defaults.set(autoQuality, forKey: "autoQuality") } }
   /// Through an ad-free server: move the stream to Twitch's servers near you when they accept it.
   @Published var nearbyServers: Bool { didSet { defaults.set(nearbyServers, forKey: "nearbyServers") } }
-  /// Upscale the picture with MetalFX (see VideoUpscaler).
-  @Published var upscale: Bool { didSet { defaults.set(upscale, forKey: "upscale") } }
   /// VODs: jump past the parts Twitch muted for copyright as playback reaches them.
   @Published var skipMutedParts: Bool { didSet { defaults.set(skipMutedParts, forKey: "skipMutedParts") } }
   // The user's own HTTP proxy (AdBlocking.customProxy).
@@ -138,7 +136,6 @@ final class AppSettings: ObservableObject {
     chatFontSize = defaults.double(forKey: "chatFontSize")
     autoQuality = defaults.bool(forKey: "autoQuality")
     nearbyServers = defaults.bool(forKey: "nearbyServers")
-    upscale = defaults.bool(forKey: "upscale")
     skipMutedParts = defaults.bool(forKey: "skipMutedParts")
     proxyHost = defaults.string(forKey: "proxyHost") ?? ""
     proxyPort = defaults.string(forKey: "proxyPort") ?? ""

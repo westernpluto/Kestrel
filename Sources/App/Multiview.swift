@@ -57,6 +57,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
   private func makePlayer(_ channel: Channel, heard: Bool) -> PlayerModel {
     let player = PlayerModel(target: .live(channel))
     player.isTile = true
+    player.pictureInPictureAllowed = channel.id == selectedID
     player.setMuted(!heard)
     if let volume = volumes[channel.id] { player.setVolume(volume) }
     if hidden { player.setMaxHeight(Self.hiddenHeight) }
@@ -128,6 +129,8 @@ final class MultiviewModel: ObservableObject, Identifiable {
   func select(_ id: String) {
     guard tiles.contains(where: { $0.id == id }) else { return }
     selectedID = id
+    // Picture in Picture follows the picked stream (iOS shows one picture at a time).
+    for tile in tiles { tile.player.pictureInPictureAllowed = tile.id == id }
     if heardIDs.count <= 1 {
       heardIDs = [id]
       applySound()
@@ -147,6 +150,13 @@ final class MultiviewModel: ObservableObject, Identifiable {
   func toggleSound(_ id: String) {
     if heardIDs.contains(id) { heardIDs.remove(id) } else { heardIDs.insert(id) }
     applySound()
+  }
+
+  /// The picked stream in Picture in Picture (the others carry on: heard ones keep their sound).
+  func togglePictureInPicture() {
+    guard running, let selectedID, let tile = tiles.first(where: { $0.id == selectedID }) else { return }
+    tile.player.pictureInPictureAllowed = true
+    tile.player.togglePictureInPicture()
   }
 
   /// Just this one heard.
@@ -194,62 +204,70 @@ struct MultiviewScreen: View {
   /// few seconds so it's just the streams (a tap brings them back).
   @State private var chromeVisible = true
   @State private var hideTask: Task<Void, Never>?
+  /// Pulled down this far (it shrinks toward its corner under the finger, like the player).
+  @State private var pull: CGFloat = 0
 
   private static let spring = Animation.spring(response: 0.4, dampingFraction: 0.86)
 
-  private var minimized: Bool { app.multiviewMinimized }
-
+  /// On screen only while open: tucked away it's the dock (MultiviewDockSpot) and this view is
+  /// gone, the streams carrying on in the model.
   var body: some View {
     GeometryReader { geometry in
       let size = geometry.size
-      let safeBottom = geometry.safeAreaInsets.bottom
-      ZStack(alignment: .topLeading) {
-        if minimized {
-          dockLayer(size: size, safeBottom: safeBottom)
-        } else {
-          expanded(size: size, safeBottom: safeBottom)
-            .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .bottomTrailing)))
-        }
-      }
-      .frame(width: size.width, height: size.height, alignment: .topLeading)
+      expanded(size: size, safeBottom: geometry.safeAreaInsets.bottom)
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
     }
     .ignoresSafeArea(.keyboard)
-    .modifier(ImmersiveChrome(active: !minimized))
-    .animation(Self.spring, value: minimized)
+    .background(Color.black.ignoresSafeArea())
+    .scaleEffect(1 - min(0.3, pull / 1400), anchor: .bottomTrailing)
+    .offset(y: pull * 0.35)
+    .preferredColorScheme(.dark)
+    .statusBarHidden(true)
+    .persistentSystemOverlays(.hidden)
     .sheet(isPresented: $picking, onDismiss: { showChrome() }) { MultiviewPicker(model: model) }
-    .onAppear {
-      if !minimized { opened() } else { model.setHidden(true) }
-    }
-    .onChange(of: minimized) { isMinimized in
-      if isMinimized {
-        Keyboard.dismiss()
-        model.setHidden(true)
-        if app.playing == nil || app.playerMinimized { OrientationLock.playerVisible(false) }
-      } else {
-        opened()
-      }
+    .onAppear(perform: opened)
+    .onDisappear {
+      hideTask?.cancel()
+      model.setHidden(true)
+      if app.playing == nil || app.playerMinimized { OrientationLock.playerVisible(false) }
     }
     .onChange(of: model.wantsPicker) { wants in
-      if wants, !minimized {
+      if wants {
         model.wantsPicker = false
         picking = true
       }
     }
-    // A stream opened on its own: multi-view steps aside into its dock, stopped, until it's
-    // tapped again (one thing plays at a time).
-    .onChange(of: app.playing?.id) { playing in
-      guard playing != nil else { return }
-      model.park()
-      if !minimized { app.multiviewMinimized = true }
+  }
+
+  private func minimize() {
+    Keyboard.dismiss()
+    withAnimation(Self.spring) {
+      app.multiviewMinimized = true
+      pull = 0
     }
-    .onDisappear {
-      model.stopAll()
-      if app.playing == nil || app.playerMinimized { OrientationLock.playerVisible(false) }
-    }
+  }
+
+  /// Pull down on the pictures to tuck multi-view away (it follows the finger), like the player.
+  private var pullDown: some Gesture {
+    DragGesture(minimumDistance: 16, coordinateSpace: .global)
+      .onChanged { value in
+        let dy = value.translation.height
+        guard pull > 0 || (dy > 10 && dy > abs(value.translation.width) * 1.3) else { return }
+        pull = max(0, dy)
+      }
+      .onEnded { value in
+        guard pull > 0 else { return }
+        if pull > 110 || value.predictedEndTranslation.height > 260 {
+          minimize()
+        } else {
+          withAnimation(Self.spring) { pull = 0 }
+        }
+      }
   }
 
   /// On screen: playing, turnable, the picker up if there's hardly anything to watch yet.
   private func opened() {
+    pull = 0
     if app.playing != nil { app.playing = nil }
     OrientationLock.playerVisible(true)
     model.setHidden(false)
@@ -276,51 +294,54 @@ struct MultiviewScreen: View {
     let chrome = chromeVisible || keyboard.overlap > 0 || model.tiles.isEmpty
 
     ZStack(alignment: .topLeading) {
-      Color.black
-        .frame(width: size.width, height: size.height + safeBottom)
-        .contentShape(Rectangle())
-        .onTapGesture {
-          Keyboard.dismiss()
-          showChrome()
-        }
+      ZStack(alignment: .topLeading) {
+        Color.black
+          .frame(width: size.width, height: size.height + safeBottom)
+          .contentShape(Rectangle())
+          .onTapGesture {
+            Keyboard.dismiss()
+            showChrome()
+          }
 
-      if model.tiles.isEmpty {
-        emptyState
-          .frame(width: areas.grid.width, height: areas.grid.height)
-          .offset(x: areas.grid.minX, y: areas.grid.minY)
+        if model.tiles.isEmpty {
+          emptyState
+            .frame(width: areas.grid.width, height: areas.grid.height)
+            .offset(x: areas.grid.minX, y: areas.grid.minY)
+        }
+        ForEach(Array(model.tiles.enumerated()), id: \.element.id) { index, tile in
+          let rect = index < rects.count ? rects[index] : .zero
+          MultiviewTileView(
+            player: tile.player, channel: tile.channel, heard: model.heardIDs.contains(tile.id),
+            selected: tile.id == model.selectedID, volume: model.volume(tile.id),
+            several: model.heardIDs.count > 1 || (model.heardIDs.count == 1 && !model.heardIDs.contains(tile.id)),
+            chrome: chrome,
+            tap: {
+              // The first tap just brings the controls back; with them showing, it picks the stream.
+              if chromeVisible { withAnimation(Self.spring) { model.select(tile.id) } }
+              showChrome()
+            },
+            toggleSound: {
+              model.toggleSound(tile.id)
+              showChrome()
+            },
+            listenOnly: { withAnimation(Self.spring) { model.listenOnly(tile.id) } },
+            setVolume: { model.setVolume($0, for: tile.id) },
+            makeMain: {
+              withAnimation(Self.spring) {
+                model.select(tile.id)
+                focus = true
+              }
+              showChrome()
+            },
+            openInPlayer: { app.playing = .live(tile.channel) },
+            remove: { withAnimation(Self.spring) { model.remove(tile.id) } }
+          )
+          .frame(width: rect.width, height: rect.height)
+          .offset(x: areas.grid.minX + rect.minX, y: areas.grid.minY + rect.minY)
+          .transition(.opacity.combined(with: .scale(scale: 0.92)))
+        }
       }
-      ForEach(Array(model.tiles.enumerated()), id: \.element.id) { index, tile in
-        let rect = index < rects.count ? rects[index] : .zero
-        MultiviewTileView(
-          player: tile.player, channel: tile.channel, heard: model.heardIDs.contains(tile.id),
-          selected: tile.id == model.selectedID, volume: model.volume(tile.id),
-          several: model.heardIDs.count > 1 || (model.heardIDs.count == 1 && !model.heardIDs.contains(tile.id)),
-          chrome: chrome,
-          tap: {
-            // The first tap just brings the controls back; with them showing, it picks the stream.
-            if chromeVisible { withAnimation(Self.spring) { model.select(tile.id) } }
-            showChrome()
-          },
-          toggleSound: {
-            model.toggleSound(tile.id)
-            showChrome()
-          },
-          listenOnly: { withAnimation(Self.spring) { model.listenOnly(tile.id) } },
-          setVolume: { model.setVolume($0, for: tile.id) },
-          makeMain: {
-            withAnimation(Self.spring) {
-              model.select(tile.id)
-              focus = true
-            }
-            showChrome()
-          },
-          openInPlayer: { app.playing = .live(tile.channel) },
-          remove: { withAnimation(Self.spring) { model.remove(tile.id) } }
-        )
-        .frame(width: rect.width, height: rect.height)
-        .offset(x: areas.grid.minX + rect.minX, y: areas.grid.minY + rect.minY)
-        .transition(.opacity.combined(with: .scale(scale: 0.92)))
-      }
+      .simultaneousGesture(pullDown)
 
       if let chat = model.chat, showChat {
         // Down to the window's bottom edge, like the player's chat: the message box keeps clear
@@ -420,9 +441,7 @@ struct MultiviewScreen: View {
 
   private var topBar: some View {
     HStack(spacing: 2) {
-      barButton("chevron.down", label: "Tuck multi-view away") {
-        withAnimation(Self.spring) { app.multiviewMinimized = true }
-      }
+      barButton("chevron.down", label: "Tuck multi-view away") { minimize() }
       Text("Multi-view").font(.headline)
       Text("\(model.tiles.count)/\(MultiviewModel.maxTiles)").font(.subheadline.monospacedDigit()).foregroundColor(.secondary)
         .padding(.leading, 4)
@@ -439,6 +458,12 @@ struct MultiviewScreen: View {
       if model.chat != nil {
         barButton(chatShown ? "bubble.left.fill" : "bubble.left", label: chatShown ? "Hide chat" : "Show chat", highlighted: chatShown) {
           chatShown.toggle()
+          showChrome()
+        }
+      }
+      if AVPictureInPictureController.isPictureInPictureSupported(), model.selectedID != nil {
+        barButton("pip.enter", label: "Picture in Picture (the picked stream)") {
+          model.togglePictureInPicture()
           showChrome()
         }
       }
@@ -500,31 +525,63 @@ struct MultiviewScreen: View {
     }
     .padding(24)
   }
+}
 
-  // MARK: Tucked away
+/// Where the dock sits while multi-view is tucked away: the mini player's corner (above the mini
+/// player when a stream's in it too). It's laid over the app's tabs on its own, so everything else
+/// on screen stays usable. Tap or swipe it up to open multi-view; throw it aside to close it.
+struct MultiviewDockSpot: View {
+  @ObservedObject var model: MultiviewModel
+  @EnvironmentObject private var app: AppModel
+  @State private var drag: CGSize = .zero
 
-  /// The dock where the mini player sits (above it when a stream is in the mini player too).
-  @ViewBuilder
-  private func dockLayer(size: CGSize, safeBottom: CGFloat) -> some View {
-    let mini = PlayerLayout.mini(safe: size, bottomInset: safeBottom, tabBar: app.tabBarHeight)
-    let playerShowing = app.playing != nil && !app.playerMinimized
-    let bottom = app.playing != nil ? mini.minY - 10 : mini.maxY
-    MultiviewDock(
-      model: model,
-      open: {
-        withAnimation(Self.spring) {
-          if app.playing != nil { app.playing = nil }
-          app.multiviewMinimized = false
-        }
-      },
-      close: { withAnimation(Self.spring) { app.closeMultiview() } }
-    )
-    .fixedSize()
-    .frame(width: size.width - 20, height: max(0, bottom), alignment: .bottomTrailing)
-    .offset(x: 10, y: 0)
-    .opacity(playerShowing ? 0 : 1)
-    .allowsHitTesting(!playerShowing)
-    .transition(.opacity.combined(with: .scale(scale: 0.6, anchor: .bottomTrailing)))
+  private static let spring = Animation.spring(response: 0.4, dampingFraction: 0.86)
+
+  var body: some View {
+    let window = AppWindow.current
+    let insets = window?.safeAreaInsets ?? .zero
+    let bounds = window?.bounds.size ?? AppWindow.bounds.size
+    let safeWidth = bounds.width - insets.left - insets.right
+    // The same corner as the mini player (see PlayerLayout.mini), measured from the safe area.
+    let covered = app.tabBarHeight > 0 ? max(app.tabBarHeight, 49 + insets.bottom) : insets.bottom
+    let miniHeight = (min(safeWidth, 520) * 0.5 * 9 / 16).rounded()
+    let bottom = covered - insets.bottom + 10 + (app.playing != nil ? miniHeight + 10 : 0)
+    MultiviewDock(model: model, open: open, close: close)
+      .offset(drag)
+      .simultaneousGesture(
+        DragGesture(minimumDistance: 10, coordinateSpace: .global)
+          .onChanged { drag = $0.translation }
+          .onEnded { value in
+            let predicted = value.predictedEndTranslation
+            if value.translation.height < -50 || predicted.height < -180 {
+              open()
+            } else if abs(predicted.width) > 160 || predicted.height > 140 {
+              // Thrown away, like the mini player.
+              withAnimation(.easeOut(duration: 0.22)) {
+                drag = CGSize(
+                  width: abs(predicted.width) > 160 ? (predicted.width > 0 ? 1 : -1) * bounds.width : 0,
+                  height: predicted.height > 140 ? 300 : 0)
+              }
+              DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { close() }
+            } else {
+              withAnimation(Self.spring) { drag = .zero }
+            }
+          }
+      )
+      .padding(.trailing, 10)
+      .padding(.bottom, max(10, bottom))
+  }
+
+  private func open() {
+    withAnimation(Self.spring) {
+      drag = .zero
+      if app.playing != nil { app.playing = nil }
+      app.multiviewMinimized = false
+    }
+  }
+
+  private func close() {
+    withAnimation(Self.spring) { app.closeMultiview() }
   }
 }
 
@@ -616,23 +673,6 @@ private struct SoundBadge: View {
     .frame(width: 16, height: 16)
     .background(Color.accentTeal, in: Circle())
     .overlay(Circle().stroke(Color.black.opacity(0.6), lineWidth: 1))
-  }
-}
-
-/// Multi-view on screen hides the status bar and the home indicator; tucked away it leaves them be.
-private struct ImmersiveChrome: ViewModifier {
-  let active: Bool
-
-  func body(content: Content) -> some View {
-    if active {
-      content
-        .background(Color.black.ignoresSafeArea())
-        .preferredColorScheme(.dark)
-        .statusBarHidden(true)
-        .persistentSystemOverlays(.hidden)
-    } else {
-      content
-    }
   }
 }
 

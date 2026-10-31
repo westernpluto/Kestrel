@@ -41,14 +41,24 @@ struct StatsOverlay: View {
 
   var body: some View {
     ViewThatFits {
-      panel(columns: 1, size: 10)
-      panel(columns: 2, size: 9)
-      panel(columns: 2, size: 7.5)
-      panel(columns: 3, size: 7)
+      panel(lines, columns: 1, size: 10)
+      panel(lines, columns: 2, size: 9)
+      panel(lines, columns: 2, size: 7.5)
+      panel(lines, columns: 3, size: 7)
+      // Not enough room for all of it: what matters most, smaller.
+      panel(essentials, columns: 2, size: 7)
+      panel(essentials, columns: 1, size: 6.5)
     }
   }
 
-  private func panel(columns: Int, size: CGFloat) -> some View {
+  /// The lines worth keeping when there's no room for the rest.
+  private var essentials: [StatLine] {
+    let keep: Set<String> = ["Quality", "Resolution", "Frame rate", "Bitrate", "Buffer", "Latency", "Speed", "Margin", "Frames"]
+    let picked = lines.filter { keep.contains($0.label) }
+    return picked.isEmpty ? Array(lines.prefix(8)) : picked
+  }
+
+  private func panel(_ lines: [StatLine], columns: Int, size: CGFloat) -> some View {
     let perColumn = max(1, Int((Double(lines.count) / Double(columns)).rounded(.up)))
     let groups = stride(from: 0, to: lines.count, by: perColumn).map { Array(lines[$0..<min($0 + perColumn, lines.count)]) }
     return HStack(alignment: .top, spacing: 12) {

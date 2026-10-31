@@ -289,6 +289,27 @@ final class ChatController: ObservableObject {
     running = false
     socket?.cancel(with: .goingAway, reason: nil)
     socket = nil
+    if let returnToken { NotificationCenter.default.removeObserver(returnToken) }
+    returnToken = nil
+  }
+
+  private var returnToken: NSObjectProtocol?
+
+  /// Messages held while in the background go on screen as soon as the app's back.
+  private func watchForReturn() {
+    guard returnToken == nil else { return }
+    returnToken = NotificationCenter.default.addObserver(
+      forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      guard let chat = self else { return }
+      Task { @MainActor in chat.returned() }
+    }
+  }
+
+  private func returned() {
+    if let returnToken { NotificationCenter.default.removeObserver(returnToken) }
+    returnToken = nil
+    flush()
   }
 
   /// After signing in or out.
@@ -483,6 +504,13 @@ final class ChatController: ObservableObject {
   private func flush() {
     flushScheduled = false
     guard !pending.isEmpty else { return }
+    // In the background nothing's on screen: keep collecting (no laying out and measuring
+    // messages nobody sees) and hand them all over on the way back.
+    if UIApplication.shared.applicationState == .background {
+      if pending.count > maxMessages { pending.removeFirst(pending.count - maxMessages) }
+      watchForReturn()
+      return
+    }
     messages.append(contentsOf: pending)
     pending.removeAll()
     if messages.count > maxMessages { messages.removeFirst(messages.count - maxMessages) }
@@ -1070,7 +1098,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   private func startGlide() {
     guard glide == nil else { return }
     let link = CADisplayLink(target: GlideTarget(self), selector: #selector(GlideTarget.step(_:)))
-    if #available(iOS 15.0, *) { link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120) }
+    // 60 a second is smooth for text sliding up; asking for ProMotion's 120 kept the screen at its
+    // most power-hungry rate the whole time a busy chat moved.
+    if #available(iOS 15.0, *) { link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60) }
     lastGlideFrame = 0
     link.add(to: .main, forMode: .common)
     glide = link

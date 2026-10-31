@@ -304,6 +304,7 @@ final class KeyboardObserver: ObservableObject {
   /// The keyboard's height the last time it was up (the emote picker takes its place).
   private(set) static var lastHeight: CGFloat?
   private static var lastNoAnimationLog = Date.distantPast
+  private static var lastLandscapeHideLog = Date.distantPast
   private var tokens: [NSObjectProtocol] = []
 
   /// The keyboard's own motion: UIKit runs it on a stiff spring squeezed into the notification's
@@ -350,6 +351,19 @@ final class KeyboardObserver: ObservableObject {
     {
       Self.lastNoAnimationLog = Date()
       ActivityLog.shared.add("Keyboard \(value > 0 ? "came up" : "went away") without its slide (iOS reported no animation)")
+    }
+    // For the record (Settings › Activity log): how iOS says it puts the keyboard away in
+    // landscape, where it's been seen to vanish at once (portrait slides fine).
+    if hiding, note.name == UIResponder.keyboardWillHideNotification, bounds.width > bounds.height, overlap > 40,
+      Date().timeIntervalSince(Self.lastLandscapeHideLog) > 30
+    {
+      Self.lastLandscapeHideLog = Date()
+      let curve = (note.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? NSNumber)?.intValue ?? -1
+      let local = (note.userInfo?[UIResponder.keyboardIsLocalUserInfoKey] as? NSNumber)?.boolValue ?? true
+      ActivityLog.shared.add(
+        String(
+          format: "Keyboard away in landscape: iOS says %.2f s, curve %d, %.0f pt, end %.0f×%.0f at y %.0f, %@",
+          duration, curve, overlap, end.width, end.height, frame.minY, local ? "this app's" : "another app's"))
     }
     guard abs(value - overlap) > 0.5 else { return }
     // "Did" notifications only correct a missed "will"; a zero duration means the keyboard itself
@@ -1105,6 +1119,9 @@ struct PlayerScreen: View {
     .onChange(of: app.playerMinimized) { minimized in
       // The app is portrait; only the full-screen player turns.
       OrientationLock.playerVisible(!minimized)
+      // The mini player is small: on Auto, nothing sharper than it shows is fetched or decoded
+      // (less data and battery); full size again on the way back.
+      model.setMaxHeight(minimized ? 480 : nil)
       if minimized {
         dismissKeyboard()
         largeFullScreen = false

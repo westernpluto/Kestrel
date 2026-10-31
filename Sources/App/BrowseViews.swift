@@ -146,20 +146,14 @@ final class LiveIndex {
     if !force, !streams.isEmpty, Date().timeIntervalSince(fetchedAt) < 120 { return streams }
     if let loading { return await loading.value }
     let task = Task { () -> [LiveStream] in
+      // Twitch's own page size (bigger pages came back empty).
       var all: [LiveStream] = []
       var cursor: String?
-      // Big pages if Twitch allows them, its usual ones if not.
-      var size = 100
-      for _ in 0..<6 {
-        do {
-          let page = try await TwitchAPI.shared.topStreams(after: cursor, first: size)
-          all += page.items
-          cursor = page.cursor
-          if !page.hasNextPage || cursor == nil || all.count >= 200 { break }
-        } catch {
-          guard size > 30, all.isEmpty else { break }
-          size = 30
-        }
+      for _ in 0..<7 {
+        guard let page = try? await TwitchAPI.shared.topStreams(after: cursor, first: 30), !page.items.isEmpty else { break }
+        all += page.items
+        cursor = page.cursor
+        if !page.hasNextPage || cursor == nil || all.count >= 200 { break }
       }
       return all
     }
@@ -270,10 +264,20 @@ final class SearchModel: ObservableObject {
     }
   }
 
-  /// What's on before anything's typed.
+  /// Couldn't fetch what's on (shown with a retry instead of a spinner that never ends).
+  @Published private(set) var topError: String?
+
+  /// What's on before anything's typed: the first page straight away (the index for searching
+  /// titles and tags fills in behind it).
   func loadTop(force: Bool = false) async {
-    let live = await LiveIndex.shared.load(force: force)
-    top = Array(live.prefix(30))
+    do {
+      let page = try await TwitchAPI.shared.topStreams(first: 30)
+      top = page.items
+      topError = page.items.isEmpty ? "Nothing live came back from Twitch." : nil
+    } catch {
+      if top.isEmpty { topError = error.localizedDescription }
+    }
+    Task { _ = await LiveIndex.shared.load(force: force) }
   }
 
   /// Back on the search after a while: fetch the results again (live or not, viewers).
@@ -332,6 +336,8 @@ struct SearchView: View {
           } header: {
             Text("Live now")
           }
+        } else if let error = model.topError {
+          ErrorBanner(message: error) { Task { await model.loadTop(force: true) } }
         } else {
           ProgressView().frame(maxWidth: .infinity).padding(.vertical, 30).listRowBackground(Color.clear)
         }

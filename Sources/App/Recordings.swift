@@ -12,9 +12,12 @@ final class RecordingStore: ObservableObject {
 
   /// Newest first.
   @Published private(set) var recordings: [RecordingInfo] = []
-  /// Recordings being made, by id.
+  /// Recordings being made (and VODs downloading), by id.
   @Published private(set) var active: [String: RecorderStatus.State] = [:]
+  /// VODs downloading: how far along (0…1), by id.
+  @Published private(set) var downloadProgress: [String: Double] = [:]
   private var recorders: [String: StreamRecorder] = [:]
+  private var downloaders: [String: VODDownloader] = [:]
   let root: URL
   private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
   private var tokens: [NSObjectProtocol] = []
@@ -48,7 +51,7 @@ final class RecordingStore: ObservableObject {
     var list: [RecordingInfo] = []
     for folder in folders {
       let id = folder.lastPathComponent
-      if recorders[id] != nil, let current = recordings.first(where: { $0.id == id }) {
+      if recorders[id] != nil || downloaders[id] != nil, let current = recordings.first(where: { $0.id == id }) {
         list.append(current)
       } else if let info = StreamRecorder.finishInterrupted(in: folder) {
         list.append(info)
@@ -60,7 +63,91 @@ final class RecordingStore: ObservableObject {
   /// The recording being made of this channel, if any.
   func recording(of login: String) -> RecordingInfo? {
     let login = login.lowercased()
-    return recordings.first { $0.login == login && active[$0.id] != nil }
+    return recordings.first { $0.login == login && $0.videoID == nil && active[$0.id] != nil }
+  }
+
+  // MARK: Downloading VODs
+
+  /// The download of this video going on, if any.
+  func download(of videoID: String) -> RecordingInfo? {
+    recordings.first { $0.videoID == videoID && active[$0.id] != nil }
+  }
+
+  /// Downloads a VOD at a quality ("720p60"), into the list with the recordings.
+  func download(_ video: Video, quality label: String) {
+    guard download(of: video.id) == nil else { return }
+    let owner = video.owner ?? Channel(id: "", login: "twitch", displayName: "Twitch", profileImageURL: nil)
+    let id = "vod-\(video.id)-\(Int(Date().timeIntervalSince1970))"
+    let info = RecordingInfo(
+      id: id, login: owner.login.lowercased(), channelName: owner.name, channelID: owner.id.isEmpty ? nil : owner.id,
+      profileImageURL: owner.profileImageURL, title: video.title, category: video.categoryName, quality: label,
+      startedAt: Date(), endedAt: nil, duration: 0, bytes: 0, gaps: 0, endReason: nil,
+      streamStartedAt: video.createdAt, firstSegmentAt: video.createdAt, videoID: video.id)
+    recordings.insert(info, at: 0)
+    active[id] = .starting
+    downloadProgress[id] = 0
+    keepAwake()
+    Task {
+      do {
+        let variant = try await Self.vodRendition(videoID: video.id, label: label)
+        guard let url = URL(string: variant.uri) else { throw PlayerModel.VODError(errorDescription: "No address for \(label).") }
+        var started = info
+        started.quality = variant.label
+        let downloader = VODDownloader(
+          info: started, playlistURL: url, directory: root.appendingPathComponent(id, isDirectory: true),
+          http: AppSettings.shared.playbackClient(timeout: 30)
+        ) { [weak self] status, done in
+          Task { @MainActor in self?.updateDownload(status, done: done) }
+        }
+        downloaders[id] = downloader
+        await downloader.start()
+      } catch {
+        ActivityLog.shared.add("Couldn't download \(owner.name)'s video: \(error.localizedDescription)")
+        var failed = info
+        failed.endedAt = Date()
+        failed.endReason = "Couldn't start: \(error.localizedDescription)"
+        updateDownload(RecorderStatus(state: .ended, info: failed), done: 0)
+      }
+    }
+  }
+
+  /// The VOD's rendition with that label (or the best, if it's gone).
+  private static func vodRendition(videoID: String, label: String) async throws -> HLSVariant {
+    let token = try await TwitchAPI.shared.videoToken(id: videoID)
+    let url = Usher.vod(id: videoID, token: token, codecs: AppSettings.shared.codecs)
+    let (data, response) = try await URLSessionHTTPClient(timeout: 15).data(for: Usher.playlistRequest(url))
+    guard response.statusCode == 200, let text = String(data: data, encoding: .utf8), HLS.looksLikePlaylist(data) else {
+      throw PlayerModel.VODError(
+        errorDescription: response.statusCode == 403
+          ? "This video is restricted (subscribers only or region locked)." : "Twitch returned HTTP \(response.statusCode).")
+    }
+    let master = HLSMaster.parse(text, base: response.url ?? url)
+    let variants = master.videoVariants + (master.audioVariant.map { [$0] } ?? [])
+    guard let pick = variants.first(where: { $0.label == label }) ?? variants.first else {
+      throw PlayerModel.VODError(errorDescription: "No playable qualities were found.")
+    }
+    return pick
+  }
+
+  private func updateDownload(_ status: RecorderStatus, done: Double) {
+    let id = status.info.id
+    if let index = recordings.firstIndex(where: { $0.id == id }) { recordings[index] = status.info }
+    if status.state == .ended {
+      active[id] = nil
+      downloadProgress[id] = nil
+      downloaders[id] = nil
+      if status.info.duration == 0 {
+        // Nothing came down: don't leave an empty entry behind.
+        recordings.removeAll { $0.id == id }
+        try? FileManager.default.removeItem(at: root.appendingPathComponent(id, isDirectory: true))
+      }
+      AutoRecorder.shared.updateKeepAlive()
+    } else {
+      if active[id] != status.state { active[id] = status.state }
+      // (Whole percents: the list doesn't need to redraw for every part.)
+      if (downloadProgress[id].map { Int($0 * 100) } ?? -1) != Int(done * 100) { downloadProgress[id] = done }
+    }
+    keepAwake()
   }
 
   func isRecording(_ login: String) -> Bool { recording(of: login) != nil }
@@ -102,6 +189,10 @@ final class RecordingStore: ObservableObject {
 
   /// Stopped by hand.
   func stop(_ id: String) {
+    if let downloader = downloaders[id] {
+      Task { await downloader.stop() }
+      return
+    }
     guard let recorder = recorders[id] else { return }
     Task { await recorder.stop(byUser: true) }
   }
@@ -115,6 +206,8 @@ final class RecordingStore: ObservableObject {
 
   func delete(_ info: RecordingInfo) {
     if let recorder = recorders.removeValue(forKey: info.id) { Task { await recorder.stop() } }
+    if let downloader = downloaders.removeValue(forKey: info.id) { Task { await downloader.stop() } }
+    downloadProgress[info.id] = nil
     active[info.id] = nil
     recordings.removeAll { $0.id == info.id }
     try? FileManager.default.removeItem(at: root.appendingPathComponent(info.id, isDirectory: true))
@@ -268,14 +361,14 @@ struct RecordingsView: View {
 
       Section {
         if store.recordings.isEmpty {
-          Text("No recordings yet. Record a live stream from the player's gear menu, or schedule a channel above.")
+          Text("Nothing saved yet. Record a live stream or download a video from the player's gear menu, or schedule a channel above.")
             .font(.subheadline).foregroundColor(.secondary)
         }
         ForEach(store.recordings) { info in
           Button {
             play(info)
           } label: {
-            RecordingRow(info: info, state: store.active[info.id])
+            RecordingRow(info: info, state: store.active[info.id], progress: store.downloadProgress[info.id])
           }
           .buttonStyle(.plain)
           .swipeActions(edge: .trailing) {
@@ -295,7 +388,7 @@ struct RecordingsView: View {
           }
         }
       } header: {
-        Text("Recordings")
+        Text("Recordings and downloads")
       } footer: {
         if !store.recordings.isEmpty {
           Text(
@@ -327,6 +420,8 @@ struct RecordingsView: View {
 struct RecordingRow: View {
   let info: RecordingInfo
   let state: RecorderStatus.State?
+  /// A VOD downloading: how far along.
+  var progress: Double? = nil
 
   var body: some View {
     HStack(spacing: 12) {
@@ -334,7 +429,15 @@ struct RecordingRow: View {
       VStack(alignment: .leading, spacing: 3) {
         HStack(spacing: 6) {
           Text(info.channelName).font(.headline).lineLimit(1)
-          if let state { badge(state) }
+          if let progress {
+            Label("\(Int(progress * 100))%", systemImage: "arrow.down.circle.fill")
+              .font(.caption2.weight(.heavy).monospacedDigit()).foregroundColor(.accentTeal).labelStyle(.titleAndIcon)
+          } else if info.videoID != nil {
+            Image(systemName: "arrow.down.circle").font(.caption).foregroundColor(.secondary)
+              .accessibilityLabel("Downloaded video")
+          } else if let state {
+            badge(state)
+          }
         }
         if let title = info.title, !title.isEmpty {
           Text(title).font(.subheadline).foregroundColor(.secondary).lineLimit(1)
@@ -394,7 +497,8 @@ struct RecordingPlayerScreen: View {
   @State private var hideTask: Task<Void, Never>? = nil
   @State private var fill = false
 
-  private var recording: Bool { store.active[info.id] != nil }
+  /// Still being recorded (a VOD still downloading plays like a finished video, just shorter).
+  private var recording: Bool { store.active[info.id] != nil && info.videoID == nil }
 
   var body: some View {
     GeometryReader { geometry in
