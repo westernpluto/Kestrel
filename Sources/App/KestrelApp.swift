@@ -187,9 +187,9 @@ enum KeyboardSlide {
   /// turn of the main loop, so no frame shows neither) slides it off.
   static func prepare() -> (() -> Void)? {
     guard #available(iOS 26, *), let frame = KeyboardObserver.visibleFrame, frame.height > 60,
-      let window = AppWindow.current, let screen = window.windowScene?.screen,
-      let snapshot = screen.snapshotView(afterScreenUpdates: false)
+      let window = AppWindow.current, let screen = window.windowScene?.screen
     else { return nil }
+    let snapshot = screen.snapshotView(afterScreenUpdates: false)
     let holder = UIView(frame: frame)
     holder.clipsToBounds = true
     holder.isUserInteractionEnabled = false
