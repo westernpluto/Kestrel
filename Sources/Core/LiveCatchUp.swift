@@ -22,6 +22,9 @@ struct LiveCatchUp: Sendable {
   private var holdUntil: Date
   /// Smooth playback since then (the margin shrinks a step each `relaxAfter`).
   private var smoothSince: Date
+  /// Never less than this in hand (a stream that keeps running dry: see StreamSteadiness); while
+  /// set, catching up is only ever gentle.
+  private(set) var floor: Double = 0
 
   static let minBuffer = 0.7
   static let maxBuffer = 2.0
@@ -54,7 +57,7 @@ struct LiveCatchUp: Sendable {
       return rate
     }
     if now.timeIntervalSince(smoothSince) > Self.relaxAfter {
-      targetBuffer = max(Self.minBuffer, targetBuffer - 0.1)
+      targetBuffer = max(Self.minBuffer, floor, targetBuffer - 0.1)
       smoothSince = now
     }
     // Already about as close as it gets: don't push it.
@@ -74,13 +77,19 @@ struct LiveCatchUp: Sendable {
     } else {
       next = 1
     }
-    rate = min(next, maxRate)
+    rate = min(next, maxRate, floor > 0 ? Self.rates.gentle : next)
     return rate
+  }
+
+  /// Keeps at least `seconds` in hand from now on (0: back to normal, creeping down from there).
+  mutating func setFloor(_ seconds: Double) {
+    floor = max(0, seconds)
+    if floor > 0 { targetBuffer = max(targetBuffer, floor) }
   }
 
   /// The player ran out of video: keep more in hand from now on, and leave it be for a while.
   mutating func stalled(now: Date = Date()) {
-    targetBuffer = min(Self.maxBuffer, targetBuffer + 0.3)
+    targetBuffer = min(max(Self.maxBuffer, floor + 1.5), targetBuffer + 0.3)
     rate = 1
     holdUntil = now.addingTimeInterval(8)
     smoothSince = now

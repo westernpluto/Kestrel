@@ -820,7 +820,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     tableView.dataSource = self
     tableView.delegate = self
     tableView.register(ChatCell.self, forCellReuseIdentifier: "chat")
-    tableView.keyboardDismissMode = .onDrag
+    // Scrolling chat puts the keyboard away (by Kestrel, in scrollViewWillBeginDragging, so it
+    // slides: see KeyboardSlide).
+    tableView.keyboardDismissMode = .none
     // Chat lays itself out (the panel already keeps clear of the Dynamic Island): without these the
     // list added the screen's side margin again, leaving an empty strip beside the text.
     tableView.insetsContentViewsToSafeArea = false
@@ -1208,6 +1210,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   }
 
   func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+    Keyboard.dismiss()
     releaseMenuHold()
     following = false
     stopGlide()

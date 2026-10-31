@@ -303,12 +303,15 @@ final class KeyboardObserver: ObservableObject {
   @Published private(set) var overlap: CGFloat = 0
   /// The keyboard's height the last time it was up (the emote picker takes its place).
   private(set) static var lastHeight: CGFloat?
+  /// Where the keyboard is while it's up (window coordinates), for KeyboardSlide.
+  private(set) static var visibleFrame: CGRect?
+  /// How long the keyboard's moves take (from its last notification).
+  private(set) static var slideDuration: Double = 0.4
   private var tokens: [NSObjectProtocol] = []
 
   /// The keyboard's own motion: UIKit runs it on a stiff spring squeezed into the notification's
   /// duration, which comes out as a sharp ease-out. (The same spring at its natural pace, used
-  /// before, took over a second to settle: the message box trailed far behind the keyboard, and
-  /// the keyboard looked like it vanished instead of sliding away.)
+  /// before, took over a second to settle: the message box trailed far behind the keyboard.)
   static func animation(duration: Double) -> Animation {
     .timingCurve(0.16, 1, 0.3, 1, duration: max(0.25, duration) * 1.6)
   }
@@ -343,8 +346,12 @@ final class KeyboardObserver: ObservableObject {
     // Never more than the keyboard can be (guards against a bogus frame).
     let value = hiding ? 0 : min(bounds.height * 0.62, max(0, bounds.maxY - frame.minY))
     if value > 40 { Self.lastHeight = value }
+    Self.visibleFrame = value > 40 ? frame : nil
+    var duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
+    if duration > 0.01, value > 0 { Self.slideDuration = max(0.25, duration) * 1.6 }
     guard abs(value - overlap) > 0.5 else { return }
-    let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
+    // A picture of the keyboard is sliding off (KeyboardSlide): move with it.
+    if hiding, KeyboardSlide.sliding { duration = max(duration, 0.25) }
     // "Did" notifications only correct a missed "will"; a zero duration means the keyboard itself
     // isn't animating (moving with it is the point).
     if note.name == UIResponder.keyboardDidChangeFrameNotification || duration <= 0.01 {

@@ -155,9 +155,8 @@ struct KeyboardDismisser: UIViewRepresentable {
   }
 }
 
-/// Puts the keyboard away. Always on the next turn of the main loop: asked from inside a SwiftUI
-/// gesture or update, UIKit could skip the keyboard's slide, and it vanished at once (in landscape
-/// most of all, where a tap on the video is the usual way to put it away).
+/// Puts the keyboard away, on the next turn of the main loop (not from inside a SwiftUI gesture or
+/// update), sliding down with the message box (see KeyboardSlide).
 enum Keyboard {
   private static var pending = false
 
@@ -166,7 +165,50 @@ enum Keyboard {
     pending = true
     DispatchQueue.main.async {
       pending = false
-      FirstResponder.current?.resignFirstResponder()
+      guard let responder = FirstResponder.current else { return }
+      let slide = KeyboardSlide.prepare()
+      responder.resignFirstResponder()
+      slide?()
+    }
+  }
+}
+
+/// iOS 26 and later drop the keyboard at once, without its slide, when an app puts it away (an iOS
+/// bug, reported to Apple as FB20611108; the keyboard's own hide key still slides). The message box
+/// slid down on its own under a keyboard that had already vanished. So just before putting it away,
+/// Kestrel takes a picture of the keyboard and slides that down instead, on the same curve as the
+/// message box, then drops it. (Main thread only, like the rest of the keyboard handling.)
+enum KeyboardSlide {
+  /// A slide is under way (the message box moves with it even if iOS says the keyboard didn't
+  /// animate).
+  private(set) static var sliding = false
+
+  /// Takes the picture; the returned closure (run right after the keyboard is put away, in the same
+  /// turn of the main loop, so no frame shows neither) slides it off.
+  static func prepare() -> (() -> Void)? {
+    guard #available(iOS 26, *), let frame = KeyboardObserver.visibleFrame, frame.height > 60,
+      let window = AppWindow.current, let screen = window.windowScene?.screen,
+      let snapshot = screen.snapshotView(afterScreenUpdates: false)
+    else { return nil }
+    let holder = UIView(frame: frame)
+    holder.clipsToBounds = true
+    holder.isUserInteractionEnabled = false
+    let screenOrigin = window.convert(CGPoint.zero, from: screen.coordinateSpace)
+    snapshot.frame = CGRect(
+      x: screenOrigin.x - frame.minX, y: screenOrigin.y - frame.minY, width: screen.bounds.width, height: screen.bounds.height)
+    holder.addSubview(snapshot)
+    sliding = true
+    return {
+      window.addSubview(holder)
+      let animator = UIViewPropertyAnimator(
+        duration: KeyboardObserver.slideDuration,
+        timingParameters: UICubicTimingParameters(controlPoint1: CGPoint(x: 0.16, y: 1), controlPoint2: CGPoint(x: 0.3, y: 1)))
+      animator.addAnimations { holder.transform = CGAffineTransform(translationX: 0, y: frame.height + 10) }
+      animator.addCompletion { _ in
+        holder.removeFromSuperview()
+        sliding = false
+      }
+      animator.startAnimation()
     }
   }
 }

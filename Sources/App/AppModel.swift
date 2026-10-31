@@ -66,6 +66,32 @@ enum PlaybackMemory {
   }
 }
 
+/// Channels whose stream kept running dry lately (see StreamSteadiness): the low-latency player
+/// starts them with a few seconds in hand, for a day.
+enum UnsteadyChannels {
+  private static let key = "kestrel.unsteadyChannels"
+  private static let keepFor: TimeInterval = 24 * 3600
+
+  static func contains(_ login: String) -> Bool {
+    let all = UserDefaults.standard.dictionary(forKey: key) as? [String: Date] ?? [:]
+    return all[login.lowercased()].map { Date().timeIntervalSince($0) < keepFor } ?? false
+  }
+
+  static func mark(_ login: String) {
+    var all = (UserDefaults.standard.dictionary(forKey: key) as? [String: Date] ?? [:]).filter {
+      Date().timeIntervalSince($0.value) < keepFor
+    }
+    all[login.lowercased()] = Date()
+    UserDefaults.standard.set(all, forKey: key)
+  }
+
+  static func clear(_ login: String) {
+    var all = UserDefaults.standard.dictionary(forKey: key) as? [String: Date] ?? [:]
+    all[login.lowercased()] = nil
+    UserDefaults.standard.set(all, forKey: key)
+  }
+}
+
 final class AppSettings: ObservableObject {
   static let shared = AppSettings()
   private let defaults = UserDefaults.standard

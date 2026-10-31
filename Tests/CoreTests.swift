@@ -1235,6 +1235,38 @@ func testMultiviewLayout() {
   check(MultiviewLayout.heightCap(points: 400, scale: 3, heard: true) == nil, "big: any")
 }
 
+func testStreamSteadiness() {
+  let start = Date(timeIntervalSince1970: 1_000_000)
+  var steady = StreamSteadiness(now: start)
+  // One stall, or two far apart, is nothing to worry about.
+  check(!steady.stalled(now: start), "one stall")
+  check(!steady.stalled(now: start.addingTimeInterval(200)), "stalls far apart")
+  check(!steady.unsteady, "still steady")
+  // Three within two minutes: unsteady (said once).
+  check(!steady.stalled(now: start.addingTimeInterval(230)), "second close stall")
+  check(steady.stalled(now: start.addingTimeInterval(260)), "third close stall makes it unsteady")
+  check(steady.unsteady && !steady.stalled(now: start.addingTimeInterval(270)), "said only once")
+  // Smooth for ten minutes: steady again.
+  check(!steady.tick(now: start.addingTimeInterval(500)), "not calm yet")
+  check(steady.tick(now: start.addingTimeInterval(270 + StreamSteadiness.calmAfter + 1)) && !steady.unsteady, "calm again")
+  // A stall then a restart soon after: unsteady.
+  var other = StreamSteadiness(now: start)
+  _ = other.stalled(now: start)
+  check(other.restarted(now: start.addingTimeInterval(30)), "stall + restart")
+  // Remembered from last time.
+  check(StreamSteadiness(unsteady: true, now: start).unsteady, "starts unsteady")
+
+  // The catch-up keeps the floor and only goes gently.
+  var catchUp = LiveCatchUp(now: start)
+  catchUp.setFloor(StreamSteadiness.buffer)
+  check(catchUp.targetBuffer >= StreamSteadiness.buffer, "floor raises the margin")
+  let rate = catchUp.update(buffer: 9, latency: 10, playing: true, now: start.addingTimeInterval(5))
+  check(rate == LiveCatchUp.rates.gentle, "only gentle with a floor: \(rate)")
+  check(catchUp.update(buffer: 3.2, latency: 3.4, playing: true, now: start.addingTimeInterval(6)) == 1, "no catching up inside the floor")
+  catchUp.setFloor(0)
+  check(catchUp.update(buffer: 9, latency: 10, playing: true, now: start.addingTimeInterval(7)) == LiveCatchUp.rates.fast, "back to normal")
+}
+
 func testAdFreeProxy() {
   let url = AdFreeProxy.masterURL(host: "eu.luminous.dev", login: "SomeOne", codecs: "h265,h264", lowLatency: true)!
   check(url.absoluteString.hasPrefix("https://eu.luminous.dev/live/someone?") && url.query!.contains("fast_bread=true"), "\(url)")
@@ -1293,6 +1325,7 @@ testStartingAtNewest()
 testRecordingPlaylist()
 testMutedParts()
 testMultiviewLayout()
+testStreamSteadiness()
 testMediaParsing()
 testAdTimeline()
 testTimelineAndRender()
