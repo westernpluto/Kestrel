@@ -66,29 +66,27 @@ enum PlaybackMemory {
   }
 }
 
-/// Channels whose stream kept running dry lately (see StreamSteadiness): the low-latency player
-/// starts them with a few seconds in hand, for a day.
-enum UnsteadyChannels {
-  private static let key = "kestrel.unsteadyChannels"
-  private static let keepFor: TimeInterval = 24 * 3600
+/// How much video each channel's stream has needed in hand lately (see LiveCatchUp), so watching
+/// it again starts there instead of learning it over with a stall or two. Kept for three days, and
+/// only for streams that needed more than usual.
+enum ChannelMargins {
+  private static let key = "kestrel.channelMargins"
+  private static let keepFor: TimeInterval = 3 * 24 * 3600
 
-  static func contains(_ login: String) -> Bool {
-    let all = UserDefaults.standard.dictionary(forKey: key) as? [String: Date] ?? [:]
-    return all[login.lowercased()].map { Date().timeIntervalSince($0) < keepFor } ?? false
+  private static func all() -> [String: [Double]] {
+    let stored = UserDefaults.standard.dictionary(forKey: key) as? [String: [Double]] ?? [:]
+    let now = Date().timeIntervalSince1970
+    return stored.filter { $0.value.count == 2 && now - $0.value[1] < keepFor }
   }
 
-  static func mark(_ login: String) {
-    var all = (UserDefaults.standard.dictionary(forKey: key) as? [String: Date] ?? [:]).filter {
-      Date().timeIntervalSince($0.value) < keepFor
-    }
-    all[login.lowercased()] = Date()
-    UserDefaults.standard.set(all, forKey: key)
+  static func margin(for login: String) -> Double? {
+    all()[login.lowercased()]?.first
   }
 
-  static func clear(_ login: String) {
-    var all = UserDefaults.standard.dictionary(forKey: key) as? [String: Date] ?? [:]
-    all[login.lowercased()] = nil
-    UserDefaults.standard.set(all, forKey: key)
+  static func remember(_ margin: Double, for login: String) {
+    var stored = all()
+    stored[login.lowercased()] = margin > LiveCatchUp.startBuffer + 0.05 ? [margin, Date().timeIntervalSince1970] : nil
+    UserDefaults.standard.set(stored, forKey: key)
   }
 }
 

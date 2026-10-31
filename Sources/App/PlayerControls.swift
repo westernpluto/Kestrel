@@ -244,7 +244,21 @@ struct PlayerVideoArea: View {
         .allowsHitTesting(false)
         .transition(.opacity)
       } else if model.isBuffering && !model.isPaused {
-        ProgressView().tint(.white).scaleEffect(1.2).allowsHitTesting(false)
+        VStack(spacing: 10) {
+          ProgressView().tint(.white).scaleEffect(1.2)
+          if model.waitingForStream {
+            // The broadcaster's upload dropped out: nothing this end can do but wait (and say so,
+            // rather than restart and lose what's in hand).
+            Text("Waiting for the stream…")
+              .font(.caption.weight(.semibold))
+              .foregroundColor(.white.opacity(0.85))
+              .padding(.horizontal, 10).padding(.vertical, 5)
+              .background(.black.opacity(0.55), in: Capsule())
+              .transition(.opacity)
+          }
+        }
+        .animation(.easeInOut(duration: 0.25), value: model.waitingForStream)
+        .allowsHitTesting(false)
       }
     }
   }
@@ -550,34 +564,17 @@ struct PlayerControls: View {
     VStack(spacing: 2) {
       seekBar
       HStack(spacing: 10) {
-        if model.isLive {
-          liveButton
-          if let login = model.channel?.login, recordings.isRecording(login) {
-            Label("REC", systemImage: "record.circle.fill")
-              .font(.caption2.weight(.heavy)).foregroundColor(.liveRed).labelStyle(.titleAndIcon)
-              .accessibilityLabel("Recording")
-          }
-          if !viewersShownElsewhere {
-            if let viewers = model.stream?.viewers {
-              Label(Format.viewers(viewers), systemImage: "person.fill")
-                .accessibilityLabel("\(Format.viewers(viewers)) watching")
-            }
-            if let started = model.stream?.startedAt {
-              Label { UptimeText(since: started) } icon: { Image(systemName: "clock") }
-                .accessibilityLabel("Live for \(Format.uptime(since: started) ?? "")")
-            }
-          }
-          adBadge
-        } else if model.duration > 0 {
-          Text("\(Format.duration(Int(model.position))) / \(Format.duration(Int(model.duration)))")
-            .font(.caption.monospacedDigit())
-          if model.vodIsRecording {
-            Text("RECORDING").font(.caption2.weight(.heavy))
-              .padding(.horizontal, 5).padding(.vertical, 2)
-              .background(Color.liveRed.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
-          }
+        // As much about the stream as fits beside the buttons (which always fit): when room runs
+        // short the ad badge shrinks to its icon, then the time live goes, then the viewer count,
+        // then the latency. Nothing is ever squeezed onto a second line.
+        ViewThatFits(in: .horizontal) {
+          stats(0)
+          stats(1)
+          stats(2)
+          stats(3)
+          stats(4)
         }
-        Spacer(minLength: 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
         // Layout switches live on the video, where they apply (not in the gear menu).
         if let layoutToggle {
           button(
@@ -606,6 +603,45 @@ struct PlayerControls: View {
       .labelStyle(StatLabelStyle())
       .foregroundColor(.white)
     }
+  }
+
+  /// The stream's numbers, from all of them (0) down to just the essentials (4).
+  private func stats(_ level: Int) -> some View {
+    HStack(spacing: 10) {
+      if model.isLive {
+        liveButton(latency: level < 4)
+        if let login = model.channel?.login, recordings.isRecording(login) {
+          Label("REC", systemImage: "record.circle.fill")
+            .font(.caption2.weight(.heavy)).foregroundColor(.liveRed).labelStyle(.titleAndIcon)
+            .accessibilityLabel("Recording")
+        }
+        if !viewersShownElsewhere {
+          if level < 3, let viewers = model.stream?.viewers {
+            Label(Format.viewers(viewers), systemImage: "person.fill")
+              .accessibilityLabel("\(Format.viewers(viewers)) watching")
+          }
+          if level < 2, let started = model.stream?.startedAt {
+            Label { UptimeText(since: started) } icon: { Image(systemName: "clock") }
+              .accessibilityLabel("Live for \(Format.uptime(since: started) ?? "")")
+          }
+        }
+        adBadge(iconOnly: level > 0)
+      } else if model.duration > 0 {
+        Text(
+          level < 3
+            ? "\(Format.duration(Int(model.position))) / \(Format.duration(Int(model.duration)))"
+            : Format.duration(Int(model.position))
+        )
+        .font(.caption.monospacedDigit())
+        if model.vodIsRecording {
+          Text(level < 2 ? "RECORDING" : "REC").font(.caption2.weight(.heavy))
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .background(Color.liveRed.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
+        }
+      }
+    }
+    .lineLimit(1)
+    .fixedSize()
   }
 
   /// VODs: the whole video. Live: from the start of the broadcast to now, when the channel is
@@ -654,7 +690,7 @@ struct PlayerControls: View {
     }
   }
 
-  private var liveButton: some View {
+  private func liveButton(latency showsLatency: Bool) -> some View {
     Button {
       model.goLive()
       interacted(3.5)
@@ -663,7 +699,9 @@ struct PlayerControls: View {
         Text("LIVE").font(.caption.weight(.heavy))
           .padding(.horizontal, 6).padding(.vertical, 2)
           .background(atLiveEdge ? Color.liveRed : Color.gray, in: RoundedRectangle(cornerRadius: 4))
-        if model.isRewinding {
+        if !showsLatency {
+          EmptyView()
+        } else if model.isRewinding {
           // Where you are in the broadcast (counts up while it plays, holds while paused).
           Text("\(Format.duration(Int(model.rewindPosition))) / \(Format.duration(Int(model.broadcastElapsed)))")
             .font(.caption.monospacedDigit()).foregroundColor(.white.opacity(0.85))
@@ -682,16 +720,25 @@ struct PlayerControls: View {
   private var atLiveEdge: Bool { !model.isRewinding && (model.latency ?? 0) < (settings.lowLatency ? 6 : 15) }
 
   @ViewBuilder
-  private var adBadge: some View {
+  private func adBadge(iconOnly: Bool) -> some View {
     switch model.adState {
     case .skipped, .replaced:
-      Label("Ad blocked", systemImage: "checkmark.shield.fill").font(.caption2.weight(.semibold)).foregroundColor(.accentTeal)
-        .labelStyle(.titleAndIcon)
+      badge("Ad blocked", systemImage: "checkmark.shield.fill", color: .accentTeal, iconOnly: iconOnly)
     case .searching, .covering:
-      Label("Ad", systemImage: "shield.lefthalf.filled").font(.caption2.weight(.semibold)).foregroundColor(.orange)
-        .labelStyle(.titleAndIcon)
+      badge("Ad", systemImage: "shield.lefthalf.filled", color: .orange, iconOnly: iconOnly)
     case .none:
       EmptyView()
+    }
+  }
+
+  @ViewBuilder
+  private func badge(_ title: String, systemImage: String, color: Color, iconOnly: Bool) -> some View {
+    if iconOnly {
+      Image(systemName: systemImage).font(.caption.weight(.semibold)).foregroundColor(color)
+        .accessibilityLabel(title)
+    } else {
+      Label(title, systemImage: systemImage).font(.caption2.weight(.semibold)).foregroundColor(color)
+        .labelStyle(.titleAndIcon)
     }
   }
 

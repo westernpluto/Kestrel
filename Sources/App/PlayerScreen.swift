@@ -303,10 +303,6 @@ final class KeyboardObserver: ObservableObject {
   @Published private(set) var overlap: CGFloat = 0
   /// The keyboard's height the last time it was up (the emote picker takes its place).
   private(set) static var lastHeight: CGFloat?
-  /// Where the keyboard is while it's up (window coordinates), for KeyboardSlide.
-  private(set) static var visibleFrame: CGRect?
-  /// How long the keyboard's moves take (from its last notification).
-  private(set) static var slideDuration: Double = 0.4
   private var tokens: [NSObjectProtocol] = []
 
   /// The keyboard's own motion: UIKit runs it on a stiff spring squeezed into the notification's
@@ -346,12 +342,8 @@ final class KeyboardObserver: ObservableObject {
     // Never more than the keyboard can be (guards against a bogus frame).
     let value = hiding ? 0 : min(bounds.height * 0.62, max(0, bounds.maxY - frame.minY))
     if value > 40 { Self.lastHeight = value }
-    Self.visibleFrame = value > 40 ? frame : nil
-    var duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
-    if duration > 0.01, value > 0 { Self.slideDuration = max(0.25, duration) * 1.6 }
+    let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
     guard abs(value - overlap) > 0.5 else { return }
-    // A picture of the keyboard is sliding off (KeyboardSlide): move with it.
-    if hiding, KeyboardSlide.sliding { duration = max(duration, 0.25) }
     // "Did" notifications only correct a missed "will"; a zero duration means the keyboard itself
     // isn't animating (moving with it is the point).
     if note.name == UIResponder.keyboardDidChangeFrameNotification || duration <= 0.01 {
@@ -393,9 +385,10 @@ struct PlayerLayout: Equatable {
   /// Chat lies over the video (phone landscape, by choice) instead of beside it.
   var chatOverlay = false
   /// Where the picture goes inside `video` (unless zoomed to fill): iPhone Duo's outer screen keeps
-  /// it clear of the camera, against the opposite edge.
+  /// it clear of the camera, and phone landscape keeps it above the keyboard while typing.
   var pictureInsets = EdgeInsets()
-  /// Extra room the top bar, or the controls' bottom row, keeps from a camera in its corner.
+  /// Extra room the top bar, or the controls' bottom row, keeps from a camera beside it (only ever
+  /// when that still leaves it plenty of width; otherwise it goes over the picture instead).
   var topBarExtra = EdgeInsets()
   var bottomRowExtra = EdgeInsets()
 
@@ -563,12 +556,14 @@ struct PlayerLayout: Equatable {
       sideInset > Self.cornerStripWidth
       ? (cameraOnLeft ?? (insets.leading > insets.trailing + 1 ? true : insets.trailing > insets.leading + 1 ? false : nil))
       : nil
+    // Typing: the keyboard's top edge (the picture moves up above it, so the stream stays in view).
+    let keyboardTop: CGFloat? = keyboard > 0 ? top + height - keyboard : nil
     if let cameraTop = cornerCameraTop {
       chatOnLeft = !cameraTop
-      let bottomRow = insets.bottom + 4
+      // How much of the video's sides chat lies over (the controls keep clear of it).
+      var covered: (leading: CGFloat, trailing: CGFloat) = (0, 0)
       if chatOpen && !chatOverVideo {
-        // Chat beside the video, on the side away from the camera's corner; the picture sits
-        // halfway down, the bars in the room above and below it.
+        // Chat beside the video, on the side away from the camera's corner.
         if chatOnLeft {
           panel = CGRect(x: left, y: top, width: chat, height: height)
           panelPadding = EdgeInsets(top: insets.top + 6, leading: 12, bottom: bottomPad, trailing: 0)
@@ -578,45 +573,36 @@ struct PlayerLayout: Equatable {
           panelPadding = EdgeInsets(top: insets.top + 6, leading: 0, bottom: bottomPad, trailing: 12)
           video = CGRect(x: left, y: top, width: panel.minX - left, height: height)
         }
-        controls = EdgeInsets(top: insets.top + 8, leading: 10, bottom: bottomRow, trailing: 10)
         panelVisible = true
       } else {
-        // The picture as wide as the screen, against the edge away from the camera; the room left
-        // on the camera's side takes the top bar (camera on top) instead of covering the picture.
         video = CGRect(x: left, y: top, width: screenWidth, height: height)
-        let pictureHeight = min(height, (screenWidth * 9 / 16).rounded())
-        let room = max(0, height - pictureHeight)
-        pictureInsets =
-          cameraTop
-          ? EdgeInsets(top: room, leading: 0, bottom: 0, trailing: 0) : EdgeInsets(top: 0, leading: 0, bottom: room, trailing: 0)
-        let barTop = cameraTop ? max(insets.top + 6, ((room - 40) / 2).rounded()) : insets.top + 8
         if chatOpen {
           chatOverlay = true
           panel = chatOnLeft
             ? CGRect(x: left, y: top, width: chat, height: height) : CGRect(x: right - chat, y: top, width: chat, height: height)
-          panelPadding = EdgeInsets(
-            top: insets.top + 6, leading: chatOnLeft ? 12 : 0, bottom: bottomPad, trailing: chatOnLeft ? 0 : 12)
-          controls = EdgeInsets(
-            top: barTop, leading: chatOnLeft ? chat + 8 : 10, bottom: bottomRow, trailing: chatOnLeft ? 10 : chat + 8)
+          covered = chatOnLeft ? (chat, 0) : (0, chat)
           panelVisible = true
         } else {
-          controls = EdgeInsets(top: barTop, leading: 10, bottom: bottomRow, trailing: 10)
           panel = chatOnLeft
             ? CGRect(x: left - chat - 1, y: top, width: chat, height: height) : CGRect(x: right + 1, y: top, width: chat, height: height)
-          panelPadding = EdgeInsets(
-            top: insets.top + 6, leading: chatOnLeft ? 12 : 0, bottom: bottomPad, trailing: chatOnLeft ? 0 : 12)
           panelVisible = false
         }
+        panelPadding = EdgeInsets(
+          top: insets.top + 6, leading: chatOnLeft ? 12 : 0, bottom: bottomPad, trailing: chatOnLeft ? 0 : 12)
       }
-      // Only the camera's corner is kept clear: the top bar starts after it (camera top left), or
-      // the bottom row of controls ends before it (camera bottom right).
-      if cameraTop {
-        if video.minX <= left + 1 {
-          topBarExtra = EdgeInsets(top: 0, leading: max(0, Self.cornerCamera.width - controls.leading), bottom: 0, trailing: 0)
-        }
-      } else if video.maxX >= right - 1 {
-        bottomRowExtra = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: max(0, Self.cornerCamera.width - controls.trailing))
-      }
+      // The picture goes in the part of the video the camera's corner can't reach, and the bars
+      // into the room left beside it where they fit (none of the picture covered by either).
+      let camera =
+        cameraTop
+        ? CGRect(x: left, y: top, width: Self.cornerCamera.width, height: Self.cornerCamera.height)
+        : CGRect(
+          x: right - Self.cornerCamera.width, y: top + height - Self.cornerCamera.height, width: Self.cornerCamera.width,
+          height: Self.cornerCamera.height)
+      let placed = Self.place(in: video, camera: camera, keyboardTop: keyboardTop, covered: covered, safeBottom: safe.height)
+      controls = placed.controls
+      pictureInsets = placed.picture
+      topBarExtra = placed.topBar
+      bottomRowExtra = placed.bottomRow
       return
     }
     // Camera on the right: chat goes left. Unknown: chat right, clear of a camera on either side.
@@ -665,6 +651,131 @@ struct PlayerLayout: Equatable {
         top: insets.top + 6, leading: chatOnLeft ? 12 : 0, bottom: bottomPad, trailing: chatOnLeft ? 0 : 12)
       panelVisible = false
     }
+    if let keyboardTop, panelVisible {
+      // Typing in chat: the keyboard would cover most of the picture, so the picture shrinks into
+      // the room above it (clear of the chat lying over the video, and of the Dynamic Island).
+      let island = cameraOnLeft.map { onLeft in
+        CGRect(
+          x: onLeft ? left : right - Self.cameraClearance, y: top + ((height - Self.islandLength) / 2).rounded(),
+          width: Self.cameraClearance, height: Self.islandLength)
+      }
+      let covered: (leading: CGFloat, trailing: CGFloat) = chatOverlay ? (chatOnLeft ? (chat, 0) : (0, chat)) : (0, 0)
+      let placed = Self.place(in: video, camera: island, keyboardTop: keyboardTop, covered: covered, safeBottom: safe.height)
+      controls = placed.controls
+      pictureInsets = placed.picture
+      topBarExtra = placed.topBar
+      bottomRowExtra = placed.bottomRow
+    }
+  }
+
+  // MARK: Picture and bars around a camera
+
+  /// Where the picture and the controls' two bars go in an area (all as insets from its edges).
+  struct Placement: Equatable {
+    var picture = EdgeInsets()
+    var controls = EdgeInsets()
+    /// Beyond `controls`: the top bar's, or the bottom row's, own room (kept from the camera).
+    var topBar = EdgeInsets()
+    var bottomRow = EdgeInsets()
+  }
+
+  /// The controls' bars: height, the gap to the screen's edge, the gap to the picture, and the
+  /// room from the picture's sides.
+  private static let bar: CGFloat = 40
+  private static let barEdge: CGFloat = 8
+  private static let barGap: CGFloat = 2
+  private static let barSide: CGFloat = 12
+  /// The narrowest a bar may be beside the camera; any narrower and it goes over the picture.
+  private static let minTopBar: CGFloat = 360
+  private static let minBottomRow: CGFloat = 400
+  /// The Dynamic Island's length in landscape, plus air.
+  static let islandLength: CGFloat = 140
+
+  /// Fits a 16:9 picture into `area` (safe-area coordinates) as big as it goes without the camera
+  /// covering any of it, against the side away from the camera; then puts the top bar and the
+  /// bottom row in the room left above and below it when they fit there clear of the camera (so
+  /// they cover none of the picture), or over the picture's edges when they don't.
+  /// - Parameters:
+  ///   - camera: the camera's corner (iPhone Duo's outer screen) or the Dynamic Island, if known.
+  ///   - keyboardTop: typing: where the keyboard starts; the picture and bars stay above it.
+  ///   - covered: how far chat lies over the area's sides (the bars keep clear; while typing, the
+  ///     picture too).
+  ///   - safeBottom: the safe area's bottom (the bottom row keeps above the home indicator).
+  static func place(
+    in area: CGRect, camera: CGRect?, keyboardTop: CGFloat?, covered: (leading: CGFloat, trailing: CGFloat),
+    safeBottom: CGFloat
+  ) -> Placement {
+    let bottom = keyboardTop.map { min(area.maxY, $0 - 6) } ?? area.maxY
+    let typing = bottom < area.maxY
+    let open = CGRect(
+      x: area.minX + covered.leading, y: area.minY, width: max(0, area.width - covered.leading - covered.trailing),
+      height: max(0, bottom - area.minY))
+    // Chat lying over the video covers the picture's side by choice, but not while typing (the
+    // picture is small then: it moves into the open part).
+    let room = typing ? open : CGRect(x: area.minX, y: area.minY, width: area.width, height: open.height)
+    let cam = camera.flatMap { $0.intersects(room) ? $0 : nil }
+    let cameraTop = cam.map { $0.midY < room.midY } ?? false
+    let cameraLeft = cam.map { $0.midX < room.midX } ?? false
+    var width = min(room.width, room.height * 16 / 9)
+    if let cam {
+      // As big as it goes, in the corner away from the camera: if the camera still reaches it,
+      // smaller, beside the camera or beyond it (whichever leaves the bigger picture).
+      let far = CGRect(
+        x: cameraLeft ? room.maxX - width : room.minX, y: cameraTop ? room.maxY - width * 9 / 16 : room.minY,
+        width: width, height: width * 9 / 16)
+      if far.intersects(cam) {
+        let beyond = cameraTop ? room.maxY - cam.maxY : cam.minY - room.minY
+        let beside = cameraLeft ? room.maxX - cam.maxX : cam.minX - room.minX
+        width = max(min(room.width, beyond * 16 / 9), min(beside, room.height * 16 / 9))
+      }
+    }
+    width = max(0, width.rounded(.down))
+    let height = (width * 9 / 16).rounded(.down)
+    let topLimit = max(room.minY, 0)
+    let rowLimit = typing ? bottom : min(bottom, safeBottom)
+    // Room a bar needs above or below the picture.
+    let above = (topLimit - room.minY) + barEdge + bar + barGap
+    let below = barGap + bar + barEdge + (room.maxY - rowLimit)
+    let free = room.height - height
+    var y: CGFloat
+    if free >= above + below {
+      // Both bars beside the picture: the picture as far from the camera as that allows.
+      y = cam == nil ? room.minY + above + (free - above - below) / 2 : cameraTop ? room.maxY - below - height : room.minY + above
+    } else {
+      y = cam == nil ? room.minY + free / 2 : cameraTop ? room.maxY - height : room.minY
+    }
+    y = y.rounded()
+    var x = (room.minX + (room.width - width) / 2).rounded()
+    if let cam, CGRect(x: x, y: y, width: width, height: height).intersects(cam) {
+      x = cameraLeft ? room.maxX - width : room.minX
+    }
+    let picture = CGRect(x: x, y: y, width: width, height: height)
+    // The bars span the picture (clear of chat over the video).
+    let low = max(picture.minX, open.minX) + barSide
+    let high = max(low, min(picture.maxX, open.maxX) - barSide)
+    /// A bar beside the picture, kept clear of the camera; nil when that leaves it too narrow.
+    func beside(_ y: CGFloat, minWidth: CGFloat) -> CGRect? {
+      let span = CGRect(x: low, y: y, width: high - low, height: bar)
+      guard let cam, span.intersects(cam) else { return span }
+      let start = cameraLeft ? max(span.minX, cam.maxX + 6) : span.minX
+      let end = cameraLeft ? span.maxX : min(span.maxX, cam.minX - 6)
+      return end - start >= minWidth ? CGRect(x: start, y: y, width: end - start, height: bar) : nil
+    }
+    var topBar = CGRect(x: low, y: max(picture.minY, topLimit) + barEdge, width: high - low, height: bar)
+    if picture.minY - (topLimit + barEdge) >= bar + barGap, let outside = beside(picture.minY - barGap - bar, minWidth: minTopBar) {
+      topBar = outside
+    }
+    var row = CGRect(x: low, y: min(picture.maxY, rowLimit) - barEdge - bar, width: high - low, height: bar)
+    if rowLimit - barEdge - picture.maxY >= bar + barGap, let outside = beside(picture.maxY + barGap, minWidth: minBottomRow) {
+      row = outside
+    }
+    return Placement(
+      picture: EdgeInsets(
+        top: picture.minY - area.minY, leading: picture.minX - area.minX, bottom: area.maxY - picture.maxY,
+        trailing: area.maxX - picture.maxX),
+      controls: EdgeInsets(top: topBar.minY - area.minY, leading: low - area.minX, bottom: area.maxY - row.maxY, trailing: area.maxX - high),
+      topBar: EdgeInsets(top: 0, leading: topBar.minX - low, bottom: 0, trailing: high - topBar.maxX),
+      bottomRow: EdgeInsets(top: 0, leading: row.minX - low, bottom: 0, trailing: high - row.maxX))
   }
 
   /// The same layout moved by (dx, dy) (into another safe area's coordinates).

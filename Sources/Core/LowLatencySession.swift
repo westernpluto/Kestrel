@@ -27,8 +27,6 @@ struct LowLatencyConfig: Sendable {
   var checkAccountFirst = false
   /// Through an ad-free server: try the playlists on Twitch's server near the viewer.
   var nearbyServers = true
-  /// Start at the newest video (see `LowLatencyPlaylist.startingAtNewest`).
-  var startAtLiveEdge = true
 }
 
 struct LowLatencyUpdate: Sendable {
@@ -40,6 +38,8 @@ struct LowLatencyUpdate: Sendable {
 actor LowLatencySession: PlaylistSource {
   nonisolated let id: String
   nonisolated let login: String
+  /// Whether the stream is still coming in (the player asks; see StreamArrival).
+  nonisolated let arrival = StreamArrival()
   private let config: LowLatencyConfig
   private let http: HTTPClient
   private let tokens: PlaybackTokenProvider
@@ -205,6 +205,7 @@ actor LowLatencySession: PlaylistSource {
 
   func mediaPlaylist(_ index: Int) async -> (status: Int, body: String) {
     guard index >= 0, index < variants.count else { return (404, "") }
+    arrival.asked()
     var target = variants[index]
     var fetched: FetchResult
     if let warm = warmed, warm.index == index, Date().timeIntervalSince(warm.startedAt) < 1 {
@@ -235,6 +236,7 @@ actor LowLatencySession: PlaylistSource {
     switch fetched {
     case .success(let result):
       main = result
+      arrival.saw(index: index, end: result.playlist.mediaSequence + result.playlist.regularSegments.count)
     case .failure(let status):
       // A hiccup upstream: repeat the last playlist. 404/403 mean the stream or token is gone.
       if status != 404, status != 403, let last = lastServed[index] { return (200, last) }
@@ -252,7 +254,7 @@ actor LowLatencySession: PlaylistSource {
       // stitched in at all: through an ad-free server (or an ad-free account) it would only cost
       // latency, and a stream that started during the announcement stayed behind afterwards.
       let body = LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: marker && route.adsPossible)
-      return serve(index, startTrimmed(index, body))
+      return serve(index, body)
     }
 
     // Ad video stitched into the stream.
@@ -286,22 +288,6 @@ actor LowLatencySession: PlaylistSource {
     ads.update(with: main.playlist)
     publish(.covering)
     return serve(index, LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: true))
-  }
-
-  /// When the start is over (the first playlists the player asks for are trimmed to the newest
-  /// video, one per rendition, in the first few seconds).
-  private var startWindowEnds: Date?
-  private var startServed: Set<Int> = []
-
-  private func startTrimmed(_ index: Int, _ body: String) -> String {
-    guard config.startAtLiveEdge else { return body }
-    let now = Date()
-    if startWindowEnds == nil { startWindowEnds = now.addingTimeInterval(4) }
-    guard let ends = startWindowEnds, now < ends, !startServed.contains(index) else { return body }
-    startServed.insert(index)
-    guard let trimmed = LowLatencyPlaylist.startingAtNewest(body) else { return body }
-    log.add("Low-latency player: starting at the newest video")
-    return trimmed
   }
 
   private func serve(_ index: Int, _ body: String) -> (status: Int, body: String) {
@@ -547,44 +533,6 @@ enum LowLatencyPlaylist {
     }
     // IVS-style source switches to an ad ("live" is the broadcast itself).
     return lower.contains("live-video-net-stream-source") && !lower.contains("stream-source=\"live\"")
-  }
-
-  /// The player's first playlist: just the segment Twitch is making right now (its first
-  /// prefetch hint, listed as an ordinary segment, numbered and dated to follow the last complete
-  /// one) and the hint after it. A player starts a segment or two back from the end of whatever
-  /// it's given, so this starts it at the newest video instead of 2–4 seconds behind it, rather
-  /// than catching up afterwards. Nil when there's nothing to trim to (no prefetch hints, or a
-  /// discontinuity or init section that would need carrying over).
-  static func startingAtNewest(_ text: String) -> String? {
-    let playlist = HLSMediaPlaylist.parse(text, base: nil)
-    let regular = playlist.regularSegments
-    let hints = playlist.segments.filter(\.isPrefetch)
-    guard !playlist.isEnded, let last = regular.last, let first = hints.first,
-      !playlist.segments.contains(where: \.discontinuity), !text.contains("#EXT-X-MAP")
-    else { return nil }
-    var lines: [String] = []
-    var sawSequence = false
-    for raw in HLS.lines(text) {
-      let line = String(raw).trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
-      // The header ends where the segments start.
-      if line.hasPrefix("#EXT-X-PROGRAM-DATE-TIME") || line.hasPrefix("#EXTINF") || line.hasPrefix("#EXT-X-TWITCH-PREFETCH")
-        || (!line.hasPrefix("#") && !line.trimmingCharacters(in: .whitespaces).isEmpty)
-      {
-        break
-      }
-      if line.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") {
-        lines.append("#EXT-X-MEDIA-SEQUENCE:\(playlist.mediaSequence + regular.count)")
-        sawSequence = true
-      } else if !line.isEmpty {
-        lines.append(line)
-      }
-    }
-    guard sawSequence else { return nil }
-    if let date = last.end { lines.append("#EXT-X-PROGRAM-DATE-TIME:" + HLSDate.format(date)) }
-    lines.append(String(format: "#EXTINF:%.3f,live", last.duration))
-    lines.append(first.uri)
-    for hint in hints.dropFirst() { lines.append("#EXT-X-TWITCH-PREFETCH:" + hint.uri) }
-    return lines.joined(separator: "\n") + "\n"
   }
 
   /// Twitch's master playlist says what its clock read when it was made (`SERVER-TIME`) and how

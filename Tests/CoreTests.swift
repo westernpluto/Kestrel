@@ -1059,38 +1059,108 @@ func testLiveCatchUp() {
   var catchUp = LiveCatchUp(now: t0)
   // Settling after a start: normal speed.
   check(catchUp.update(buffer: 2.5, latency: 3.5, playing: true, now: t0) == 1)
-  let t1 = t0.addingTimeInterval(2)
-  // Well behind: fast; then medium; then gentle down to the margin.
-  check(catchUp.update(buffer: 2.6, latency: 3.6, playing: true, now: t1) == LiveCatchUp.rates.fast)
-  check(catchUp.update(buffer: 2.0, latency: 3.0, playing: true, now: t1) == LiveCatchUp.rates.medium)
-  check(catchUp.update(buffer: 1.2, latency: 2.2, playing: true, now: t1) == LiveCatchUp.rates.gentle)
-  check(catchUp.update(buffer: 1.0, latency: 2.0, playing: true, now: t1) == LiveCatchUp.rates.gentle, "keeps going to the margin")
-  check(catchUp.update(buffer: 0.92, latency: 1.92, playing: true, now: t1) == 1)
-  // A little over the margin doesn't start it again.
-  check(catchUp.update(buffer: 1.05, latency: 2.05, playing: true, now: t1) == 1)
-  // Paused or buffering: normal speed.
-  check(catchUp.update(buffer: 3, latency: 4, playing: false, now: t1) == 1)
-  // Close to live already: leave it.
-  check(catchUp.update(buffer: 1.3, latency: 1.3, playing: true, now: t1) == 1)
-  // A stall: bigger margin, then a pause before catching up again.
-  let before = catchUp.targetBuffer
-  catchUp.stalled(now: t1)
-  check(catchUp.targetBuffer > before)
-  check(catchUp.update(buffer: 3, latency: 4, playing: true, now: t1.addingTimeInterval(5)) == 1)
-  check(catchUp.update(buffer: 3, latency: 4, playing: true, now: t1.addingTimeInterval(9)) == LiveCatchUp.rates.fast)
+  // Catching up from 4.2 s in hand: fast, then medium, then gentle down to the margin, and stop.
+  var t = t0.addingTimeInterval(2)
+  var buffer = 4.2
+  var seen: [Float] = []
+  for _ in 0..<100 {
+    let rate = catchUp.update(buffer: buffer, latency: buffer + 1, playing: true, now: t)
+    if seen.last != rate { seen.append(rate) }
+    buffer -= Double(rate - 1) * 0.5
+    t += 0.5
+  }
+  check(seen == [LiveCatchUp.rates.fast, LiveCatchUp.rates.medium, LiveCatchUp.rates.gentle, 1], "\(seen)")
+  check(buffer > 0.6 && buffer < 1.1, "ends near the margin: \(buffer)")
+  check(catchUp.targetBuffer <= LiveCatchUp.startBuffer + 0.001, "spending the extra on purpose isn't a hiccup")
+  // Paused or buffering: normal speed. Close to live already: leave it.
+  check(catchUp.update(buffer: 3, latency: 4, playing: false, now: t) == 1)
+  check(catchUp.update(buffer: catchUp.targetBuffer + 0.3, latency: catchUp.targetBuffer + 0.3, playing: true, now: t + 0.5) == 1)
+
+  // A hiccup: 1.5 s of no video arriving (the buffer drains at normal speed). The margin grows to
+  // cover it as it happens; then playback slows a touch to build the margin back, and stops there.
+  var hiccup = LiveCatchUp(now: t0)
+  var h = t0.addingTimeInterval(2)
+  var held = 2.0
+  hiccup.update(buffer: held, latency: 1.4, playing: true, now: h)
+  for _ in 0..<3 {
+    h += 0.5
+    held -= 0.5
+    hiccup.update(buffer: held, latency: 1.4, playing: true, now: h)
+  }
+  check(hiccup.targetBuffer >= 1.5 + LiveCatchUp.air - 0.01, "margin covers the hiccup: \(hiccup.targetBuffer)")
+  h += 0.5
+  check(hiccup.update(buffer: 0.9, latency: 2, playing: true, now: h) == LiveCatchUp.rates.slow, "builds it back")
+  h += 0.5
+  check(hiccup.update(buffer: hiccup.targetBuffer - 0.1, latency: 2.5, playing: true, now: h) == LiveCatchUp.rates.slow, "to the margin")
+  h += 0.5
+  check(hiccup.update(buffer: hiccup.targetBuffer + 0.01, latency: 2.8, playing: true, now: h) == 1, "and stops there")
+  for _ in 0..<4 {
+    h += 0.5
+    hiccup.update(buffer: hiccup.targetBuffer + 0.6, latency: 2.8, playing: true, now: h)
+  }
+  check(hiccup.neededBuffer(now: h) >= 1.5, "the hiccup is remembered")
+  // Well behind live already: never slower.
+  var behind = LiveCatchUp(now: t0)
+  check(behind.update(buffer: 0.2, latency: 6, playing: true, now: t0.addingTimeInterval(2)) == 1)
+
+  // A stall: more in hand from now on, then a pause before steering again.
+  var stall = LiveCatchUp(now: t0)
+  let before = stall.targetBuffer
+  stall.stalled(now: t0.addingTimeInterval(5))
+  check(stall.targetBuffer > before + 0.3, "stall grows the margin")
+  check(stall.update(buffer: 6, latency: 7, playing: true, now: t0.addingTimeInterval(7)) == 1, "held after a stall")
+  check(stall.update(buffer: 6, latency: 7, playing: true, now: t0.addingTimeInterval(9)) == LiveCatchUp.rates.fast, "far over: catches up")
   // Capped: gentle at most, or not at all.
-  check(catchUp.update(buffer: 3, latency: 4, playing: true, maxRate: LiveCatchUp.rates.gentle, now: t1.addingTimeInterval(9)) == LiveCatchUp.rates.gentle)
-  check(catchUp.update(buffer: 3, latency: 4, playing: true, maxRate: 1, now: t1.addingTimeInterval(9)) == 1)
-  // A given starting margin, within bounds.
+  check(stall.update(buffer: 6, latency: 7, playing: true, maxRate: LiveCatchUp.rates.gentle, now: t0.addingTimeInterval(9.5)) == LiveCatchUp.rates.gentle)
+  check(stall.update(buffer: 6, latency: 7, playing: true, maxRate: 1, now: t0.addingTimeInterval(10)) == 1)
+
+  // A given starting margin (what the channel needed last time), within bounds.
   check(LiveCatchUp(targetBuffer: 1.5).targetBuffer == 1.5)
   check(LiveCatchUp(targetBuffer: 9).targetBuffer == LiveCatchUp.maxBuffer)
-  // Smooth for long enough: the margin creeps back down, never under the minimum.
-  var later = t1.addingTimeInterval(9)
-  for _ in 0..<40 {
-    later = later.addingTimeInterval(91)
-    catchUp.update(buffer: 1, latency: 2, playing: true, now: later)
+  check(LiveCatchUp(targetBuffer: 0.1).targetBuffer == LiveCatchUp.minBuffer)
+
+  // No hiccups for long enough: the margin creeps back down (spending what's in hand by playing
+  // faster, read from the playhead), never under the minimum.
+  var calm = LiveCatchUp(targetBuffer: 3, now: t0)
+  var c = t0.addingTimeInterval(2)
+  var inHand = 3.0
+  var position = 0.0
+  for _ in 0..<2000 {
+    c += 0.5
+    let rate = calm.update(buffer: inHand, latency: inHand + 1, playing: true, position: position, now: c)
+    inHand -= Double(rate - 1) * 0.5
+    position += Double(rate) * 0.5
   }
-  check(abs(catchUp.targetBuffer - LiveCatchUp.minBuffer) < 0.001)
+  check(abs(calm.targetBuffer - LiveCatchUp.minBuffer) < 0.001, "shrinks back: \(calm.targetBuffer)")
+}
+
+func testStreamArrival() {
+  let t0 = Date(timeIntervalSince1970: 3_000_000)
+  let arrival = StreamArrival(now: t0)
+  arrival.saw(index: 0, end: 10, now: t0)
+  arrival.saw(index: 0, end: 10, now: t0.addingTimeInterval(1))
+  check(arrival.ages(now: t0.addingTimeInterval(2)).moved == 2, "the same playlist again isn't news")
+  arrival.saw(index: 1, end: 11, now: t0.addingTimeInterval(3))
+  check(arrival.ages(now: t0.addingTimeInterval(3)).moved == 3, "a rendition's first playlist isn't news")
+  arrival.saw(index: 0, end: 11, now: t0.addingTimeInterval(4))
+  arrival.asked(now: t0.addingTimeInterval(4))
+  let ages = arrival.ages(now: t0.addingTimeInterval(5))
+  check(ages.moved == 1 && ages.asked == 1)
+
+  typealias V = StreamArrival.Verdict
+  // A moment of buffering: wait.
+  check(StreamArrival.verdict(buffering: 2, asked: 1, moved: 1) == V.wait)
+  // The stream itself stopped arriving: wait for it (a restart can't help)...
+  check(StreamArrival.verdict(buffering: 12, asked: 1, moved: 12) == V.waitingForStream)
+  check(StreamArrival.verdict(buffering: 30, asked: 1, moved: 30) == V.waitingForStream)
+  // ...unless it's been very long.
+  check(StreamArrival.verdict(buffering: 50, asked: 1, moved: 50) == V.restart)
+  // The stream's arriving but the player won't play it: restart.
+  check(StreamArrival.verdict(buffering: 6, asked: 1, moved: 1) == V.wait)
+  check(StreamArrival.verdict(buffering: 11, asked: 1, moved: 1) == V.restart)
+  // The player stopped asking for more: stuck.
+  check(StreamArrival.verdict(buffering: 9, asked: 8, moved: 8) == V.restart)
+  check(StreamArrival.verdict(buffering: 5, asked: 7, moved: 7) == V.wait)
 }
 
 func testSteadyAutoQuality() {
@@ -1134,36 +1204,6 @@ func testMasterClock() {
   check(moved.contains("STREAM-TIME=\"3213.19299889\""), moved)
   check(moved.contains("USER-IP=\"1.2.3.4\"") && moved.hasSuffix("v/0.m3u8\n"))
   check(LowLatencyPlaylist.advancingClock("#EXTM3U\nv/0.m3u8\n", by: 5) == "#EXTM3U\nv/0.m3u8\n")
-}
-
-func testStartingAtNewest() {
-  let text = """
-    #EXTM3U
-    #EXT-X-VERSION:3
-    #EXT-X-TARGETDURATION:6
-    #EXT-X-MEDIA-SEQUENCE:100
-    #EXT-X-TWITCH-ELAPSED-SECS:200.000
-    #EXT-X-PROGRAM-DATE-TIME:2026-10-30T01:00:00.000Z
-    #EXTINF:2.000,live
-    https://edge/a.ts
-    #EXT-X-PROGRAM-DATE-TIME:2026-10-30T01:00:02.000Z
-    #EXTINF:2.000,live
-    https://edge/b.ts
-    #EXT-X-TWITCH-PREFETCH:https://edge/c.ts
-    #EXT-X-TWITCH-PREFETCH:https://edge/d.ts
-
-    """
-  guard let trimmed = LowLatencyPlaylist.startingAtNewest(text) else {
-    check(false, "no trim")
-    return
-  }
-  check(trimmed.contains("#EXT-X-MEDIA-SEQUENCE:102"), trimmed)
-  check(trimmed.contains("#EXT-X-TWITCH-ELAPSED-SECS:200.000"), trimmed)
-  check(trimmed.contains("#EXT-X-PROGRAM-DATE-TIME:2026-10-30T01:00:04.000Z"), trimmed)
-  check(trimmed.contains("#EXTINF:2.000,live\nhttps://edge/c.ts\n#EXT-X-TWITCH-PREFETCH:https://edge/d.ts"), trimmed)
-  check(!trimmed.contains("a.ts") && !trimmed.contains("b.ts"), trimmed)
-  // Nothing to trim to without prefetch hints.
-  check(LowLatencyPlaylist.startingAtNewest(text.replacingOccurrences(of: "#EXT-X-TWITCH-PREFETCH:", with: "#X:")) == nil)
 }
 
 func testRecordingPlaylist() {
@@ -1235,38 +1275,6 @@ func testMultiviewLayout() {
   check(MultiviewLayout.heightCap(points: 400, scale: 3, heard: true) == nil, "big: any")
 }
 
-func testStreamSteadiness() {
-  let start = Date(timeIntervalSince1970: 1_000_000)
-  var steady = StreamSteadiness(now: start)
-  // One stall, or two far apart, is nothing to worry about.
-  check(!steady.stalled(now: start), "one stall")
-  check(!steady.stalled(now: start.addingTimeInterval(200)), "stalls far apart")
-  check(!steady.unsteady, "still steady")
-  // Three within two minutes: unsteady (said once).
-  check(!steady.stalled(now: start.addingTimeInterval(230)), "second close stall")
-  check(steady.stalled(now: start.addingTimeInterval(260)), "third close stall makes it unsteady")
-  check(steady.unsteady && !steady.stalled(now: start.addingTimeInterval(270)), "said only once")
-  // Smooth for ten minutes: steady again.
-  check(!steady.tick(now: start.addingTimeInterval(500)), "not calm yet")
-  check(steady.tick(now: start.addingTimeInterval(270 + StreamSteadiness.calmAfter + 1)) && !steady.unsteady, "calm again")
-  // A stall then a restart soon after: unsteady.
-  var other = StreamSteadiness(now: start)
-  _ = other.stalled(now: start)
-  check(other.restarted(now: start.addingTimeInterval(30)), "stall + restart")
-  // Remembered from last time.
-  check(StreamSteadiness(unsteady: true, now: start).unsteady, "starts unsteady")
-
-  // The catch-up keeps the floor and only goes gently.
-  var catchUp = LiveCatchUp(now: start)
-  catchUp.setFloor(StreamSteadiness.buffer)
-  check(catchUp.targetBuffer >= StreamSteadiness.buffer, "floor raises the margin")
-  let rate = catchUp.update(buffer: 9, latency: 10, playing: true, now: start.addingTimeInterval(5))
-  check(rate == LiveCatchUp.rates.gentle, "only gentle with a floor: \(rate)")
-  check(catchUp.update(buffer: 3.2, latency: 3.4, playing: true, now: start.addingTimeInterval(6)) == 1, "no catching up inside the floor")
-  catchUp.setFloor(0)
-  check(catchUp.update(buffer: 9, latency: 10, playing: true, now: start.addingTimeInterval(7)) == LiveCatchUp.rates.fast, "back to normal")
-}
-
 func testAdFreeProxy() {
   let url = AdFreeProxy.masterURL(host: "eu.luminous.dev", login: "SomeOne", codecs: "h265,h264", lowLatency: true)!
   check(url.absoluteString.hasPrefix("https://eu.luminous.dev/live/someone?") && url.query!.contains("fast_bread=true"), "\(url)")
@@ -1321,11 +1329,10 @@ testLowLatencySession()
 testLiveCatchUp()
 testSteadyAutoQuality()
 testMasterClock()
-testStartingAtNewest()
 testRecordingPlaylist()
 testMutedParts()
 testMultiviewLayout()
-testStreamSteadiness()
+testStreamArrival()
 testMediaParsing()
 testAdTimeline()
 testTimelineAndRender()

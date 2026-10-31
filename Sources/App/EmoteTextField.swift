@@ -281,6 +281,53 @@ final class EmoteTextView: UITextView {
 
   override var canBecomeFirstResponder: Bool { allowsFocus && super.canBecomeFirstResponder }
 
+  // MARK: Putting the keyboard away with its slide (iOS 26+, see Keyboard.dismiss)
+
+  /// The keyboard is sliding off; the box lets go of it once it's gone.
+  private var slidingAway = false
+  private var letGo: DispatchWorkItem?
+
+  /// Trades the keyboard for an empty one (which iOS animates: the keyboard slides down), then lets
+  /// go. Returns false when that doesn't apply (not typing, or already on the way out).
+  func slideKeyboardAway() -> Bool {
+    guard isFirstResponder, !slidingAway, inputView == nil, window != nil else { return false }
+    slidingAway = true
+    inputView = UIView(frame: .zero)
+    reloadInputViews()
+    let work = DispatchWorkItem { [weak self] in
+      guard let self, self.slidingAway else { return }
+      _ = self.resignFirstResponder()
+    }
+    letGo = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
+    return true
+  }
+
+  @discardableResult
+  override func resignFirstResponder() -> Bool {
+    let resigned = super.resignFirstResponder()
+    if slidingAway || inputView != nil {
+      // The real keyboard again next time.
+      slidingAway = false
+      letGo?.cancel()
+      letGo = nil
+      inputView = nil
+    }
+    return resigned
+  }
+
+  /// A touch on the box while the keyboard is sliding off brings it straight back.
+  override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+    if slidingAway, isFirstResponder {
+      slidingAway = false
+      letGo?.cancel()
+      letGo = nil
+      inputView = nil
+      reloadInputViews()
+    }
+    super.touchesBegan(touches, with: event)
+  }
+
   var placeholder: String = "" {
     didSet { placeholderLabel.text = placeholder }
   }

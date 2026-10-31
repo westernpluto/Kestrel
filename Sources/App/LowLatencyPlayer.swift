@@ -70,19 +70,15 @@
     private var renderedFPS: Double?
     /// Paused while the viewer rewinds through the VOD.
     private var suspended = false
-    /// Plays a touch faster while more is buffered than needed (see `LiveCatchUp`).
-    private var catchUp = LiveCatchUp()
+    /// Steers to the margin this stream needs with the playback speed alone, a touch faster or
+    /// slower (see `LiveCatchUp`); never by jumping or restarting.
+    private var catchUp: LiveCatchUp
     /// Keeps Auto from going back up to a quality that just stalled (see `SteadyAutoQuality`).
     private var steadyAuto = SteadyAutoQuality(count: 0)
     /// The cap last handed to the player (rank into the video qualities).
     private var appliedAutoCap: Int?
     /// Played since the last load (buffering after that means the player ran dry).
     private var playedSinceLoad = false
-    /// Start at the newest video (see `LowLatencyPlaylist.startingAtNewest`). Turned off for this
-    /// stream if a start that way doesn't get going.
-    private var edgeStart = true
-    /// When the player was handed the stream (until it plays).
-    private var loadedAt: Date?
     private var lastQualitySwitch = Date.distantPast
     /// IVS documents `buffered` as what's left in the buffer, but has also behaved like the
     /// buffer's end position: it's what's left once it's seen below the playhead.
@@ -94,9 +90,14 @@
     /// Twitch's playlist server for this stream, as the stats show it.
     private var videoServer: String?
     private var serverCheckedAt = Date.distantPast
-    /// A stream that keeps running dry gets a few seconds in hand instead of restarts (see
-    /// `StreamSteadiness`); remembered for the channel for a day.
-    private var steadiness: StreamSteadiness
+    /// Buffering: the stream itself has stopped coming in for now (the broadcaster's side), so the
+    /// player waits for it rather than restarting (see StreamArrival).
+    private var waitingForStream = false
+    /// Last ran dry, and last jumped ahead after falling far behind.
+    private var lastStall = Date.distantPast
+    private var lastFarJump = Date.distantPast
+    /// The margin last logged (so the log says when it changes a lot, not every step).
+    private var loggedMargin: Double
 
     private func refreshServer(_ session: LowLatencySession) async {
       serverCheckedAt = Date()
@@ -111,11 +112,12 @@
       videoServer = text
     }
 
-    /// How much video to have before starting. Low latency: half a second (the player's own
-    /// default is a second; `LiveCatchUp` keeps it from building up after that); more for a stream
-    /// that keeps running dry.
+    /// How much video to have before starting. Low latency: half a second, or what this channel's
+    /// stream has needed in hand lately if that's more (the player's own default is a second;
+    /// `LiveCatchUp` steers to the margin after that).
     private func startBuffer(lowLatency: Bool) -> CMTime {
-      CMTime(seconds: steadiness.unsteady ? 2.5 : lowLatency ? 0.5 : 2.0, preferredTimescale: 1000)
+      let learned = catchUp.targetBuffer > LiveCatchUp.startBuffer ? min(2.0, catchUp.targetBuffer * 0.7) : 0
+      return CMTime(seconds: lowLatency ? max(0.5, learned) : 2.0, preferredTimescale: 1000)
     }
 
     /// Quality-menu IDs at or above this pick a rendition for the Apple player.
@@ -125,7 +127,10 @@
       self.login = login.lowercased()
       self.codecs = codecs
       self.model = model
-      steadiness = StreamSteadiness(unsteady: UnsteadyChannels.contains(login))
+      // What this channel needed last time, so it doesn't have to stall to learn it again.
+      let remembered = ChannelMargins.margin(for: login)
+      catchUp = LiveCatchUp(targetBuffer: remembered)
+      loggedMargin = catchUp.targetBuffer
       super.init()
     }
 
@@ -140,11 +145,14 @@
       player.setInitialBufferDuration(startBuffer(lowLatency: AppSettings.shared.lowLatency))
       // Auto starts from the quality that last played smoothly, not from a guess.
       if let bitrate = PlaybackMemory.autoBitrate { player.setAutoInitialBitrate(bitrate) }
-      player.setRebufferToLive(!steadiness.unsteady)
+      // After running dry, carry on from where it stopped, never skip to the live edge: the skip
+      // empties what's in hand and sets up the next stall (on a shaky stream that became a loop of
+      // skips). The speed steering wins the time back smoothly instead.
+      player.setRebufferToLive(false)
       player.setNetworkRecoveryMode(.resume)
-      if steadiness.unsteady {
-        applySteadiness(announce: false)
-        ActivityLog.shared.add("\(login) kept running dry last time: keeping \(Int(StreamSteadiness.buffer)) s in hand")
+      if catchUp.learnedUneven {
+        ActivityLog.shared.add(
+          "\(login)'s video arrived unevenly last time: starting with \(Self.seconds(catchUp.targetBuffer)) in hand")
       }
       player.autoQualityMode = false
       if tile { chosen = nil }
@@ -163,6 +171,7 @@
     }
 
     func stop() {
+      if !stopped { ChannelMargins.remember(catchUp.targetBuffer, for: login) }
       stopped = true
       backgroundSettleTask?.cancel()
       loadTask?.cancel()
@@ -209,7 +218,6 @@
         config.adFreeProxies = model?.adFreeProxies ?? settings.adFreeProxyHosts
         config.checkAccountFirst = TwitchAuth.shared.session != nil
         config.nearbyServers = settings.nearbyServers
-        config.startAtLiveEdge = settings.lowLatency && edgeStart
         let session = LowLatencySession(
           login: login, config: config, http: playbackHTTP(), tokens: TwitchAPI.shared
         ) { [weak self] update in
@@ -247,7 +255,6 @@
 
     /// Loads into the player, at normal speed until it has settled.
     private func startPlayback(_ url: URL) {
-      loadedAt = Date()
       catchUp.restart()
       playedSinceLoad = false
       if player.playbackRate != 1 { player.playbackRate = 1 }
@@ -273,7 +280,6 @@
         load()
       } else if failures.count <= 2 {
         ActivityLog.shared.add("Low-latency player error (\(message)), reconnecting")
-        noteRestart()
         load()
       } else {
         model?.lowLatencyFailed(message)
@@ -293,45 +299,26 @@
 
     /// Starts playback over at the live edge (with the stream asked for afresh), at most every 20
     /// seconds. (Reloading the same playlists kept the player from reporting its latency.)
-    private func reload(reason: String, trouble: Bool = false) {
+    private func reload(reason: String) {
       guard !stopped, Date().timeIntervalSince(lastReload) > 20 else { return }
       lastReload = Date()
       bufferingSince = nil
       ActivityLog.shared.add("Low-latency player: reloading (\(reason))")
-      if trouble { noteRestart() }
       load()
     }
 
-    // MARK: Streams that keep running dry
-
-    private func noteStall() {
-      if steadiness.stalled() { becameUnsteady() }
-    }
-
-    private func noteRestart() {
-      if steadiness.restarted() { becameUnsteady() }
-    }
-
-    private func becameUnsteady() {
+    /// Notes in the log when the margin this stream needs moves a fair way (a shaky upload, or one
+    /// that settled down), and remembers it for the channel.
+    private func noteMargin() {
+      let margin = catchUp.targetBuffer
+      guard abs(margin - loggedMargin) >= 0.5 else { return }
+      let grew = margin > loggedMargin
+      loggedMargin = margin
       ActivityLog.shared.add(
-        "\(login)'s stream keeps running dry (a shaky upload or connection): keeping \(Int(StreamSteadiness.buffer)) s in hand instead of restarting, a little further behind live")
-      UnsteadyChannels.mark(login)
-      applySteadiness(announce: true)
-    }
-
-    /// Unsteady: more in hand, only gentle catching up, no jump to live after a stall (that skip
-    /// and the restarts were what looked like the stream refreshing), no start at the newest
-    /// segment. Steady again: back to keeping it close.
-    private func applySteadiness(announce: Bool) {
-      let unsteady = steadiness.unsteady
-      catchUp.setFloor(unsteady ? StreamSteadiness.buffer : 0)
-      player.setRebufferToLive(!unsteady)
-      player.setInitialBufferDuration(startBuffer(lowLatency: AppSettings.shared.lowLatency))
-      if unsteady { edgeStart = false }
-      if announce, !unsteady {
-        ActivityLog.shared.add("\(login)'s stream has played smoothly for a while: keeping it close to live again")
-        UnsteadyChannels.clear(login)
-      }
+        grew
+          ? "\(login)'s video is arriving unevenly: keeping \(Self.seconds(margin)) in hand (playing a touch slower to build it, no restarts)"
+          : "\(login)'s video is arriving evenly again: down to \(Self.seconds(margin)) in hand")
+      ChannelMargins.remember(margin, for: login)
     }
 
     // MARK: Player events (forwarded from the delegate proxy on the main queue)
@@ -349,14 +336,15 @@
         // Ran dry mid-stream (not a start, a pause or a quality switch): keep a bigger margin.
         if playedSinceLoad, !pausedForBackground, Date().timeIntervalSince(lastQualitySwitch) > 3 {
           catchUp.stalled()
-          noteStall()
+          lastStall = Date()
+          noteMargin()
           if player.playbackRate != 1 { player.playbackRate = 1 }
           if chosen == nil, steadyAuto.stalled() { applyAutoCap() }
         }
       case .playing:
         playedSinceLoad = true
-        loadedAt = nil
         model.isBuffering = false
+        setWaitingForStream(false)
         if model.phase != .playing { model.phase = .playing }
         model.liveResumed()
       case .idle:
@@ -397,6 +385,14 @@
     }
 
     private var videoQualities: [IVSQuality] { menuQualities.filter { $0.width > 0 } }
+
+    private static func seconds(_ value: Double) -> String { String(format: "%.1f s", value) }
+
+    private func setWaitingForStream(_ waiting: Bool) {
+      guard waitingForStream != waiting else { return }
+      waitingForStream = waiting
+      if model?.waitingForStream != waiting { model?.waitingForStream = waiting }
+    }
 
     /// Tells the screen when the audio-only rendition is playing (picked, or still on after the
     /// background while the picture comes back).
@@ -541,26 +537,20 @@
       model.setLatency(latency)
       updateAudioOnly()
 
-      // Stay close to live: eat any extra buffer by playing a touch faster.
-      let catchingUp =
+      // Stay close to live, smoothly: a touch faster while more is in hand than the stream needs, a
+      // touch slower while less is (see LiveCatchUp).
+      let steering =
         AppSettings.shared.lowLatency && player.isLiveLowLatency && player.state == .playing && !pausedForBackground
-      let rate = catchUp.update(buffer: bufferAhead, latency: latency, playing: catchingUp)
+      let position = player.position.seconds
+      let rate = catchUp.update(
+        buffer: bufferAhead, latency: latency, playing: steering, position: position.isFinite ? position : nil)
       if player.playbackRate != rate { player.playbackRate = rate }
+      noteMargin()
 
       // The session can go back to the ad-free server's playlist server mid-stream.
       if let session, Date().timeIntervalSince(serverCheckedAt) > 5 {
         serverCheckedAt = Date()
         Task { [weak self] in await self?.refreshServer(session) }
-      }
-
-      // A start at the newest video that doesn't get going: start the usual way instead.
-      if let since = loadedAt, edgeStart, AppSettings.shared.lowLatency, !pausedForBackground, !isPaused,
-        Date().timeIntervalSince(since) > 8, player.state != .playing
-      {
-        edgeStart = false
-        loadedAt = nil
-        ActivityLog.shared.add("Low-latency player: starting at the newest video didn't get going; starting the usual way")
-        load()
       }
 
       // Auto: let it try a better quality again once a hold is over; remember what plays well.
@@ -572,18 +562,40 @@
         }
       }
 
-      // Stuck buffering (e.g. after a switch between copies of the stream): start again. A stream
-      // that keeps running dry gets longer to come back by itself first (a restart only loses what
-      // was in hand).
-      if player.state == .buffering, !pausedForBackground, !detachedForBackground {
+      // Buffering for a while: start over only when that can help, i.e. the stream is coming in but
+      // the player isn't playing it (or has stopped asking for it). When the stream itself has
+      // stopped coming in (the broadcaster's upload dropped out), wait for it: a restart would
+      // only throw away what's in hand (see StreamArrival).
+      if player.state == .buffering, !pausedForBackground, !detachedForBackground, !isPaused {
         if bufferingSince == nil { bufferingSince = Date() }
-        if let since = bufferingSince, Date().timeIntervalSince(since) > (steadiness.unsteady ? 20 : 8) {
-          reload(reason: "stuck buffering", trouble: true)
+        if let since = bufferingSince, let arrival = session?.arrival {
+          let ages = arrival.ages()
+          switch StreamArrival.verdict(buffering: Date().timeIntervalSince(since), asked: ages.asked, moved: ages.moved) {
+          case .wait:
+            setWaitingForStream(false)
+          case .waitingForStream:
+            if !waitingForStream {
+              ActivityLog.shared.add("\(login)'s stream stopped coming in for a moment (the broadcaster's side): waiting for it")
+            }
+            setWaitingForStream(true)
+          case .restart:
+            setWaitingForStream(false)
+            reload(reason: ages.moved < 4.5 ? "the stream is coming in but the player is stuck" : "nothing for a long while")
+          }
         }
       } else {
         bufferingSince = nil
+        if player.state != .buffering { setWaitingForStream(false) }
       }
-      if player.state == .playing, steadiness.tick() { applySteadiness(announce: true) }
+
+      // Far behind live after a long dropout: one jump back to live (winning back that much by
+      // speed would take minutes). Only once it's playing steadily again, and rarely.
+      if let latency, latency > 20, player.state == .playing, AppSettings.shared.lowLatency, !pausedForBackground,
+        Date().timeIntervalSince(lastStall) > 15, Date().timeIntervalSince(lastFarJump) > 180
+      {
+        lastFarJump = Date()
+        reload(reason: String(format: "%.0f s behind live after a dropout", latency))
+      }
       let decoded = player.videoFramesDecoded
       let elapsed = Date().timeIntervalSince(framesDecoded.at)
       if elapsed >= 1 {
@@ -628,13 +640,18 @@
       let latency = player.liveLatency.seconds
       lines.append(StatLine(label: "Latency", value: StatFormat.seconds(latency.isFinite && latency >= 0 ? latency : nil)))
       if AppSettings.shared.lowLatency {
-        let margin = String(format: "keeping %.1f s", catchUp.targetBuffer)
-        let speed = player.playbackRate > 1.001 ? String(format: "%.2f× · ", player.playbackRate) : "no · "
-        lines.append(StatLine(label: "Catching up", value: speed + margin))
+        let rate = player.playbackRate
+        let speed =
+          rate > 1.001 ? String(format: "%.2f× (catching up)", rate)
+          : rate < 0.999 ? String(format: "%.2f× (building margin)", rate) : "1×"
+        lines.append(StatLine(label: "Speed", value: speed))
+        let margin = String(format: "%.1f s", catchUp.targetBuffer)
+        lines.append(
+          StatLine(label: "Margin", value: catchUp.learnedUneven ? margin + " (this stream's video arrives unevenly)" : margin))
       }
       if let videoServer { lines.append(StatLine(label: "Video server", value: videoServer)) }
-      if steadiness.unsteady {
-        lines.append(StatLine(label: "Steadier", value: "keeping \(Int(StreamSteadiness.buffer)) s in hand (stream kept running dry)"))
+      if waitingForStream {
+        lines.append(StatLine(label: "Stream", value: "waiting for the broadcaster's video"))
       }
       let video = videoQualities
       if chosen == nil, let cap = appliedAutoCap, cap > 0, cap < video.count {
@@ -654,7 +671,6 @@
       if player.state == .playing || player.state == .buffering {
         player.pause()
         isPaused = true
-        loadedAt = nil
       } else {
         // Paused live video is behind; start again at the live edge (with a fresh token, since
         // the old one may have expired).
@@ -667,6 +683,7 @@
     /// meanwhile, until the new one is ready to load.
     func goLive() {
       lastReload = Date()
+      lastFarJump = Date()
       bufferingSince = nil
       load()
     }

@@ -28,6 +28,9 @@ final class PlayerModel: ObservableObject {
   @Published private(set) var stream: LiveStream?
   @Published private(set) var channel: Channel?
   @Published var isBuffering = true
+  /// Buffering because the stream itself stopped coming in for a moment (the broadcaster's side),
+  /// not this app or connection: said under the spinner.
+  @Published var waitingForStream = false
   /// The video stats overlay's rows (only filled while it's switched on).
   @Published var stats: [StatLine] = []
   /// The live player in use (VODs always use the Apple player).
@@ -1404,6 +1407,7 @@ final class PlayerModel: ObservableObject {
       guard engine == .lowLatency, !stopped else { return }
       ActivityLog.shared.add("Low-latency player failed (\(message)); switching to the Apple player")
       teardownPlayback()
+      waitingForStream = false
       engine = .standard
       phase = .loading
       Task { await start() }
@@ -1425,6 +1429,7 @@ final class PlayerModel: ObservableObject {
     func lowLatencyOffline() {
       guard !stopped else { return }
       teardownPlayback()
+      waitingForStream = false
       phase = .offline
     }
   #endif
