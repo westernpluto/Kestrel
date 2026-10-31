@@ -79,13 +79,20 @@ enum ChannelMargins {
     return stored.filter { $0.value.count == 2 && now - $0.value[1] < keepFor }
   }
 
-  static func margin(for login: String) -> Double? {
-    all()[login.lowercased()]?.first
+  /// Kept apart for cellular (it hiccups more than Wi-Fi: what a channel needed there says little
+  /// about Wi-Fi).
+  private static func entry(_ login: String, network: String) -> String {
+    network == "cell" ? login.lowercased() + "@cell" : login.lowercased()
   }
 
-  static func remember(_ margin: Double, for login: String) {
+  static func margin(for login: String, network: String) -> Double? {
+    all()[entry(login, network: network)]?.first
+  }
+
+  static func remember(_ margin: Double, for login: String, network: String) {
     var stored = all()
-    stored[login.lowercased()] = margin > LiveCatchUp.startBuffer + 0.05 ? [margin, Date().timeIntervalSince1970] : nil
+    stored[entry(login, network: network)] =
+      margin > LiveCatchUp.startBuffer + 0.05 ? [margin, Date().timeIntervalSince1970] : nil
     UserDefaults.standard.set(stored, forKey: key)
   }
 }

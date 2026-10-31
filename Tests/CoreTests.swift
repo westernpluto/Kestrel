@@ -1059,22 +1059,54 @@ func testLiveCatchUp() {
   var catchUp = LiveCatchUp(now: t0)
   // Settling after a start: normal speed.
   check(catchUp.update(buffer: 2.5, latency: 3.5, playing: true, now: t0) == 1)
-  // Catching up from 4.2 s in hand: fast, then medium, then gentle down to the margin, and stop.
+  // Far more than needed in hand: catches up at once, faster while well over, then gently down to
+  // the margin in one go, and stops.
   var t = t0.addingTimeInterval(2)
   var buffer = 4.2
   var seen: [Float] = []
-  for _ in 0..<100 {
+  for _ in 0..<200 {
     let rate = catchUp.update(buffer: buffer, latency: buffer + 1, playing: true, now: t)
     if seen.last != rate { seen.append(rate) }
     buffer -= Double(rate - 1) * 0.5
     t += 0.5
   }
-  check(seen == [LiveCatchUp.rates.fast, LiveCatchUp.rates.medium, LiveCatchUp.rates.gentle, 1], "\(seen)")
-  check(buffer > 0.6 && buffer < 1.1, "ends near the margin: \(buffer)")
+  check(seen == [LiveCatchUp.rates.medium, LiveCatchUp.rates.gentle, 1], "\(seen)")
+  check(buffer > 0.7 && buffer < 1.2, "ends near the margin: \(buffer)")
   check(catchUp.targetBuffer <= LiveCatchUp.startBuffer + 0.001, "spending the extra on purpose isn't a hiccup")
   // Paused or buffering: normal speed. Close to live already: leave it.
   check(catchUp.update(buffer: 3, latency: 4, playing: false, now: t) == 1)
   check(catchUp.update(buffer: catchUp.targetBuffer + 0.3, latency: catchUp.targetBuffer + 0.3, playing: true, now: t + 0.5) == 1)
+
+  // Video arriving in pieces: the reading goes up and down around an average a little over the
+  // margin. No catching up for that (it used to speed up after every piece).
+  var pieces = LiveCatchUp(targetBuffer: 0.8, now: t0)
+  var p = t0.addingTimeInterval(2)
+  var inPieces = 0.9
+  var changes = 0
+  var lastRate: Float = 1
+  for step in 0..<240 {
+    let rate = pieces.update(buffer: inPieces, latency: inPieces + 0.8, playing: true, now: p)
+    if rate != lastRate {
+      changes += 1
+      lastRate = rate
+    }
+    // A second of video every other reading; half a second played each time.
+    inPieces += (step % 2 == 0 ? 1.0 : 0) - Double(rate) * 0.5
+    p += 0.5
+  }
+  check(changes == 0, "steady speed while video arrives in pieces: \(changes) changes")
+
+  // More than needed: not caught up for the first few seconds (it may just be video arriving in a
+  // piece), then it is.
+  var surplus = LiveCatchUp(targetBuffer: 1, now: t0)
+  var s = t0.addingTimeInterval(2)
+  var surplusRates: [Float] = []
+  for _ in 0..<20 {
+    surplusRates.append(surplus.update(buffer: 2.4, latency: 3.3, playing: true, now: s))
+    s += 0.5
+  }
+  check(surplusRates.prefix(6).allSatisfy { $0 == 1 }, "not for a moment's surplus: \(surplusRates)")
+  check((surplusRates.last ?? 1) > 1, "a lasting one is caught up")
 
   // A hiccup: 1.5 s of no video arriving (the buffer drains at normal speed). The margin grows to
   // cover it as it happens; then playback slows a touch to build the margin back, and stops there.
@@ -1089,15 +1121,20 @@ func testLiveCatchUp() {
   }
   check(hiccup.targetBuffer >= 1.5 + LiveCatchUp.air - 0.01, "margin covers the hiccup: \(hiccup.targetBuffer)")
   h += 0.5
-  check(hiccup.update(buffer: 0.9, latency: 2, playing: true, now: h) == LiveCatchUp.rates.slow, "builds it back")
-  h += 0.5
-  check(hiccup.update(buffer: hiccup.targetBuffer - 0.1, latency: 2.5, playing: true, now: h) == LiveCatchUp.rates.slow, "to the margin")
-  h += 0.5
-  check(hiccup.update(buffer: hiccup.targetBuffer + 0.01, latency: 2.8, playing: true, now: h) == 1, "and stops there")
-  for _ in 0..<4 {
+  held = 0.3
+  check(hiccup.update(buffer: held, latency: 2, playing: true, now: h) == LiveCatchUp.rates.slow, "builds it back")
+  var building: [Float] = [LiveCatchUp.rates.slow]
+  for _ in 0..<600 {
     h += 0.5
-    hiccup.update(buffer: hiccup.targetBuffer + 0.6, latency: 2.8, playing: true, now: h)
+    let rate = hiccup.update(buffer: held, latency: held + 1, playing: true, now: h)
+    if building.last != rate { building.append(rate) }
+    held += (1 - Double(rate)) * 0.5
   }
+  check(building == [LiveCatchUp.rates.slow, 1], "slower until the margin's back, then normal: \(building)")
+  check(held >= hiccup.targetBuffer - 0.2, "back to the margin: \(held) / \(hiccup.targetBuffer)")
+  // The late video turns up all at once: the hiccup's depth is remembered.
+  h += 0.5
+  hiccup.update(buffer: held + 2, latency: held + 3, playing: true, now: h)
   check(hiccup.neededBuffer(now: h) >= 1.5, "the hiccup is remembered")
   // Well behind live already: never slower.
   var behind = LiveCatchUp(now: t0)
@@ -1118,6 +1155,10 @@ func testLiveCatchUp() {
   check(LiveCatchUp(targetBuffer: 1.5).targetBuffer == 1.5)
   check(LiveCatchUp(targetBuffer: 9).targetBuffer == LiveCatchUp.maxBuffer)
   check(LiveCatchUp(targetBuffer: 0.1).targetBuffer == LiveCatchUp.minBuffer)
+  // On cellular: a little more kept from the start, and never less.
+  var cellular = LiveCatchUp(targetBuffer: 0.7)
+  cellular.setFloor(1.0)
+  check(cellular.targetBuffer == 1.0 && cellular.neededBuffer() == 1.0)
 
   // No hiccups for long enough: the margin creeps back down (spending what's in hand by playing
   // faster, read from the playhead), never under the minimum.
@@ -1132,6 +1173,27 @@ func testLiveCatchUp() {
     position += Double(rate) * 0.5
   }
   check(abs(calm.targetBuffer - LiveCatchUp.minBuffer) < 0.001, "shrinks back: \(calm.targetBuffer)")
+}
+
+func testConnectionFit() {
+  let t0 = Date(timeIntervalSince1970: 2_000_000)
+  var fit = ConnectionFit(count: 3)
+  check(!fit.stalled(now: t0), "one stall isn't enough")
+  check(fit.stalled(now: t0.addingTimeInterval(60)) && fit.step == 1, "two in a few minutes: one down")
+  check(!fit.tick(now: t0.addingTimeInterval(120)), "waits before trying again")
+  let tried = t0.addingTimeInterval(60 + ConnectionFit.firstWait + 1)
+  check(fit.tick(now: tried) && fit.step == 0, "tries the best again")
+  check(fit.stalled(now: tried.addingTimeInterval(20)) && fit.step == 1, "failing right away: straight back down")
+  check(!fit.tick(now: tried.addingTimeInterval(20 + ConnectionFit.firstWait + 1)), "and waits longer this time")
+  check(fit.tick(now: tried.addingTimeInterval(20 + 2 * ConnectionFit.firstWait + 1)) && fit.step == 0)
+  // Far apart: no step.
+  var spread = ConnectionFit(count: 3)
+  spread.stalled(now: t0)
+  check(!spread.stalled(now: t0.addingTimeInterval(ConnectionFit.window + 1)) && spread.step == 0)
+  // Only one quality: nowhere to go.
+  var single = ConnectionFit(count: 1)
+  single.stalled(now: t0)
+  check(!single.stalled(now: t0.addingTimeInterval(10)) && single.step == 0)
 }
 
 func testStreamArrival() {
@@ -1338,6 +1400,7 @@ testMasterParsing()
 testFullWindowAdDetection()
 testLowLatencySession()
 testLiveCatchUp()
+testConnectionFit()
 testSteadyAutoQuality()
 testMasterClock()
 testRecordingPlaylist()

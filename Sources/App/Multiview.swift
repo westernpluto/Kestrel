@@ -39,6 +39,8 @@ final class MultiviewModel: ObservableObject, Identifiable {
   @Published var wantsPicker = false
   /// Every stream is in one Picture in Picture window (see MultiviewPictureInPicture).
   @Published private(set) var pictureInPictureActive = false
+  /// Paused from the lock screen, Control Center or headphones (see `setPaused`).
+  @Published private(set) var paused = false
   private var hidden = false
   /// The pictures' last sizes (to fit the streams to them again after PiP).
   private var lastFit: (heights: [String: CGFloat], scale: CGFloat)?
@@ -84,6 +86,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
     if selectedID == nil { select(channel.id) }
     if running { Task { await player.start() } }
     updatePictureInPicture()
+    NowPlaying.shared.update(multiview: self)
     AppModel.shared.objectWillChange.send()
   }
 
@@ -113,6 +116,8 @@ final class MultiviewModel: ObservableObject, Identifiable {
   func start() {
     guard !running else { return }
     running = true
+    paused = false
+    NowPlaying.shared.attach(multiview: self)
     for tile in tiles { Task { await tile.player.start() } }
     applySound()
     if let selectedID { startChat(for: selectedID) }
@@ -124,7 +129,9 @@ final class MultiviewModel: ObservableObject, Identifiable {
   func park() {
     guard running else { return }
     stopPictureInPicture()
+    NowPlaying.shared.detach(multiview: self)
     running = false
+    paused = false
     for tile in tiles { tile.player.stop() }
     tiles = tiles.map { Tile(channel: $0.channel, player: makePlayer($0.channel, heard: heardIDs.contains($0.id))) }
     chat?.stop()
@@ -196,9 +203,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
 
   private func applySound() {
     for tile in tiles { tile.player.setMuted(!heardIDs.contains(tile.id)) }
-    #if canImport(AmazonIVSPlayer)
-      sharedPiP.sync()
-    #endif
+    NowPlaying.shared.update(multiview: self)
   }
 
   // MARK: Picture in Picture
@@ -245,6 +250,30 @@ final class MultiviewModel: ObservableObject, Identifiable {
     }
   }
 
+  /// Paused or played from the lock screen, Control Center or headphones. Pausing stops every
+  /// stream and closes the Picture in Picture window (it has no buttons of its own); playing picks
+  /// them up at live again: in the background just the ones heard, the others with the app.
+  func setPaused(_ pause: Bool) {
+    guard running else { return }
+    paused = pause
+    if pause {
+      stopPictureInPicture()
+      for tile in tiles { tile.player.setPaused(true) }
+    } else {
+      let background = UIApplication.shared.applicationState == .background
+      for tile in tiles where !background || heardIDs.contains(tile.id) { tile.player.setPaused(false) }
+    }
+    NowPlaying.shared.update(multiview: self)
+  }
+
+  /// Back on screen after a pause from outside the app: everything plays again.
+  func resumeIfPaused() {
+    guard running, paused else { return }
+    paused = false
+    for tile in tiles where tile.player.isPaused { tile.player.setPaused(false) }
+    NowPlaying.shared.update(multiview: self)
+  }
+
   private func stopPictureInPicture() {
     #if canImport(AmazonIVSPlayer)
       sharedPiP.stop()
@@ -264,6 +293,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
 
   func stopAll() {
     stopPictureInPicture()
+    NowPlaying.shared.detach(multiview: self)
     for tile in tiles { tile.player.stop() }
     chat?.stop()
     running = false
@@ -309,6 +339,10 @@ struct MultiviewScreen: View {
       model.setHidden(true)
       if app.playing == nil || app.playerMinimized { OrientationLock.playerVisible(false) }
     }
+    // Back in the app on multi-view after pausing it from the lock screen: it plays again.
+    .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+      model.resumeIfPaused()
+    }
     .onChange(of: model.wantsPicker) { wants in
       if wants {
         model.wantsPicker = false
@@ -347,6 +381,7 @@ struct MultiviewScreen: View {
   private func opened() {
     pull = 0
     model.updatePictureInPicture()
+    model.resumeIfPaused()
     if app.playing != nil { app.playing = nil }
     OrientationLock.playerVisible(true)
     model.setHidden(false)

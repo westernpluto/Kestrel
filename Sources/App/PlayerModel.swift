@@ -690,7 +690,7 @@ final class PlayerModel: ObservableObject {
     }
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
-        if lowLatency.isPaused != paused { lowLatency.togglePause() }
+        lowLatency.setPaused(paused)
         isPaused = lowLatency.isPaused
         return
       }

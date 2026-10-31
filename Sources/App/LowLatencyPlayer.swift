@@ -31,6 +31,10 @@
     private var applePlayerOnly: [HLSVariant] = []
     /// Index into menuQualities, nil = Auto (which stays on for later streams once picked).
     private var chosen: Int? = AppSettings.shared.autoQuality ? nil : 0
+    /// The quality was picked in the menu (the best one by default otherwise, stepped down while
+    /// the connection can't keep up with it: see ConnectionFit).
+    private var pickedByHand = false
+    private var connectionFit = ConnectionFit(count: 0)
     private var everReady = false
     private var reportedQualities = false
     private var useDirectURL = false
@@ -150,8 +154,9 @@
       self.codecs = codecs
       self.model = model
       // What this channel needed last time, so it doesn't have to stall to learn it again.
-      let remembered = ChannelMargins.margin(for: login)
+      let remembered = ChannelMargins.margin(for: login, network: NetworkWatch.shared.memoryKey)
       catchUp = LiveCatchUp(targetBuffer: remembered)
+      catchUp.setFloor(NetworkWatch.shared.floor)
       loggedMargin = catchUp.targetBuffer
       super.init()
     }
@@ -189,11 +194,16 @@
           guard let controller = self else { return }
           Task { @MainActor in controller.enteringForeground() }
         })
+      notificationTokens.append(
+        center.addObserver(forName: NetworkWatch.changed, object: nil, queue: .main) { [weak self] _ in
+          guard let controller = self else { return }
+          Task { @MainActor in controller.networkChanged() }
+        })
       load()
     }
 
     func stop() {
-      if !stopped { ChannelMargins.remember(catchUp.targetBuffer, for: login) }
+      if !stopped { ChannelMargins.remember(catchUp.targetBuffer, for: login, network: NetworkWatch.shared.memoryKey) }
       stopped = true
       backgroundSettleTask?.cancel()
       loadTask?.cancel()
@@ -341,7 +351,7 @@
         grew
           ? "\(login)'s video is arriving unevenly: keeping \(Self.seconds(margin)) in hand (playing a touch slower to build it, no restarts)"
           : "\(login)'s video is arriving evenly again: down to \(Self.seconds(margin)) in hand")
-      ChannelMargins.remember(margin, for: login)
+      ChannelMargins.remember(margin, for: login, network: NetworkWatch.shared.memoryKey)
     }
 
     // MARK: Player events (forwarded from the delegate proxy on the main queue)
@@ -360,12 +370,17 @@
         if playedSinceLoad, !pausedForBackground, Date().timeIntervalSince(lastQualitySwitch) > 3 {
           lastStall = Date()
           if player.playbackRate != 1 { player.playbackRate = 1 }
-          if Date() < settlingUntil {
+          if Date() < settlingUntil || NetworkWatch.shared.sinceChange < 10 {
             catchUp.hold(for: 3)
           } else {
             catchUp.stalled()
             noteMargin()
             if chosen == nil, steadyAuto.stalled() { applyAutoCap() }
+            // The stream kept arriving at the server, yet the player ran dry: the connection
+            // couldn't keep up with this quality (no margin helps with that).
+            if usesConnectionFit, let moved = session?.arrival.ages().moved, moved < 3, connectionFit.stalled() {
+              applyConnectionFit(down: true)
+            }
           }
         }
       case .playing:
@@ -489,6 +504,7 @@
       if let label = model?.takePreferredQualityLabel() {
         if let index = menuQualities.firstIndex(where: { Self.label($0) == label }) {
           chosen = index
+          pickedByHand = true
         } else if applePlayerOnly.contains(where: { $0.label == label }) {
           model?.switchToApplePlayer(quality: label, reason: "picked \(label)")
           return
@@ -500,6 +516,7 @@
         steadyAuto.reset(count: videoCount)
         appliedAutoCap = nil
       }
+      if connectionFit.count != videoCount { connectionFit.reset(count: videoCount) }
       if !audioOnlyForBackground { applyChosen() }
     }
 
@@ -511,6 +528,7 @@
         return
       }
       chosen = index
+      pickedByHand = index != nil
       // Auto stays on for later streams; picking a quality goes back to starting at the best.
       AppSettings.shared.autoQuality = index == nil
       applyChosen()
@@ -526,8 +544,10 @@
         if steadyAuto.cap != nil || maxHeight != nil { applyAutoCap() }
         return
       }
-      guard index < menuQualities.count else { return }
-      let quality = menuQualities[index]
+      // The best quality by default: as good as the connection keeps up with.
+      let playing = usesConnectionFit ? min(connectionFit.step, max(0, videoQualities.count - 1)) : index
+      guard playing < menuQualities.count else { return }
+      let quality = menuQualities[playing]
       player.autoQualityMode = false
       guard player.quality.map({ !$0.isEqual(to: quality) }) ?? true else { return }
       lastQualitySwitch = Date()
@@ -536,6 +556,34 @@
       } else {
         player.quality = quality
       }
+    }
+
+    /// The best quality, not picked by hand: stepped down while the connection can't carry it.
+    private var usesConnectionFit: Bool { chosen == 0 && !pickedByHand && !tile }
+
+    private func applyConnectionFit(down: Bool) {
+      guard usesConnectionFit, !audioOnlyForBackground else { return }
+      let video = videoQualities
+      let step = connectionFit.step
+      guard step < video.count else { return }
+      if down, step > 0 {
+        ActivityLog.shared.add(
+          "\(Self.label(video[step - 1])) kept running dry on this connection while the stream itself was fine: "
+            + "playing \(Self.label(video[step])) for now, trying again in a few minutes")
+      } else if !down {
+        ActivityLog.shared.add("Trying \(Self.label(video[step])) again")
+      }
+      applyChosen(smoothly: true)
+    }
+
+    /// Wi-Fi to cellular or back: connections drop for a moment. Not the stream's doing, so a
+    /// stall now isn't learned from; and cellular keeps a little more in hand.
+    private func networkChanged() {
+      guard !stopped else { return }
+      settlingUntil = Date().addingTimeInterval(10)
+      catchUp.hold(for: 4)
+      catchUp.setFloor(NetworkWatch.shared.floor)
+      if player.playbackRate != 1 { player.playbackRate = 1 }
     }
 
     private static func codecRank(_ quality: IVSQuality) -> Int {
@@ -580,6 +628,11 @@
       if let session, Date().timeIntervalSince(serverCheckedAt) > 5 {
         serverCheckedAt = Date()
         Task { [weak self] in await self?.refreshServer(session) }
+      }
+
+      // The best quality, stepped down for the connection: try the one above again after a while.
+      if usesConnectionFit, !audioOnlyForBackground, player.state == .playing, connectionFit.tick() {
+        applyConnectionFit(down: false)
       }
 
       // Auto: let it try a better quality again once a hold is over; remember what plays well.
@@ -690,6 +743,12 @@
         lines.append(
           StatLine(label: "Margin", value: catchUp.learnedUneven ? margin + " (this stream's video arrives unevenly)" : margin))
       }
+      let network = NetworkWatch.shared
+      lines.append(StatLine(label: "Connection", value: network.kind.rawValue + (network.constrained ? " (Low Data Mode)" : "")))
+      if usesConnectionFit, connectionFit.step > 0, connectionFit.step < videoQualities.count {
+        lines.append(
+          StatLine(label: "Quality limit", value: "\(Self.label(videoQualities[connectionFit.step - 1])) ran dry on this connection; trying again soon"))
+      }
       if let videoServer { lines.append(StatLine(label: "Video server", value: videoServer)) }
       if waitingForStream {
         lines.append(StatLine(label: "Stream", value: "waiting for the broadcaster's video"))
@@ -717,6 +776,25 @@
         // the old one may have expired).
         isPaused = false
         load()
+      }
+    }
+
+    /// Paused by the viewer, or playing again (at the live edge: paused live video is behind, and
+    /// it's asked for afresh since its token may have expired). Played again in the background, it
+    /// settles as it would have (heard: sound only; quiet: paused until the app's back).
+    func setPaused(_ paused: Bool) {
+      if paused {
+        // The viewer's pause now: coming back to the app doesn't undo it.
+        pausedForBackground = false
+        guard !isPaused || player.state == .playing || player.state == .buffering else { return }
+        player.pause()
+        isPaused = true
+      } else {
+        guard isPaused || pausedForBackground else { return }
+        isPaused = false
+        pausedForBackground = false
+        load()
+        if UIApplication.shared.applicationState == .background { enteredBackground() }
       }
     }
 
@@ -876,7 +954,7 @@
 
     private func settleInBackground() {
       guard !stopped, !suspended, UIApplication.shared.applicationState == .background,
-        !proxy.pictureInPictureStarting, !(pip?.isPictureInPictureActive ?? false), sharedView == nil
+        !proxy.pictureInPictureStarting, !(pip?.isPictureInPictureActive ?? false), sharedView == nil, !isPaused
       else { return }
       if AppSettings.shared.backgroundAudio, !(tile && userMuted) {
         // Keep the sound: take the picture off screen, and if it stays in the background a while,

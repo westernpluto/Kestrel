@@ -88,7 +88,7 @@
     func sync() {
       guard isActive, let model else { return }
       fit(count: model.tiles.count)
-      let views = grid.show(model.tiles.map { (id: $0.id, heard: model.heardIDs.contains($0.id)) })
+      let views = grid.show(model.tiles.map(\.id))
       for tile in model.tiles { tile.player.showPicture(in: views[tile.id]) }
     }
 
@@ -142,15 +142,9 @@
   }
 
   /// The streams' pictures in the PiP window: two stacked, three or four in a 2×2 grid (a third
-  /// centred under the first two), with a speaker on the ones heard. The window takes no touches.
+  /// centred under the first two), nothing else on them. The window takes no touches.
   final class PictureGridView: UIView {
-    private struct Cell {
-      let id: String
-      let video: IVSPlayerView
-      let speaker: UIImageView
-    }
-
-    private var cells: [Cell] = []
+    private var cells: [(id: String, video: IVSPlayerView)] = []
     private static let gap: CGFloat = 1
 
     override init(frame: CGRect) {
@@ -168,38 +162,21 @@
     /// Shows these streams (in order), keeping the views of ones already shown. Returns each
     /// stream's view.
     @discardableResult
-    func show(_ items: [(id: String, heard: Bool)]) -> [String: IVSPlayerView] {
-      let wanted = Set(items.map(\.id))
+    func show(_ ids: [String]) -> [String: IVSPlayerView] {
+      let wanted = Set(ids)
       for cell in cells where !wanted.contains(cell.id) {
         cell.video.player = nil
         cell.video.removeFromSuperview()
-        cell.speaker.removeFromSuperview()
       }
-      var kept = Dictionary(uniqueKeysWithValues: cells.filter { wanted.contains($0.id) }.map { ($0.id, $0) })
-      var next: [Cell] = []
-      for item in items {
-        let cell: Cell
-        if let existing = kept.removeValue(forKey: item.id) {
-          cell = existing
-        } else {
-          let video = IVSPlayerView()
-          video.backgroundColor = .black
-          video.videoGravity = .resizeAspect
-          let speaker = UIImageView(image: UIImage(systemName: "speaker.wave.2.fill"))
-          speaker.tintColor = .white
-          speaker.contentMode = .scaleAspectFit
-          speaker.layer.shadowColor = UIColor.black.cgColor
-          speaker.layer.shadowOpacity = 0.7
-          speaker.layer.shadowRadius = 2
-          speaker.layer.shadowOffset = .zero
-          addSubview(video)
-          addSubview(speaker)
-          cell = Cell(id: item.id, video: video, speaker: speaker)
-        }
-        cell.speaker.isHidden = !item.heard
-        next.append(cell)
+      var kept = Dictionary(uniqueKeysWithValues: cells.filter { wanted.contains($0.id) }.map { ($0.id, $0.video) })
+      cells = ids.map { id in
+        if let video = kept.removeValue(forKey: id) { return (id, video) }
+        let video = IVSPlayerView()
+        video.backgroundColor = .black
+        video.videoGravity = .resizeAspect
+        addSubview(video)
+        return (id, video)
       }
-      cells = next
       setNeedsLayout()
       return Dictionary(uniqueKeysWithValues: cells.map { ($0.id, $0.video) })
     }
@@ -207,11 +184,7 @@
     override func layoutSubviews() {
       super.layoutSubviews()
       let frames = Self.frames(count: cells.count, in: bounds)
-      for (cell, frame) in zip(cells, frames) {
-        cell.video.frame = frame
-        let side = max(10, min(18, frame.width * 0.07))
-        cell.speaker.frame = CGRect(x: frame.minX + 6, y: frame.minY + 6, width: side, height: side)
-      }
+      for (cell, frame) in zip(cells, frames) { cell.video.frame = frame }
     }
 
     private static func frames(count: Int, in bounds: CGRect) -> [CGRect] {

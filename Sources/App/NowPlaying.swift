@@ -10,6 +10,8 @@ final class NowPlaying {
   static let shared = NowPlaying()
 
   private weak var model: PlayerModel?
+  /// Multi-view, when it's what's playing (its streams don't speak for themselves here).
+  private weak var multiview: MultiviewModel?
   private var registered = false
   private var artworkURL: URL?
   private var artwork: MPMediaItemArtwork?
@@ -23,6 +25,7 @@ final class NowPlaying {
 
   func attach(_ model: PlayerModel) {
     self.model = model
+    multiview = nil
     artworkURL = nil
     artwork = nil
     lastSignature = ""
@@ -33,6 +36,27 @@ final class NowPlaying {
   func detach(_ model: PlayerModel) {
     guard self.model === model else { return }
     self.model = nil
+    clear()
+  }
+
+  /// Multi-view: the streams' names, play and pause for all of them (see MultiviewModel.setPaused).
+  func attach(multiview: MultiviewModel) {
+    model = nil
+    self.multiview = multiview
+    artworkURL = nil
+    artwork = nil
+    lastSignature = ""
+    registerCommands()
+    update(multiview: multiview)
+  }
+
+  func detach(multiview: MultiviewModel) {
+    guard self.multiview === multiview else { return }
+    self.multiview = nil
+    clear()
+  }
+
+  private func clear() {
     MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     let center = MPRemoteCommandCenter.shared()
     for command in [center.playCommand, center.pauseCommand, center.togglePlayPauseCommand] { command.isEnabled = false }
@@ -47,15 +71,22 @@ final class NowPlaying {
     guard !registered else { return }
     registered = true
     center.playCommand.addTarget { [weak self] _ in
-      Task { @MainActor in self?.model?.setPaused(false) }
+      Task { @MainActor in self?.setPaused(false) }
       return .success
     }
     center.pauseCommand.addTarget { [weak self] _ in
-      Task { @MainActor in self?.model?.setPaused(true) }
+      Task { @MainActor in self?.setPaused(true) }
       return .success
     }
     center.togglePlayPauseCommand.addTarget { [weak self] _ in
-      Task { @MainActor in self?.model?.togglePause() }
+      Task { @MainActor in
+        guard let self else { return }
+        if let multiview = self.multiview {
+          multiview.setPaused(!multiview.paused)
+        } else {
+          self.model?.togglePause()
+        }
+      }
       return .success
     }
     center.changePlaybackPositionCommand.addTarget { [weak self] event in
@@ -74,6 +105,48 @@ final class NowPlaying {
       Task { @MainActor in self?.model?.skip(by: -10) }
       return .success
     }
+  }
+
+  private func setPaused(_ paused: Bool) {
+    if let multiview {
+      multiview.setPaused(paused)
+    } else {
+      model?.setPaused(paused)
+    }
+  }
+
+  /// Multi-view: who's heard (or everyone), how many streams, and paused or not.
+  func update(multiview: MultiviewModel) {
+    guard self.multiview === multiview else { return }
+    let tiles = multiview.tiles
+    let heard = tiles.filter { multiview.heardIDs.contains($0.id) }
+    let title = (heard.isEmpty ? tiles : heard).map(\.channel.name).joined(separator: " + ")
+    let artist = "Multi-view · \(tiles.count) stream\(tiles.count == 1 ? "" : "s")"
+    if let pictureURL = (heard.first ?? tiles.first)?.channel.profileImageURL.flatMap(URL.init(string:)),
+      pictureURL != artworkURL
+    {
+      loadArtwork(pictureURL)
+    }
+    let paused = multiview.paused
+    let signature = [title, artist, "multiview", artwork == nil ? "" : "art"].joined(separator: "|")
+    guard signature != lastSignature || paused != lastPaused else { return }
+    lastSignature = signature
+    lastPaused = paused
+    lastPush = Date()
+    var info: [String: Any] = [
+      MPMediaItemPropertyTitle: title,
+      MPMediaItemPropertyArtist: artist,
+      MPNowPlayingInfoPropertyIsLiveStream: true,
+      MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.video.rawValue,
+      MPNowPlayingInfoPropertyPlaybackRate: paused ? 0.0 : 1.0,
+      MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
+    ]
+    if let artwork { info[MPMediaItemPropertyArtwork] = artwork }
+    MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    let center = MPRemoteCommandCenter.shared()
+    center.changePlaybackPositionCommand.isEnabled = false
+    center.skipForwardCommand.isEnabled = false
+    center.skipBackwardCommand.isEnabled = false
   }
 
   /// Called by the player as it ticks; only talks to the system when something changed.
@@ -142,9 +215,13 @@ final class NowPlaying {
     ImagePipeline.shared.load(url, maxPixels: 640) { [weak self] image in
       guard let image else { return }
       Task { @MainActor in
-        guard let self, self.artworkURL == url, let model = self.model else { return }
+        guard let self, self.artworkURL == url else { return }
         self.artwork = Self.makeArtwork(image.images?.first ?? image)
-        self.update(model)
+        if let model = self.model {
+          self.update(model)
+        } else if let multiview = self.multiview {
+          self.update(multiview: multiview)
+        }
       }
     }
   }

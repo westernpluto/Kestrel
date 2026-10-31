@@ -347,6 +347,7 @@ extension View {
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
   func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+    NetworkWatch.shared.start()
     // Go-live alerts: background checks and taps on the notifications.
     LiveNotifier.register()
     AutoRecorder.register()
