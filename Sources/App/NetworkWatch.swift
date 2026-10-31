@@ -63,7 +63,7 @@ final class NetworkWatch: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     if current.constrained { return 1.2 }
-    return current.kind == .cellular ? 1.0 : LiveCatchUp.minBuffer
+    return current.kind == .cellular ? 0.9 : LiveCatchUp.minBuffer
   }
 
   /// A short name for remembering what each channel needed on this kind of connection.

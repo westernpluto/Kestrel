@@ -71,7 +71,11 @@ enum PlaybackMemory {
 /// only for streams that needed more than usual.
 enum ChannelMargins {
   private static let key = "kestrel.channelMargins"
-  private static let keepFor: TimeInterval = 3 * 24 * 3600
+  /// What a channel needed is a good start for a while (its upload and the route to it stay
+  /// much the same), not for days: an old hiccup kept every later visit further behind.
+  private static let keepFor: TimeInterval = 12 * 3600
+  /// Never started further back than this: it's learned again within seconds if it's needed.
+  private static let mostToStartWith = 2.0
 
   private static func all() -> [String: [Double]] {
     let stored = UserDefaults.standard.dictionary(forKey: key) as? [String: [Double]] ?? [:]
@@ -86,13 +90,13 @@ enum ChannelMargins {
   }
 
   static func margin(for login: String, network: String) -> Double? {
-    all()[entry(login, network: network)]?.first
+    all()[entry(login, network: network)]?.first.map { min($0, mostToStartWith) }
   }
 
   static func remember(_ margin: Double, for login: String, network: String) {
     var stored = all()
     stored[entry(login, network: network)] =
-      margin > LiveCatchUp.startBuffer + 0.05 ? [margin, Date().timeIntervalSince1970] : nil
+      margin > LiveCatchUp.minBuffer + 0.25 ? [margin, Date().timeIntervalSince1970] : nil
     UserDefaults.standard.set(stored, forKey: key)
   }
 }
