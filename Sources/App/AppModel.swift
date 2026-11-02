@@ -316,7 +316,15 @@ final class AppModel: ObservableObject {
   @Published var playing: PlaybackTarget? {
     didSet {
       if playing != nil { playerMinimized = false }
-      if playing?.id != oldValue?.id { presentation += 1 }
+      if playing?.id != oldValue?.id {
+        presentation += 1
+        // Whatever played before stops now (also caught when the view notices the change, but a
+        // stream closed and reopened within one update would slip past that).
+        Task { @MainActor [weak self] in
+          guard let self else { return }
+          self.stopPlayers(except: self.playerKey)
+        }
+      }
     }
   }
   /// Counts openings of the player. Each opening gets its own player screen (`playerKey`): keyed by

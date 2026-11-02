@@ -128,6 +128,21 @@
     private var lastFarJump = Date.distantPast
     /// The margin last logged (so the log says when it changes a lot, not every step).
     private var loggedMargin: Double
+    /// What this channel needed last time (it starts with no more than a second of it), and when
+    /// this stream was opened: a short watch that didn't learn the channel needs less doesn't
+    /// overwrite it.
+    private var rememberedMargin: Double?
+    private let openedAt = Date()
+    private static let trustSessionAfter: TimeInterval = 10 * 60
+
+    /// The margin to remember for the channel: this session's, unless it's less than what was
+    /// remembered and the session was too short to tell the channel has settled down.
+    private var marginToRemember: Double {
+      let margin = catchUp.targetBuffer
+      guard let rememberedMargin, margin < rememberedMargin, Date().timeIntervalSince(openedAt) < Self.trustSessionAfter
+      else { return margin }
+      return rememberedMargin
+    }
 
     private func refreshServer(_ session: LowLatencySession) async {
       serverCheckedAt = Date()
@@ -242,6 +257,7 @@
       // (At most a second to start with: more had it start close to live and then drift a couple
       // of seconds back while it built the rest up. It's learned again if this session needs it.)
       let remembered = ChannelMargins.margin(for: login, network: NetworkWatch.shared.memoryKey)
+      rememberedMargin = remembered
       catchUp = LiveCatchUp(targetBuffer: remembered.map { min($0, LiveCatchUp.startBuffer) })
       catchUp.setFloor(NetworkWatch.shared.floor)
       loggedMargin = catchUp.targetBuffer
@@ -264,9 +280,9 @@
       // skips). The speed steering wins the time back smoothly instead.
       player.setRebufferToLive(false)
       player.setNetworkRecoveryMode(.resume)
-      if catchUp.learnedUneven {
+      if let rememberedMargin, rememberedMargin > LiveCatchUp.startBuffer + 0.25 {
         ActivityLog.shared.add(
-          "\(login)'s video arrived unevenly last time: starting close to live, then building up \(Self.seconds(catchUp.targetBuffer)) in hand")
+          "\(login)'s video arrived unevenly last time (it needed \(Self.seconds(rememberedMargin)) in hand): starting close to live anyway, with \(Self.seconds(catchUp.targetBuffer)), and keeping more only if it stutters again")
       }
       player.autoQualityMode = false
       if tile { chosen = nil }
@@ -290,7 +306,7 @@
     }
 
     func stop() {
-      if !stopped { ChannelMargins.remember(catchUp.targetBuffer, for: login, network: NetworkWatch.shared.memoryKey) }
+      if !stopped { ChannelMargins.remember(marginToRemember, for: login, network: NetworkWatch.shared.memoryKey) }
       stopped = true
       backgroundSettleTask?.cancel()
       loadTask?.cancel()
@@ -450,7 +466,7 @@
         grew
           ? "\(login)'s video is arriving unevenly: keeping \(Self.seconds(margin)) in hand (playing a touch slower to build it, no restarts)"
           : "\(login)'s video is arriving evenly again: down to \(Self.seconds(margin)) in hand")
-      ChannelMargins.remember(margin, for: login, network: NetworkWatch.shared.memoryKey)
+      ChannelMargins.remember(marginToRemember, for: login, network: NetworkWatch.shared.memoryKey)
     }
 
     // MARK: Player events (forwarded from the delegate proxy on the main queue)

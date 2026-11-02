@@ -103,7 +103,19 @@ final class RaidWatcher: ObservableObject {
     followed = true
     pending = nil
     happened = nil
-    follow?(target)
+    guard target.id.isEmpty else {
+      follow?(target)
+      return
+    }
+    // The raid didn't say the channel's ID (everything else goes by it): look it up by name.
+    Task { [weak self] in
+      let found = try? await TwitchAPI.shared.channelPage(login: target.login)
+      guard let self, !self.stopped, let channel = found?.channel, !channel.id.isEmpty else {
+        ActivityLog.shared.add("Couldn't find \(target.name) to follow the raid")
+        return
+      }
+      self.follow?(channel)
+    }
   }
 
   // MARK: Socket

@@ -1411,7 +1411,12 @@ func testAdFreeProxy() {
     check(!media.body.contains("/ad-") && media.body.contains("edge.test/"), "proxied session has no ads")
     check(log.messages.contains { $0.contains("proxy.test delivered the stream, Twitch sees RU") }, "\(log.messages)")
     check(log.messages.contains { $0.contains("down.test didn't answer") }, "\(log.messages)")
-    check(twitch.tokenRequests == ["popout", "proxy"], "no regular token needed: \(twitch.tokenRequests)")
+    // The stream came from the ad-free server's own session. Besides the regular token this test
+    // asked for itself (above), the session may ask for one more alongside, to learn which of
+    // Twitch's playlist servers is near the viewer (see NearbyPlaylists): that runs in parallel
+    // and isn't what plays.
+    let regular = twitch.tokenRequests.filter { $0 != "proxy" }.count
+    check(twitch.tokenRequests.filter { $0 == "proxy" }.count == 1 && regular <= 2, "no regular token needed: \(twitch.tokenRequests)")
   }
   // Through an ad-free server, an announced break doesn't cost low latency (nothing can be
   // stitched in, so the newest segment isn't held back).
@@ -1611,6 +1616,36 @@ func testCatchUpSimulation() {
   }
   check(LiveCatchUp.learnable(4) == LiveCatchUp.outageLearned && LiveCatchUp.learnable(1) == 1, "learnable")
   check(outage.targetBuffer <= LiveCatchUp.outageLearned + LiveCatchUp.air + 0.01, "outage learned in moderation: \(outage.targetBuffer)")
+  // A stall never lowers the margin, even after a gap that pushed it past the outage length.
+  var deep = LiveCatchUp(now: o0)
+  var d = o0.addingTimeInterval(45)
+  var deepHeld = 3.4
+  var deepRate = deep.update(buffer: deepHeld, latency: 4.4, playing: true, now: d)
+  for _ in 0..<4 {
+    d += 0.5
+    deepHeld -= Double(deepRate) * 0.5
+    deepRate = deep.update(buffer: deepHeld, latency: 4.4, playing: true, now: d)
+  }
+  let beforeStall = deep.targetBuffer
+  deep.stalled(now: d)
+  check(deep.targetBuffer >= beforeStall, "a stall doesn't lower the margin: \(beforeStall) -> \(deep.targetBuffer)")
+  // Stalls on hiccups a little past the outage length still teach enough to cover them.
+  var repeated = LiveCatchUp(targetBuffer: 2.0, now: o0)
+  for i in 0..<3 { repeated.stalled(now: o0.addingTimeInterval(60 + Double(i) * 30)) }
+  check(repeated.targetBuffer > 2.6, "repeated stalls keep growing it: \(repeated.targetBuffer)")
+  // A long stall (the connection dropping out for seconds) is learned as an outage once it's over.
+  var dropout = LiveCatchUp(targetBuffer: 2.2, now: o0)
+  dropout.stalled(now: o0.addingTimeInterval(60))
+  let grown = dropout.targetBuffer
+  dropout.update(buffer: 0.6, latency: 6, playing: true, now: o0.addingTimeInterval(65))
+  check(grown > 2.6 && dropout.targetBuffer <= max(2.2, LiveCatchUp.outageLearned + LiveCatchUp.air) + 0.01,
+    "dropout cut back: \(grown) -> \(dropout.targetBuffer)")
+  // A short stall keeps what it taught.
+  var short = LiveCatchUp(targetBuffer: 2.2, now: o0)
+  short.stalled(now: o0.addingTimeInterval(60))
+  let taught = short.targetBuffer
+  short.update(buffer: 0.6, latency: 3, playing: true, now: o0.addingTimeInterval(61.2))
+  check(short.targetBuffer == taught, "short stall kept: \(taught) -> \(short.targetBuffer)")
   // A hiccup fades from memory rather than dropping out of it all at once.
   var fading = LiveCatchUp(now: o0)
   fading.stalled(now: o0.addingTimeInterval(50))

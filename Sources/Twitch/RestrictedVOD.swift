@@ -54,7 +54,10 @@ enum RestrictedVOD {
     Rendition(key: "audio_only", width: 0, height: 0, frameRate: 0),
   ]
 
-  /// Uploads made before about this date are stored under the channel's name (TwitchNoSub's rule).
+  /// Uploads made before about this date are stored under the channel's name. This is TwitchNoSub's
+  /// rule as written in its source (`patch_amazonworker.js`): "days since upload" is counted from
+  /// a fixed `new Date("2023-02-10")`, not from today, and only uploads more than 7 days older than
+  /// that use the channel-name path.
   static let uploadPathCutoff = Date(timeIntervalSince1970: 1_675_987_200 - 7 * 86_400)  // 2023-02-10 less 7 days
 
   static let infoQuery = """
@@ -118,12 +121,18 @@ enum RestrictedVOD {
     let bestTranscode = found.filter { $0.0.key != "chunked" && !$0.0.isAudioOnly }.map(\.0.height).max()
     var sourceHeight = 1080
     if let best = bestTranscode { sourceHeight = max(720, steps.first(where: { $0 > best }) ?? best) }
+    // The source runs at the broadcast's frame rate: 60 when Twitch made 60 fps transcodes of it,
+    // otherwise 30 (with none at all, 60 is the likelier guess for a channel big enough to have
+    // sub-only VODs).
+    let transcodes = found.filter { $0.0.key != "chunked" && !$0.0.isAudioOnly }
+    let sourceFPS: Double = transcodes.isEmpty || transcodes.contains { $0.0.frameRate > 31 } ? 60 : 30
     var bandwidth = 8_534_030
     return found.map { rendition, url, codecs in
       var r = rendition
       if r.key == "chunked" {
         r.height = sourceHeight
         r.width = sourceHeight * 16 / 9
+        r.frameRate = sourceFPS
       }
       defer { bandwidth -= 100_000 }
       return HLSVariant(
@@ -177,8 +186,10 @@ extension TwitchAPI {
   struct VODRenditions: Sendable {
     /// Best first, audio only last.
     var variants: [HLSVariant]
-    /// Twitch refused it and it plays straight from the CDN (sub-only and the like).
+    /// It plays straight from the CDN: Twitch's playlist server refused it or didn't answer.
     var unlocked: Bool
+    /// Twitch refused it outright (HTTP 403: sub-only, or the like), rather than failing to answer.
+    var restricted: Bool = false
   }
 
   /// A VOD's renditions: from Twitch's playlist server, or (when it refuses, e.g. a sub-only VOD)
@@ -186,6 +197,7 @@ extension TwitchAPI {
   func vodRenditions(id: String, codecs: String, timeout: TimeInterval = 10) async throws -> VODRenditions {
     let http = URLSessionHTTPClient(timeout: timeout)
     var refusal = "Twitch didn't return the video."
+    var restricted = false
     do {
       let token = try await videoToken(id: id)
       let url = Usher.vod(id: id, token: token, codecs: codecs)
@@ -196,19 +208,24 @@ extension TwitchAPI {
         if !variants.isEmpty { return VODRenditions(variants: variants, unlocked: false) }
         refusal = "No playable qualities were found."
       } else {
+        restricted = response.statusCode == 403
         refusal =
           response.statusCode == 403
           ? "This video is restricted (subscribers only or region locked)." : "Twitch returned HTTP \(response.statusCode)."
       }
+    } catch is CancellationError {
+      throw CancellationError()
     } catch {
       refusal = error.localizedDescription
     }
-    // Usher said no: try the CDN directly.
+    // Closed while loading: don't go on to ask the CDN.
+    try Task.checkCancellation()
+    // Usher said no (or didn't answer): try the CDN directly.
     if let data = try? await query(RestrictedVOD.infoQuery, variables: ["id": id]),
       let info = RestrictedVOD.parseInfo(data)
     {
       let variants = await RestrictedVOD.variants(videoID: id, info: info, http: http)
-      if !variants.isEmpty { return VODRenditions(variants: variants, unlocked: true) }
+      if !variants.isEmpty { return VODRenditions(variants: variants, unlocked: true, restricted: restricted) }
     }
     throw VODUnavailable(errorDescription: refusal)
   }

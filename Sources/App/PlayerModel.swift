@@ -357,15 +357,18 @@ final class PlayerModel: ObservableObject {
   /// video servers (see RestrictedVOD).
   private func vodRenditions(id: String) async throws -> [HLSVariant] {
     let result = try await TwitchAPI.shared.vodRenditions(id: id, codecs: codecs)
-    if result.unlocked {
-      ActivityLog.shared.add("Twitch restricts video \(id) (sub-only): playing it straight from Twitch's video servers")
-      vodUnlocked = true
+    if result.unlocked, Self.notedUnlocked.insert(id).inserted {
+      ActivityLog.shared.add(
+        result.restricted
+          ? "Twitch restricts video \(id) (sub-only): playing it straight from Twitch's video servers"
+          : "Twitch's playlist server didn't hand over video \(id): playing it straight from Twitch's video servers")
     }
     return result.variants
   }
 
-  /// This VOD is sub-only (or otherwise restricted) and plays from Twitch's video servers directly.
-  @Published private(set) var vodUnlocked = false
+  /// Videos already noted in the log as played from the video servers (rewinding a broadcast
+  /// asks again each time).
+  private static var notedUnlocked: Set<String> = []
 
   private func startVideo(_ video: Video) async {
     do {

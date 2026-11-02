@@ -59,6 +59,10 @@ struct LiveCatchUp: Sendable {
   /// takes it back there (plus what an outage teaches), rather than leaving it as high as the gap
   /// pushed it on the way.
   private var marginBeforeGap: Double?
+  /// When it last ran dry, and the margin before that: a stall that lasts longer than an outage
+  /// was the connection dropping out, not the stream's rhythm, and is learned as one once it's over.
+  private var stalledAt: Date?
+  private var marginBeforeStall = 0.0
   private static let settleAfter: TimeInterval = 10
   /// The last reading: buffer, when, the rate it played at since, and where the playhead was.
   private var last: (buffer: Double, at: Date, rate: Float, position: Double?)?
@@ -80,6 +84,8 @@ struct LiveCatchUp: Sendable {
   /// Speed limits: well behind (after an outage), the usual most, a gentle one (multi-view's), and
   /// the slowest. Small enough that speech still sounds natural.
   static let rates: (fast: Float, medium: Float, gentle: Float, slow: Float) = (1.2, 1.06, 1.05, 0.95)
+  /// Right after a start, what's over is only how far back it joined: won back more keenly.
+  static let startRate: Float = 1.1
   /// Kept on top of the biggest hiccup lately.
   static let air = 0.4
   /// How quickly the average follows the readings (seconds).
@@ -167,6 +173,10 @@ struct LiveCatchUp: Sendable {
     buffer: Double?, latency: Double?, playing: Bool, position: Double? = nil, maxRate: Float = LiveCatchUp.rates.fast,
     now: Date = Date()
   ) -> Float {
+    if playing, let at = stalledAt {
+      stalledAt = nil
+      if now.timeIntervalSince(at) > Self.outage { outageStallEnded() }
+    }
     guard playing, now >= holdUntil, let buffer, let latency, buffer.isFinite, latency.isFinite, buffer >= 0 else {
       rate = 1
       last = nil
@@ -212,7 +222,7 @@ struct LiveCatchUp: Sendable {
       // More than needed: faster in proportion, easing off toward the margin. Just started and
       // well back (a fresh start's slow first connections): up to 1.2× for the first few seconds.
       let far = excess > 4 || (starting && excess > 2)
-      let top = Double(min(far ? Self.rates.fast : Self.rates.medium, maxRate))
+      let top = Double(min(far ? Self.rates.fast : starting ? Self.startRate : Self.rates.medium, maxRate))
       next = min(top, 1 + max(starting ? Self.minStep * 1.5 : Self.minStep, excess * (starting ? Self.startGain : Self.gain)))
     }
     // In hundredths: the player isn't told about every wobble.
@@ -258,19 +268,20 @@ struct LiveCatchUp: Sendable {
     }
   }
 
-  private mutating func remember(_ depth: Double, now: Date) {
-    let depth = Self.learnable(depth)
+  /// - Parameter asIs: a stall's depth, already worked out (not put through the outage rule).
+  private mutating func remember(_ depth: Double, now: Date, asIs: Bool = false) {
+    let depth = asIs ? depth : Self.learnable(depth)
     hiccups.removeAll { now.timeIntervalSince($0.at) >= Self.memory }
     hiccups.append((now, depth))
   }
 
-  private mutating func grow(toCover depth: Double, now: Date) {
-    if depth > Self.outage, let before = marginBeforeGap {
+  private mutating func grow(toCover depth: Double, now: Date, asIs: Bool = false) {
+    if !asIs, depth > Self.outage, let before = marginBeforeGap {
       let capped = max(before, min(Self.maxBuffer, Self.outageLearned + Self.air))
       if targetBuffer > capped { targetBuffer = capped }
       return
     }
-    let wanted = min(Self.maxBuffer, Self.learnable(depth) + Self.air)
+    let wanted = min(Self.maxBuffer, (asIs ? depth : Self.learnable(depth)) + Self.air)
     guard wanted > targetBuffer + 0.01 else { return }
     targetBuffer = wanted
     grewAt = now
@@ -279,9 +290,16 @@ struct LiveCatchUp: Sendable {
   /// The player ran out of video: the hiccup was deeper than the margin. Keep more in hand from
   /// now on (it plays slower for a bit to build it), and leave it be for a moment.
   mutating func stalled(now: Date = Date()) {
-    let depth = max(shortfallPeak, targetBuffer) + 0.4
-    remember(depth, now: now)
-    grow(toCover: depth, now: now)
+    // Deeper than the margin it had before this gap began (a gap that ran on into an outage is
+    // only counted up to what an outage teaches). A stall only ever raises the margin: run
+    // through the outage rule as a whole it could lower it, and a stream whose hiccups ran a
+    // little past the outage length could never learn enough to stop stalling.
+    let base = marginBeforeGap ?? targetBuffer
+    let depth = min(Self.maxBuffer, max(Self.learnable(shortfallPeak), base) + 0.4)
+    stalledAt = now
+    marginBeforeStall = base
+    remember(depth, now: now, asIs: true)
+    grow(toCover: depth, now: now, asIs: true)
     shortfall = 0
     shortfallPeak = 0
     marginBeforeGap = nil
@@ -289,6 +307,15 @@ struct LiveCatchUp: Sendable {
     last = nil
     level = nil
     holdUntil = max(holdUntil, now.addingTimeInterval(3))
+  }
+
+  /// The stall that just ended lasted longer than an outage: the connection dropped out. What it
+  /// taught is cut back to what an outage teaches (no margin covers a dropout; holding seconds
+  /// more in hand for ten minutes afterwards only costs latency).
+  private mutating func outageStallEnded() {
+    let capped = max(marginBeforeStall, min(Self.maxBuffer, Self.outageLearned + Self.air))
+    if targetBuffer > capped { targetBuffer = capped }
+    if let last = hiccups.indices.last { hiccups[last].depth = min(hiccups[last].depth, Self.outageLearned) }
   }
 
   /// Normal speed for a while, with no reading of the buffer (e.g. while the quality changes,
