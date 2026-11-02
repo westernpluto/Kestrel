@@ -1429,6 +1429,103 @@ func testAdFreeProxy() {
   }
 }
 
+// MARK: - Sub-only VODs (TwitchNoSub) and raids
+
+final class CDNFake: HTTPClient, @unchecked Sendable {
+  /// Path -> body (404 when missing).
+  var files: [String: Data] = [:]
+  func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    let path = request.url!.path
+    let body = files[path]
+    return (body ?? Data(), HTTPURLResponse(url: request.url!, statusCode: body == nil ? 404 : 200, httpVersion: nil, headerFields: [:])!)
+  }
+}
+
+func testRestrictedVOD() {
+  let json = JSONValue([
+    "video": [
+      "broadcastType": "ARCHIVE", "createdAt": "2026-10-30T18:00:00Z",
+      "seekPreviewsURL": "https://d2nvs31859zcd8.cloudfront.net/abc123_streamer_4242_1730000000/storyboards/2290000000-info.json",
+      "owner": ["login": "streamer"],
+    ] as [String: Any]
+  ])
+  guard let info = RestrictedVOD.parseInfo(json) else {
+    check(false, "restricted info parse")
+    return
+  }
+  check(info.broadcastType == "archive" && info.ownerLogin == "streamer", "restricted info \(info)")
+  let loc = RestrictedVOD.location(info.seekPreviewsURL)
+  check(loc?.host == "d2nvs31859zcd8.cloudfront.net" && loc?.specialID == "abc123_streamer_4242_1730000000", "cdn location \(String(describing: loc))")
+  check(
+    RestrictedVOD.playlistURL(videoID: "2290000000", info: info, rendition: "chunked")?.absoluteString
+      == "https://d2nvs31859zcd8.cloudfront.net/abc123_streamer_4242_1730000000/chunked/index-dvr.m3u8", "archive url")
+  var highlight = info
+  highlight.broadcastType = "highlight"
+  check(
+    RestrictedVOD.playlistURL(videoID: "9", info: highlight, rendition: "720p60")?.path
+      == "/abc123_streamer_4242_1730000000/720p60/highlight-9.m3u8", "highlight url")
+  var oldUpload = info
+  oldUpload.broadcastType = "upload"
+  oldUpload.createdAt = HLSDate.parse("2021-05-01T00:00:00Z")
+  check(
+    RestrictedVOD.playlistURL(videoID: "9", info: oldUpload, rendition: "480p30")?.path
+      == "/streamer/9/abc123_streamer_4242_1730000000/480p30/index-dvr.m3u8", "old upload url")
+  var newUpload = oldUpload
+  newUpload.createdAt = HLSDate.parse("2025-05-01T00:00:00Z")
+  check(
+    RestrictedVOD.playlistURL(videoID: "9", info: newUpload, rendition: "480p30")?.path
+      == "/abc123_streamer_4242_1730000000/480p30/index-dvr.m3u8", "new upload url")
+  check(RestrictedVOD.parseInfo(JSONValue(["video": ["seekPreviewsURL": NSNull()]])) == nil, "no storyboard -> nil")
+
+  // Probing: source as TS, 720p60 as fMP4 HEVC, 360p30 and audio; the rest missing.
+  let cdn = CDNFake()
+  let base = "/abc123_streamer_4242_1730000000"
+  let ts = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.000,\n0.ts\n#EXTINF:10.000,\n1-unmuted.ts\n#EXT-X-ENDLIST\n"
+  let fmp4 = "#EXTM3U\n#EXT-X-MAP:URI=\"init-0.mp4\"\n#EXTINF:10.000,\n0.mp4\n#EXT-X-ENDLIST\n"
+  cdn.files[base + "/chunked/index-dvr.m3u8"] = Data(ts.utf8)
+  cdn.files[base + "/720p60/index-dvr.m3u8"] = Data(fmp4.utf8)
+  cdn.files[base + "/720p60/init-0.mp4"] = Data("....ftypiso5....moov....trak....hvc1....".utf8)
+  cdn.files[base + "/360p30/index-dvr.m3u8"] = Data(ts.utf8)
+  cdn.files[base + "/audio_only/index-dvr.m3u8"] = Data(ts.utf8)
+  runAsync {
+    let variants = await RestrictedVOD.variants(videoID: "2290000000", info: info, http: cdn)
+    check(variants.map(\.label) == ["1080p60", "720p60 HEVC", "360p", "Audio only"], "cdn variants \(variants.map(\.label))")
+    check(variants.first?.name == "1080p (source)", "source name \(variants.first?.name ?? "")")
+    check(variants[1].codecs.hasPrefix("hev1"), "hevc from init segment")
+    check(variants.last?.isAudioOnly == true, "audio last")
+    let master = HLSMaster(variants: variants)
+    check(master.videoVariants.count == 3 && master.audioVariant != nil, "usable as a master")
+    let none = await RestrictedVOD.variants(videoID: "1", info: info, http: CDNFake())
+    check(none.isEmpty, "nothing on the cdn")
+  }
+  check(RestrictedVOD.codecs(initSegment: Data("avc1".utf8)).hasPrefix("avc1"), "avc init")
+}
+
+func testRaids() {
+  let sub = Hermes.subscribe(topic: Hermes.raidTopic(channelID: "4242"), id: "a", subscriptionID: "b")
+  check(sub.contains("\"topic\":\"raid.4242\"") && sub.contains("\"type\":\"subscribe\"") && sub.contains("\"type\":\"pubsub\""), "subscribe \(sub)")
+  check(Hermes.parse(#"{"type":"welcome","welcome":{"keepaliveSec":12,"sessionId":"x"}}"#) == .welcome(keepalive: 12), "welcome")
+  check(Hermes.parse(#"{"type":"keepalive","id":"1"}"#) == .keepalive, "keepalive")
+  check(Hermes.parse(#"{"type":"subscribeResponse","subscribeResponse":{"result":"ok"}}"#) == .subscribed(ok: true), "subscribed")
+  check(Hermes.parse(#"{"type":"reconnect","reconnect":{"url":"wss://hermes.twitch.tv/v1?x=1"}}"#) == .reconnect(URL(string: "wss://hermes.twitch.tv/v1?x=1")), "reconnect")
+  let inner = #"{"type":"raid_update_v2","raid":{"id":"r1","creator_id":"4242","source_id":"4242","target_id":"77","target_login":"friend","target_display_name":"Friend","target_profile_image":"https://img/{width}.png","transition_jitter_seconds":3,"force_raid_now_seconds":85,"viewer_count":1234}}"#
+  let escaped = inner.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+  let note = #"{"type":"notification","notification":{"subscription":{"id":"b"},"type":"pubsub","pubsub":""# + escaped + #""}}"#
+  guard case .raid(let event) = Hermes.parse(note) else {
+    check(false, "raid notification not parsed")
+    return
+  }
+  check(event.kind == .update && event.targetLogin == "friend" && event.targetDisplayName == "Friend", "raid event \(event)")
+  check(event.viewerCount == 1234 && event.forceRaidNowSeconds == 85 && event.sourceID == "4242" && event.raidID == "r1", "raid numbers")
+  check(event.target.id == "77" && event.target.login == "friend", "raid target channel")
+  let go = Hermes.parse(#"{"type":"notification","notification":{"type":"pubsub","pubsub":{"type":"raid_go_v2","raid":{"id":"r1","target_login":"friend"}}}}"#)
+  if case .raid(let e) = go { check(e.kind == .go && e.targetDisplayName == "friend", "go fallback name") } else { check(false, "raid go as object") }
+  check(Hermes.parse(#"{"type":"notification","notification":{"pubsub":"{\"type\":\"something_else\"}"}}"#) == .other, "other pubsub")
+  check(Hermes.parse("not json") == .other, "garbage")
+}
+
+testRestrictedVOD()
+testRaids()
 testAdFreeProxy()
 testVODPlaylists()
 testVODComments()

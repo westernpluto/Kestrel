@@ -119,6 +119,8 @@ final class AppSettings: ObservableObject {
   /// Multi-view's Picture in Picture shows every stream together (experimental) instead of the
   /// picked one.
   @Published var multiviewPiPAll: Bool { didSet { defaults.set(multiviewPiPAll, forKey: "multiviewPiPAll") } }
+  /// When the channel you're watching raids another: follow it (like Twitch), ask, or nothing.
+  @Published var raidMode: RaidMode { didSet { defaults.set(raidMode.rawValue, forKey: "raidMode") } }
   // The user's own HTTP proxy (AdBlocking.customProxy).
   @Published var proxyHost: String { didSet { defaults.set(proxyHost, forKey: "proxyHost"); applyProxy() } }
   @Published var proxyPort: String { didSet { defaults.set(proxyPort, forKey: "proxyPort"); applyProxy() } }
@@ -140,7 +142,7 @@ final class AppSettings: ObservableObject {
   private init() {
     defaults.register(defaults: [
       "lowLatency": true, "nearbyServers": true, "adBlocking": "auto", "backgroundAudio": true, "showVideoStats": false, "chatFontSize": 15.0,
-      "multiviewPiPAll": true,
+      "multiviewPiPAll": true, "raidMode": RaidMode.follow.rawValue,
     ])
     lowLatency = defaults.bool(forKey: "lowLatency")
     adBlocking = AdBlocking(stored: defaults.string(forKey: "adBlocking"))
@@ -151,6 +153,7 @@ final class AppSettings: ObservableObject {
     nearbyServers = defaults.bool(forKey: "nearbyServers")
     skipMutedParts = defaults.bool(forKey: "skipMutedParts")
     multiviewPiPAll = defaults.bool(forKey: "multiviewPiPAll")
+    raidMode = RaidMode(rawValue: defaults.string(forKey: "raidMode") ?? "") ?? .follow
     proxyHost = defaults.string(forKey: "proxyHost") ?? ""
     proxyPort = defaults.string(forKey: "proxyPort") ?? ""
     proxyUsername = defaults.string(forKey: "proxyUsername") ?? ""
@@ -320,6 +323,31 @@ final class AppModel: ObservableObject {
   @Published private(set) var multiview: MultiviewModel?
   /// Multi-view is tucked away: a row of the streamers' pictures where the mini player sits.
   @Published var multiviewMinimized = false
+  /// The player screens that exist, keyed by what they play, and how to stop each. Opening
+  /// another stream stops the old one here, right away: the old screen leaves with an animation,
+  /// and SwiftUI doesn't always tell it it's gone (onDisappear) until something else redraws
+  /// (e.g. shrinking the new one into the mini player), so its sound carried on until then.
+  private var playerStops: [String: @MainActor () -> Void] = [:]
+
+  @MainActor
+  func registerPlayer(_ id: String, stop: @escaping @MainActor () -> Void) {
+    playerStops[id] = stop
+  }
+
+  @MainActor
+  func unregisterPlayer(_ id: String) {
+    playerStops[id] = nil
+  }
+
+  /// Stops every player screen except the one for `id` (all of them for nil).
+  @MainActor
+  func stopPlayers(except id: String?) {
+    for (key, stop) in playerStops where key != id {
+      stop()
+      playerStops[key] = nil
+    }
+  }
+
   /// A recording is open in its own player (which isn't `playing`).
   var watchingRecording = false
 

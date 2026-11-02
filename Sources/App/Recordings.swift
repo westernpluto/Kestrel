@@ -119,15 +119,8 @@ final class RecordingStore: ObservableObject {
   /// The VOD's rendition nearest a choice: the best at or under that height ("720p"), the best
   /// ("Best"), or the sound alone ("Audio only").
   private static func vodRendition(videoID: String, label: String) async throws -> HLSVariant {
-    let token = try await TwitchAPI.shared.videoToken(id: videoID)
-    let url = Usher.vod(id: videoID, token: token, codecs: AppSettings.shared.codecs)
-    let (data, response) = try await URLSessionHTTPClient(timeout: 15).data(for: Usher.playlistRequest(url))
-    guard response.statusCode == 200, let text = String(data: data, encoding: .utf8), HLS.looksLikePlaylist(data) else {
-      throw PlayerModel.VODError(
-        errorDescription: response.statusCode == 403
-          ? "This video is restricted (subscribers only or region locked)." : "Twitch returned HTTP \(response.statusCode).")
-    }
-    let master = HLSMaster.parse(text, base: response.url ?? url)
+    let all = try await TwitchAPI.shared.vodRenditions(id: videoID, codecs: AppSettings.shared.codecs, timeout: 15).variants
+    let master = HLSMaster(variants: all)
     let videos = master.videoVariants
     let pick: HLSVariant?
     if label == VODDownloadChoice.audio {

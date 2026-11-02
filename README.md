@@ -12,6 +12,8 @@ A client for watching Twitch without ads, with low-latency playback, chat and yo
 - **Player, Twitch-style:**
   - Tap the video for controls; they fade out on their own. The bar under the picture shows how far behind live it is (⏱), viewers and how long the stream has been live, to the second. The gear holds **Quality**, **Low latency**, **Record** (in VODs: **Skip muted parts** when they have them) and **Video stats**; layout switches (theater mode, chat over video, the chat overlay) are buttons on the video itself.
   - **Gestures:** double-tap for full screen (in landscape: zoom to fill / fit); pinch to fill or fit; swipe up for full screen; pull the video down to shrink it into the **mini player** (it follows your finger); in landscape, swipe down to leave full screen and left/right to show or hide chat.
+  - **Raids** (Settings → Playback → Raids): when the channel you're watching raids another, a banner shows who they're raiding with Twitch's countdown. **Follow automatically** (the default, like Twitch) takes you to the raided channel when the raid goes (**Stay** keeps you where you are, **Go now** goes straight away; in the mini player it carries on in the mini player); **Ask me** offers the raided channel with a **Watch** button instead; **Off** ignores raids. Kestrel hears about raids the way twitch.tv does, from Twitch's live-event socket (Hermes, the `raid.<channel>` topic; no sign-in needed).
+  - Opening another stream stops the one before it straight away (its sound used to carry on in the background until the new player was shrunk into the mini player).
   - **Mini player:** keeps playing in the corner above the tab bar while you browse. Tap or drag it up to open, pause or close it with its buttons, or throw it aside to close (closing stops the stream right away).
   - Tap the streamer's picture or name under the video (or on the video in full screen and theater mode) to open their channel (the player shrinks into the mini player; a channel page that's already open is gone back to, not opened twice). The heart follows them.
   - **Lock screen and Control Center:** title, channel and picture, play/pause, and for VODs the progress bar and 10-second skips, while it plays in the background.
@@ -23,6 +25,7 @@ A client for watching Twitch without ads, with low-latency playback, chat and yo
 - **VODs:**
   - Start at the beginning, or where you left off: positions are saved on the iPhone and, signed in, to your Twitch account the way Twitch's player does, so the website and apps resume at the same point. Channel video lists show how far you got.
   - **Chat replay** in time with the video.
+  - **Sub-only VODs play** (the [TwitchNoSub](https://github.com/besuper/TwitchNoSub) technique): when Twitch refuses a VOD's playlist, Kestrel works out where its video files sit on Twitch's VOD servers from its storyboard address and builds the quality list itself (archives, highlights and uploads; source, transcodes and audio only; HEVC renditions detected). Downloads and rewinding a live broadcast use the same fallback. The Activity log notes when a video was unlocked this way.
   - Parts Twitch muted for copyright play (silently) instead of freezing: Twitch lists them under file names that don't exist, and Kestrel corrects them like Twitch's own player. They're marked in orange on the seek bar (and "· muted" in the seek preview); while one plays, a **Skip** button shows how long it lasts, and **Skip muted parts** in the gear menu jumps past them as playback reaches them. The same goes for a live stream's VOD while rewinding.
   - A VOD of a stream that's still live shows "RECORDING". It plays as a finished VOD of what's been recorded so far (the Apple player stalls on open-ended recordings) and loads more as you near the end. If playback ever gets stuck on a broken part, Kestrel skips ahead a few seconds.
   - One layout for both orientations, so rotating, opening chat, the keyboard and the emote picker all animate instead of rebuilding the player.
@@ -89,6 +92,8 @@ Download the IPA from the latest GitHub Actions run (**Actions → Build IPA and
 | `Sources/App/ChatOverlay.swift` | The see-through chat over a full-screen video |
 | `Sources/Core/LocalHTTPServer.swift` | Localhost server the players load playlists from |
 | `Sources/Twitch/` | GraphQL API, sign-in, playback tokens, follows, chat/IRC, third-party emotes |
+| `Sources/Twitch/RestrictedVOD.swift` | Sub-only VODs: their renditions found on Twitch's VOD servers when Twitch refuses the playlist |
+| `Sources/Twitch/Raids.swift`, `Sources/App/RaidWatcher.swift` | Raids: Twitch's live-event socket, the countdown banner and following the raid |
 | `Sources/App/` | SwiftUI app: player screen and controls, players, chat (UIKit list with animated emotes), images |
 | `android/` | The Android app (Kotlin, Jetpack Compose, Media3/ExoPlayer) |
 

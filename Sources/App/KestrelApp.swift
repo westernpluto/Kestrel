@@ -102,6 +102,8 @@ struct RootView: View {
     // A stream opened on its own: multi-view steps aside into its dock, stopped, until the dock is
     // tapped (one thing plays at a time).
     .onChange(of: app.playing?.id) { playing in
+      // The stream that was playing stops now, not whenever its screen is finally taken away.
+      app.stopPlayers(except: playing)
       guard playing != nil, let session = app.multiview else { return }
       session.park()
       if !app.multiviewMinimized { app.multiviewMinimized = true }

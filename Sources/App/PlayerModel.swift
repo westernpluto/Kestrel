@@ -353,21 +353,19 @@ final class PlayerModel: ObservableObject {
     var errorDescription: String?
   }
 
-  /// A VOD's renditions, best first (then audio only).
+  /// A VOD's renditions, best first (then audio only). Sub-only VODs play straight from Twitch's
+  /// video servers (see RestrictedVOD).
   private func vodRenditions(id: String) async throws -> [HLSVariant] {
-    let token = try await TwitchAPI.shared.videoToken(id: id)
-    let url = Usher.vod(id: id, token: token, codecs: codecs)
-    let (data, response) = try await URLSessionHTTPClient(timeout: 10).data(for: Usher.playlistRequest(url))
-    guard response.statusCode == 200, let text = String(data: data, encoding: .utf8), HLS.looksLikePlaylist(data) else {
-      throw VODError(
-        errorDescription: response.statusCode == 403
-          ? "This video is restricted (subscribers only or region locked)." : "Twitch returned HTTP \(response.statusCode).")
+    let result = try await TwitchAPI.shared.vodRenditions(id: id, codecs: codecs)
+    if result.unlocked {
+      ActivityLog.shared.add("Twitch restricts video \(id) (sub-only): playing it straight from Twitch's video servers")
+      vodUnlocked = true
     }
-    let master = HLSMaster.parse(text, base: response.url ?? url)
-    let variants = master.videoVariants + (master.audioVariant.map { [$0] } ?? [])
-    guard !variants.isEmpty else { throw VODError(errorDescription: "No playable qualities were found.") }
-    return variants
+    return result.variants
   }
+
+  /// This VOD is sub-only (or otherwise restricted) and plays from Twitch's video servers directly.
+  @Published private(set) var vodUnlocked = false
 
   private func startVideo(_ video: Video) async {
     do {

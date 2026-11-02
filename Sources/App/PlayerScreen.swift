@@ -890,9 +890,12 @@ private func lerp(_ a: CGRect, _ b: CGRect, _ t: CGFloat) -> CGRect {
 final class PlayerSession: ObservableObject {
   let model: PlayerModel
   let chat: ChatController
+  /// Raids by the channel being watched (live only).
+  let raids: RaidWatcher
 
   init(target: PlaybackTarget) {
     model = PlayerModel(target: target)
+    raids = RaidWatcher()
     switch target {
     case .live(let channel):
       chat = ChatController(channel: channel)
@@ -938,6 +941,7 @@ struct PlayerScreen: View {
   @StateObject private var session: PlayerSession
   private var model: PlayerModel { session.model }
   private var chat: ChatController { session.chat }
+  private var raids: RaidWatcher { session.raids }
   @StateObject private var keyboard = KeyboardObserver()
   @StateObject private var orientation = InterfaceOrientationObserver()
   @EnvironmentObject private var app: AppModel
@@ -1129,6 +1133,16 @@ struct PlayerScreen: View {
             .transition(.opacity)
         }
 
+        // A raid by this channel: counting down, or offered (over the video, or the offline strip).
+        RaidBanner(raids: raids)
+          .padding(.horizontal, 12)
+          .padding(.bottom, folded ? 0 : 52)
+          .frame(width: layout.video.width, height: layout.video.height, alignment: folded ? .center : .bottom)
+          .offset(x: layout.video.minX, y: layout.video.minY)
+          .opacity(expandedOpacity)
+          .allowsHitTesting(progress == 0)
+          .zIndex(3)
+
         if layout.landscape && layout.panelVisible && progress == 0 && !folded {
           resizeHandle(layout, screenWidth: screenWidth).zIndex(2)
         }
@@ -1187,8 +1201,30 @@ struct PlayerScreen: View {
     .background(ChatFollower(model: model, chat: chat))
     .task {
       orientation.start()
-      OrientationLock.playerVisible(true)
+      // (Opened straight into the mini player when following a raid from it.)
+      OrientationLock.playerVisible(!app.playerMinimized)
+      if app.playerMinimized { model.setMaxHeight(480) }
+      // A screen that's already been replaced by another stream must not start.
+      guard app.playing?.id == target.id else { return }
+      let id = target.id
+      let player = model, chatRoom = chat, raidWatcher = raids
+      app.registerPlayer(id) {
+        player.stop()
+        chatRoom.stop()
+        raidWatcher.stop()
+      }
       chat.start()
+      if case .live(let channel) = target {
+        raids.follow = { next in
+          let app = AppModel.shared
+          guard app.playing?.id == id else { return }
+          // In the mini player, the raided stream carries on in the mini player.
+          let minimized = app.playerMinimized
+          app.playing = .live(next)
+          if minimized { app.playerMinimized = true }
+        }
+        raids.start(channel: channel)
+      }
       await model.start()
     }
     // Offline: fold the video away to chat; live again (and Watch tapped): it slides back open.
@@ -1210,8 +1246,10 @@ struct PlayerScreen: View {
       }
     }
     .onDisappear {
+      app.unregisterPlayer(target.id)
       model.stop()
       chat.stop()
+      raids.stop()
       // (Multi-view taking over keeps the phone free to turn.)
       if app.multiview == nil || app.multiviewMinimized { OrientationLock.playerVisible(false) }
     }
@@ -1233,6 +1271,7 @@ struct PlayerScreen: View {
     // Stop right away (not when the view goes): closing has to end the sound for sure.
     model.stop()
     chat.stop()
+    raids.stop()
     OrientationLock.playerVisible(false)
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
       // Let other apps' audio carry on (fails harmlessly if something else is still playing).
