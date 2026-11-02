@@ -8,6 +8,7 @@
   import AmazonIVSPlayer
   import AVFoundation
   import AVKit
+  import CoreImage
   import SwiftUI
   import UIKit
 
@@ -327,6 +328,10 @@
       player.pause()
       player.delegate = nil
       proxy.controller = nil
+      stillWatch?.cancel()
+      stillWatch = nil
+      still?.removeFromSuperview()
+      still = nil
       surface.player = nil
       surface.removeFromSuperview()
       pipObservation = nil
@@ -1050,6 +1055,71 @@
       place.addSubview(surface)
     }
 
+    // MARK: A still frame over the picture while it comes back
+
+    /// The frame that was showing, laid over the picture while the picture can't draw yet. Coming
+    /// back from Picture in Picture (or from the background, where the picture is taken away for
+    /// background audio), the player draws nothing until the stream's next keyframe, up to a
+    /// couple of seconds: that showed as black. The last frame held still for that moment, then
+    /// live video, looks like the stream simply carrying on.
+    private var still: UIImageView?
+    private var stillWatch: Task<Void, Never>?
+    private static let stillContext = CIContext(options: [.cacheIntermediates: false])
+
+    /// Lays the frame showing now over the picture. It stays until `releaseStillWhenDrawing` sees
+    /// live frames again (or a few seconds have gone by, whatever happens).
+    func holdStill() {
+      guard !stopped, still == nil, let buffer = surface.playerLayer.displayedPixelBuffer() else { return }
+      let frame = CIImage(cvPixelBuffer: buffer)
+      guard let image = Self.stillContext.createCGImage(frame, from: frame.extent) else { return }
+      let cover = UIImageView(image: UIImage(cgImage: image))
+      cover.frame = surface.bounds
+      cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      cover.contentMode = surface.videoGravity == .resizeAspectFill ? .scaleAspectFill : .scaleAspectFit
+      cover.isUserInteractionEnabled = false
+      surface.addSubview(cover)
+      still = cover
+      // Never left up if the picture doesn't come back the expected way.
+      Task { [weak self] in
+        try? await Task.sleep(nanoseconds: 6_000_000_000)
+        guard let self, self.still === cover, self.stillWatch == nil else { return }
+        self.dropStill()
+      }
+    }
+
+    /// The picture is back where it's shown: take the still away once it's drawing new frames.
+    func releaseStillWhenDrawing() {
+      guard still != nil else { return }
+      stillWatch?.cancel()
+      stillWatch = Task { [weak self] in
+        let started = Date()
+        var last = self?.surface.playerLayer.displayedPixelBuffer().map { Unmanaged.passUnretained($0).toOpaque() }
+        var fresh = 0
+        while !Task.isCancelled, Date().timeIntervalSince(started) < 2.5 {
+          try? await Task.sleep(nanoseconds: 80_000_000)
+          guard let self else { return }
+          if let buffer = self.surface.playerLayer.displayedPixelBuffer() {
+            let id = Unmanaged.passUnretained(buffer).toOpaque()
+            if id != last {
+              fresh += 1
+              last = id
+            }
+          }
+          // Two new frames in a row: it's drawing again.
+          if fresh >= 2 { break }
+        }
+        self?.dropStill()
+      }
+    }
+
+    private func dropStill() {
+      stillWatch?.cancel()
+      stillWatch = nil
+      guard let cover = still else { return }
+      still = nil
+      UIView.animate(withDuration: 0.15, animations: { cover.alpha = 0 }, completion: { _ in cover.removeFromSuperview() })
+    }
+
     /// Into the all-streams Picture in Picture window (see MultiviewPictureInPicture): the
     /// picture moves there and keeps playing while Kestrel is in the background.
     func show(in shared: UIView) {
@@ -1080,6 +1150,7 @@
       sharedView = nil
       if let home { put(surface, in: home) }
       if !detachedForBackground, surface.player !== player { surface.player = player }
+      releaseStillWhenDrawing()
       if UIApplication.shared.applicationState == .background { enteredBackground() }
     }
 
@@ -1127,6 +1198,7 @@
         // Keep the sound: take the picture off screen, and if it stays in the background a while,
         // switch to the audio-only rendition (saves data and battery while only listening).
         detachedForBackground = true
+        holdStill()
         view?.player = nil
         audioOnlyTask?.cancel()
         audioOnlyTask = Task { [weak self] in
@@ -1156,9 +1228,12 @@
       audioOnlyTask?.cancel()
       audioOnlyTask = nil
       guard !stopped, !suspended else { return }
+      // Picture in Picture closing as the app comes back: hold the frame until it's drawing here.
+      if pip?.isPictureInPictureActive ?? false { holdStill() }
       if detachedForBackground {
         detachedForBackground = false
         view?.player = player
+        releaseStillWhenDrawing()
         // A fresh PiP controller for the picture that's back (the old one could stop working).
         if let view, offersPictureInPicture, !(pip?.isPictureInPictureActive ?? false) { makePictureInPicture(for: view) }
       }
@@ -1237,6 +1312,8 @@
 
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
       pictureInPictureStarting = false
+      let controller = self.controller
+      Task { @MainActor in controller?.releaseStillWhenDrawing() }
     }
 
     func pictureInPictureController(
@@ -1249,7 +1326,12 @@
       _ pictureInPictureController: AVPictureInPictureController,
       restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
-      completionHandler(true)
+      // The picture comes back to the app: hold its last frame there until it's drawing again.
+      let controller = self.controller
+      Task { @MainActor in
+        controller?.holdStill()
+        completionHandler(true)
+      }
     }
   }
 

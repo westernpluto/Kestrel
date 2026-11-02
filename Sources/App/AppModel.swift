@@ -309,6 +309,14 @@ enum Route: Hashable {
   }
 }
 
+/// The app's section and each section's pages (see `AppModel.navigation`).
+final class AppNavigation: ObservableObject {
+  @Published var tab: AppTab = .following
+  @Published var followingPath: [Route] = []
+  @Published var browsePath: [Route] = []
+  @Published var searchPath: [Route] = []
+}
+
 final class AppModel: ObservableObject {
   static let shared = AppModel()
   /// What's playing. Setting it (even to what's already in the mini player) opens the player.
@@ -406,11 +414,27 @@ final class AppModel: ObservableObject {
   }
   /// The player is shrunk into the mini player above the tab bar.
   @Published var playerMinimized = false
-  @Published var tab: AppTab = .following
+  /// The section and each section's pages live in `navigation`: published from AppModel, every
+  /// page opened or tab switched rebuilt the screens watching AppModel, the player (open or in the
+  /// mini player) above all, which made browsing feel slow on iPhone Duo's big screen.
+  let navigation = AppNavigation()
+  var tab: AppTab {
+    get { navigation.tab }
+    set { navigation.tab = newValue }
+  }
   // Each section's pages (so the player can open a channel page in the one you're in).
-  @Published var followingPath: [Route] = []
-  @Published var browsePath: [Route] = []
-  @Published var searchPath: [Route] = []
+  var followingPath: [Route] {
+    get { navigation.followingPath }
+    set { navigation.followingPath = newValue }
+  }
+  var browsePath: [Route] {
+    get { navigation.browsePath }
+    set { navigation.browsePath = newValue }
+  }
+  var searchPath: [Route] {
+    get { navigation.searchPath }
+    set { navigation.searchPath = newValue }
+  }
   /// Height the tab bar takes up from the bottom of the screen (measured: it differs between
   /// iOS versions; the floating glass bar of iOS 26 is taller).
   @Published var tabBarHeight: CGFloat = 49

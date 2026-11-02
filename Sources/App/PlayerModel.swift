@@ -866,6 +866,7 @@ final class PlayerModel: ObservableObject {
     qualities = []
     selectedQuality = nil
     latency = nil
+    smoothedLatency = nil
     adState = .none
     adRanges = []
     coveringAd = false
@@ -935,10 +936,33 @@ final class PlayerModel: ObservableObject {
 
   /// Latency as shown (to a tenth of a second), published only when that changes: every view
   /// watching the player redraws on each change, and it ticks twice a second.
+  /// The latency as shown: an average over the last few seconds. The raw reading goes up and down
+  /// by a few tenths with every piece of video that arrives (it's measured to the newest frame
+  /// in hand), which made the number bounce around though nothing changed; a real change (a
+  /// stall, catching up) still shows straight away or within a couple of seconds.
   func setLatency(_ value: Double?) {
-    let shown = value.map { ($0 * 10).rounded() / 10 }
-    if shown != latency { latency = shown }
+    let now = Date()
+    guard let value, value.isFinite, value >= 0 else {
+      smoothedLatency = nil
+      if latency != nil { latency = nil }
+      return
+    }
+    if let previous = smoothedLatency, let at = smoothedAt, abs(value - previous) < 1.5 {
+      let weight = 1 - exp(-now.timeIntervalSince(at) / 2.5)
+      smoothedLatency = previous + (value - previous) * weight
+    } else {
+      // First reading, or a big jump (a stall, a skip to live): show it as it is.
+      smoothedLatency = value
+    }
+    smoothedAt = now
+    let shown = ((smoothedLatency ?? value) * 10).rounded() / 10
+    // Only when it moves by more than a tenth (no flicking between two neighbouring values).
+    if let current = latency, abs(shown - current) < 0.15 { return }
+    latency = shown
   }
+
+  private var smoothedLatency: Double?
+  private var smoothedAt: Date?
 
   private func tick() {
     let now = Date()
@@ -1446,6 +1470,9 @@ final class PlayerModel: ObservableObject {
     /// Multi-view, all streams in Picture in Picture: the picture shows in this view of the PiP
     /// window (nil: back in the tile). Kept for a player started afresh meanwhile.
     private weak var sharedPictureView: UIView?
+
+    /// See LowLatencyController.holdStill.
+    func holdStill() { lowLatency?.holdStill() }
 
     func showPicture(in view: UIView?) {
       sharedPictureView = view

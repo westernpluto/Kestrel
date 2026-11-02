@@ -46,19 +46,20 @@ struct RootView: View {
   @EnvironmentObject private var favorites: FavoritesStore
   @EnvironmentObject private var settings: AppSettings
   @ObservedObject private var following = FollowingStore.shared
+  @ObservedObject private var navigation = AppModel.shared.navigation
 
   var body: some View {
     ZStack {
       // The system tab bar: the floating Liquid Glass bar (slide a finger along it to switch
       // sections). On iPhone Duo the system moves it to the side when that leaves more room.
-      TabView(selection: $app.tab) {
-        NavigationStack(path: $app.followingPath) { FollowingView().appDestinations().miniPlayerRoom() }
+      TabView(selection: $navigation.tab) {
+        NavigationStack(path: $navigation.followingPath) { FollowingView().appDestinations().miniPlayerRoom() }
           .tabItem { Label("Following", systemImage: "heart") }
           .tag(AppTab.following)
-        NavigationStack(path: $app.browsePath) { BrowseView().appDestinations().miniPlayerRoom() }
+        NavigationStack(path: $navigation.browsePath) { BrowseView().appDestinations().miniPlayerRoom() }
           .tabItem { Label("Browse", systemImage: "square.grid.2x2") }
           .tag(AppTab.browse)
-        NavigationStack(path: $app.searchPath) { SearchView().appDestinations().miniPlayerRoom() }
+        NavigationStack(path: $navigation.searchPath) { SearchView().appDestinations().miniPlayerRoom() }
           .tabItem { Label("Search", systemImage: "magnifyingglass") }
           .tag(AppTab.search)
         NavigationStack { SettingsView().miniPlayerRoom() }

@@ -112,6 +112,8 @@
     private func ended() {
       guard isActive else { return }
       isActive = false
+      // Each picture's last frame held over it while it starts drawing in its tile again.
+      for tile in model?.tiles ?? [] { tile.player.holdStill() }
       for tile in model?.tiles ?? [] { tile.player.showPicture(in: nil) }
       grid.show([])
       model?.pictureInPictureChanged(false)
@@ -144,7 +146,10 @@
       _ pictureInPictureController: AVPictureInPictureController,
       restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
-      completionHandler(true)
+      Task { @MainActor in
+        for tile in self.model?.tiles ?? [] { tile.player.holdStill() }
+        completionHandler(true)
+      }
     }
   }
 
