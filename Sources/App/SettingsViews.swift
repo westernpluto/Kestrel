@@ -39,69 +39,61 @@ struct SettingsView: View {
       }
 
       Section {
-        if PlayerEngine.isLowLatencyBuilt {
-          Toggle("Low latency", isOn: $settings.lowLatency)
+        NavigationLink {
+          PlaybackSettingsView()
+        } label: {
+          SettingsRow(title: "Playback", systemImage: "play.fill", color: .accentTeal,
+            value: PlayerEngine.isLowLatencyBuilt && settings.lowLatency ? "Low latency" : nil)
         }
         NavigationLink {
           AdBlockingView()
         } label: {
-          LabeledContent("Ad blocking", value: settings.adBlocking.shortTitle)
+          SettingsRow(title: "Ad blocking", systemImage: "hand.raised.fill", color: .red, value: settings.adBlocking.shortTitle)
         }
-        Toggle("Background audio", isOn: $settings.backgroundAudio)
-        Toggle("PiP playback controls", isOn: $settings.pipControls)
-        Picker("Raids", selection: $settings.raidMode) {
-          ForEach(RaidMode.allCases) { mode in Text(mode.title).tag(mode) }
+        NavigationLink {
+          PictureInPictureSettingsView()
+        } label: {
+          SettingsRow(title: "Picture in Picture", systemImage: "pip.fill", color: .blue,
+            value: settings.pipControls ? "With controls" : "Seamless")
         }
-        if PlayerEngine.isLowLatencyBuilt {
-          Toggle("Multi-view: all streams in PiP", isOn: $settings.multiviewPiPAll)
+        NavigationLink {
+          RaidSettingsView()
+        } label: {
+          SettingsRow(title: "Raids", systemImage: "person.3.fill", color: .purple, value: settings.raidMode.shortTitle)
+        }
+        NavigationLink {
+          ChatSettingsView()
+        } label: {
+          SettingsRow(title: "Chat", systemImage: "bubble.left.and.bubble.right.fill", color: .green,
+            value: "\(Int(settings.chatFontSize)) pt")
+        }
+      }
+
+      Section {
+        NavigationLink {
+          NotificationSettingsView()
+        } label: {
+          SettingsRow(title: "Notifications", systemImage: "bell.badge.fill", color: .orange,
+            value: notifier.enabled || instantAlerts.active ? "On" : "Off")
         }
         NavigationLink {
           RecordingsView()
         } label: {
-          Label("Recordings", systemImage: "record.circle")
+          SettingsRow(title: "Recordings", systemImage: "record.circle", color: .pink)
         }
-      } header: {
-        Text("Playback")
-      } footer: {
-        Text(
-          "Low latency keeps streams as close to live as your connection allows: when one falls behind, it plays slightly faster for a few seconds to catch up. Streams start at the highest quality; pick Auto in the player's gear menu and they start on Auto from then on, which settles on a quality your connection keeps up with instead of bouncing between them. Video stats are in the gear menu too. Multi-view's Picture in Picture shows all its streams together (experimental); off, it shows the picked one. PiP playback controls: Picture in Picture with play and pause; off, the window has no buttons, but the stream comes back from it without a moment of black. Raids: when the channel you're watching raids another, Follow automatically counts down like Twitch and then takes you there (tap Stay to remain), Ask me offers the raided channel with a Watch button."
-        )
       }
 
       Section {
-        Toggle("Go-live alerts", isOn: Binding(get: { notifier.enabled }, set: { on in Task { await notifier.setEnabled(on) } }))
-        if notifier.enabled {
-          Toggle("Keep checking in the background", isOn: $notifier.backgroundChecks)
-        }
-        if notifier.permission == .denied {
-          Button("Allow notifications in iOS Settings") {
-            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
-          }
-        }
         NavigationLink {
-          InstantAlertsView()
+          ActivityLogView()
         } label: {
-          LabeledContent("Instant alerts (ntfy)", value: instantAlerts.active ? "On" : "Off")
+          SettingsRow(title: "Activity log", systemImage: "list.bullet.rectangle", color: .gray)
         }
-      } header: {
-        Text("Notifications")
-      } footer: {
-        Text(
-          "Go-live alerts: a notification when a channel you follow goes live (your Twitch follows and the channels you heart); tap it to watch. Kestrel checks every minute while it runs. iOS pauses apps soon after you leave them, so Keep checking in the background keeps Kestrel running by playing silence mixed in with your other audio (allowed for apps you install yourself, not App Store apps; it uses some battery). If Kestrel is swiped away or the phone restarts, checks stop until it's opened again. Instant alerts arrive within about a minute even then, through the ntfy app."
-        )
-      }
-
-      Section("Chat") {
-        Stepper(value: $settings.chatFontSize, in: 12...22, step: 1) {
-          LabeledContent("Text size", value: "\(Int(settings.chatFontSize)) pt")
-        }
-      }
-
-      Section {
-        NavigationLink("Activity log") { ActivityLogView() }
-        Button(imageCacheCleared ? "Image cache cleared" : "Clear image cache") {
+        Button {
           ImagePipeline.shared.clear()
           imageCacheCleared = true
+        } label: {
+          SettingsRow(title: imageCacheCleared ? "Image cache cleared" : "Clear image cache", systemImage: "photo.stack", color: .gray)
         }
         .disabled(imageCacheCleared)
       } footer: {
@@ -151,6 +143,155 @@ struct SettingsView: View {
     case false?: return "Signed in"
     case nil: return "Checking…"
     }
+  }
+}
+
+/// A row in Settings like the system's own: a coloured symbol, the title, and what it's set to.
+struct SettingsRow: View {
+  let title: String
+  let systemImage: String
+  let color: Color
+  var value: String? = nil
+
+  var body: some View {
+    HStack(spacing: 12) {
+      Image(systemName: systemImage)
+        .font(.system(size: 14, weight: .semibold))
+        .foregroundColor(.white)
+        .frame(width: 29, height: 29)
+        .background(color, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+      Text(title).foregroundColor(.primary)
+      Spacer(minLength: 8)
+      if let value { Text(value).foregroundColor(.secondary).lineLimit(1) }
+    }
+  }
+}
+
+struct PlaybackSettingsView: View {
+  @EnvironmentObject private var settings: AppSettings
+
+  var body: some View {
+    Form {
+      if PlayerEngine.isLowLatencyBuilt {
+        Section {
+          Toggle("Low latency", isOn: $settings.lowLatency)
+        } footer: {
+          Text("Keeps streams as close to live as your connection allows: when one falls behind, it plays slightly faster for a few seconds to catch up, and it starts right at the live edge.")
+        }
+      }
+      Section {
+        Toggle("Background audio", isOn: $settings.backgroundAudio)
+      } footer: {
+        Text("Keeps the sound playing when you leave Kestrel or lock the phone.")
+      }
+      Section {
+        Toggle("Video stats", isOn: $settings.showVideoStats)
+      } footer: {
+        Text("Quality, latency, buffer and more over the video (also in the player's gear menu). Streams start at the highest quality; pick Auto in the gear menu and they start on Auto from then on.")
+      }
+      Section { MiniPlayerSpacer() }
+    }
+    .environment(\.defaultMinListRowHeight, 1)
+    .navigationTitle("Playback")
+  }
+}
+
+struct PictureInPictureSettingsView: View {
+  @EnvironmentObject private var settings: AppSettings
+
+  var body: some View {
+    Form {
+      Section {
+        Toggle("Playback controls", isOn: $settings.pipControls)
+      } footer: {
+        Text("On: the regular window with play and pause; the picture can show black for a moment when you come back to the app. Off: no buttons in the window, but the stream comes back without the black (pause from the lock screen, Control Center or headphones). Applies from the next stream you open.")
+      }
+      if PlayerEngine.isLowLatencyBuilt {
+        Section {
+          Toggle("Multi-view: all streams together", isOn: $settings.multiviewPiPAll)
+        } footer: {
+          Text("Multi-view's Picture in Picture shows every stream at once, laid out as on screen (experimental). Off, it shows the picked stream.")
+        }
+      }
+      Section { MiniPlayerSpacer() }
+    }
+    .environment(\.defaultMinListRowHeight, 1)
+    .navigationTitle("Picture in Picture")
+  }
+}
+
+struct RaidSettingsView: View {
+  @EnvironmentObject private var settings: AppSettings
+
+  var body: some View {
+    Form {
+      Section {
+        Picker("When a channel raids", selection: $settings.raidMode) {
+          ForEach(RaidMode.allCases) { mode in Text(mode.title).tag(mode) }
+        }
+        .pickerStyle(.inline)
+        .labelsHidden()
+      } header: {
+        Text("When the channel you're watching raids another")
+      } footer: {
+        Text("Follow automatically counts down like Twitch, then takes you to the raided channel (tap Stay to remain). Ask me shows the raided channel with a Watch button. Off ignores raids.")
+      }
+      Section { MiniPlayerSpacer() }
+    }
+    .environment(\.defaultMinListRowHeight, 1)
+    .navigationTitle("Raids")
+  }
+}
+
+struct ChatSettingsView: View {
+  @EnvironmentObject private var settings: AppSettings
+
+  var body: some View {
+    Form {
+      Section {
+        Stepper(value: $settings.chatFontSize, in: 12...22, step: 1) {
+          LabeledContent("Text size", value: "\(Int(settings.chatFontSize)) pt")
+        }
+      }
+      Section { MiniPlayerSpacer() }
+    }
+    .environment(\.defaultMinListRowHeight, 1)
+    .navigationTitle("Chat")
+  }
+}
+
+struct NotificationSettingsView: View {
+  @ObservedObject private var notifier = LiveNotifier.shared
+  @ObservedObject private var instantAlerts = InstantAlerts.shared
+
+  var body: some View {
+    Form {
+      Section {
+        Toggle("Go-live alerts", isOn: Binding(get: { notifier.enabled }, set: { on in Task { await notifier.setEnabled(on) } }))
+        if notifier.enabled {
+          Toggle("Keep checking in the background", isOn: $notifier.backgroundChecks)
+        }
+        if notifier.permission == .denied {
+          Button("Allow notifications in iOS Settings") {
+            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+          }
+        }
+      } footer: {
+        Text("A notification when a channel you follow (or hearted) goes live; tap it to watch. Kestrel checks every minute while it runs. Keep checking in the background keeps it running after you leave by playing silence under your other audio (fine for apps you install yourself; uses some battery). Swiped away or after a restart, checks stop until Kestrel is opened.")
+      }
+      Section {
+        NavigationLink {
+          InstantAlertsView()
+        } label: {
+          LabeledContent("Instant alerts (ntfy)", value: instantAlerts.active ? "On" : "Off")
+        }
+      } footer: {
+        Text("Alerts within about a minute even when Kestrel is closed, through the ntfy app.")
+      }
+      Section { MiniPlayerSpacer() }
+    }
+    .environment(\.defaultMinListRowHeight, 1)
+    .navigationTitle("Notifications")
   }
 }
 
