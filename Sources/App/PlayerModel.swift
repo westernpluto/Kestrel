@@ -1445,9 +1445,9 @@ final class PlayerModel: ObservableObject {
   #if canImport(AmazonIVSPlayer)
     /// Multi-view, all streams in Picture in Picture: the picture shows in this view of the PiP
     /// window (nil: back in the tile). Kept for a player started afresh meanwhile.
-    private weak var sharedPictureView: IVSPlayerView?
+    private weak var sharedPictureView: UIView?
 
-    func showPicture(in view: IVSPlayerView?) {
+    func showPicture(in view: UIView?) {
       sharedPictureView = view
       if let view { lowLatency?.show(in: view) } else { lowLatency?.showInTile() }
     }

@@ -59,9 +59,22 @@
       }
     }
     private var offersPictureInPicture: Bool { !tile || pictureInPictureAllowed }
-    /// Multi-view's all-streams Picture in Picture: the picture shows in this view (in the PiP
+    /// Multi-view's all-streams Picture in Picture: the picture shows in this place (in the PiP
     /// window) instead of the tile's own, and carries on in the background like any PiP.
-    private weak var sharedView: IVSPlayerView?
+    private weak var sharedView: UIView?
+    /// The one view this stream's picture is drawn in, for as long as it plays. It's moved between
+    /// places (the player screen or tile, the all-streams PiP window) rather than the player being
+    /// handed from one view to another: a view newly given the player shows nothing until the
+    /// stream's next keyframe (up to a couple of seconds), which made pictures stutter going into
+    /// PiP and flash black coming back. A moved view keeps its picture and carries on drawing.
+    private let surface: IVSPlayerView = {
+      let surface = IVSPlayerView()
+      surface.backgroundColor = .black
+      surface.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      return surface
+    }()
+    /// Where the picture goes on screen: the player screen's or tile's place for it.
+    private weak var home: UIView?
     /// Muted by choice (multi-view: every tile but the one being listened to).
     private var userMuted = false
     /// The tallest picture worth fetching (multi-view: as big as the tile is shown); nil for any.
@@ -314,8 +327,8 @@
       player.pause()
       player.delegate = nil
       proxy.controller = nil
-      view?.player = nil
-      if let sharedView, sharedView.player === player { sharedView.player = nil }
+      surface.player = nil
+      surface.removeFromSuperview()
       pipObservation = nil
       pipPossibleObservation = nil
       pip = nil
@@ -814,12 +827,9 @@
         lastFarJump = Date()
         reload(reason: String(format: "%.0f s behind live after a dropout", latency))
       }
-      // The picture's view lost the player somehow: give it back.
-      if let sharedView {
-        if sharedView.player !== player { sharedView.player = player }
-      } else if let view, !detachedForBackground, view.player !== player {
-        view.player = player
-      }
+      // The picture lost the player or its place somehow: give them back.
+      if let place = sharedView ?? home, surface.superview !== place { put(surface, in: place) }
+      if view != nil, !detachedForBackground, surface.player !== player { surface.player = player }
       let decoded = player.videoFramesDecoded
       let elapsed = Date().timeIntervalSince(framesDecoded.at)
       if elapsed >= 1 {
@@ -980,7 +990,8 @@
     }
 
     func setFill(_ fill: Bool) {
-      view?.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+      let gravity: AVLayerVideoGravity = fill ? .resizeAspectFill : .resizeAspect
+      if surface.videoGravity != gravity { surface.videoGravity = gravity }
     }
 
     func setMuted(_ muted: Bool) {
@@ -1020,34 +1031,42 @@
 
     // MARK: View, Picture in Picture, background audio
 
-    func attach(_ view: IVSPlayerView) {
-      guard self.view !== view else { return }
-      // Off the old picture first: one being taken down after the new one is up (a screen
-      // rebuilt mid-transition) took the video with it, leaving the new one black with the sound
-      // still playing.
-      if let old = self.view, old.player === player { old.player = nil }
-      self.view = view
-      view.alpha = concealing ? 0 : 1
-      if !detachedForBackground, sharedView == nil { view.player = player }
-      if offersPictureInPicture { makePictureInPicture(for: view) }
+    /// The player screen or tile's place for the picture came on screen (a screen rebuilt
+    /// mid-transition makes a new one while the old is still up: the picture simply moves over).
+    func attach(_ place: UIView) {
+      guard home !== place else { return }
+      home = place
+      let first = view == nil
+      view = surface
+      if first { surface.alpha = concealing ? 0 : 1 }
+      if sharedView == nil { put(surface, in: place) }
+      if !detachedForBackground, surface.player !== player { surface.player = player }
+      if first, offersPictureInPicture { makePictureInPicture(for: surface) }
+    }
+
+    private func put(_ surface: IVSPlayerView, in place: UIView) {
+      guard surface.superview !== place else { return }
+      surface.frame = place.bounds
+      place.addSubview(surface)
     }
 
     /// Into the all-streams Picture in Picture window (see MultiviewPictureInPicture): the
     /// picture moves there and keeps playing while Kestrel is in the background.
-    func show(in shared: IVSPlayerView) {
+    func show(in shared: UIView) {
       guard !stopped, sharedView !== shared else { return }
       backgroundSettleTask?.cancel()
       backgroundSettleTask = nil
       audioOnlyTask?.cancel()
       audioOnlyTask = nil
-      if let view, view.player === player { view.player = nil }
       sharedView = shared
+      view = surface
+      put(surface, in: shared)
       detachedForBackground = false
       if audioOnlyForBackground {
         audioOnlyForBackground = false
         applyChosen(smoothly: true)
       }
-      shared.player = player
+      if surface.player !== player { surface.player = player }
       if pausedForBackground {
         pausedForBackground = false
         goLive()
@@ -1057,10 +1076,10 @@
     /// Back in the tile's own view (the PiP window closed). Still in the background: settles as
     /// usual (heard streams keep their sound, the others pause).
     func showInTile() {
-      guard let shared = sharedView else { return }
-      if shared.player === player { shared.player = nil }
+      guard sharedView != nil else { return }
       sharedView = nil
-      if let view, !detachedForBackground { view.player = player }
+      if let home { put(surface, in: home) }
+      if !detachedForBackground, surface.player !== player { surface.player = player }
       if UIApplication.shared.applicationState == .background { enteredBackground() }
     }
 
@@ -1238,18 +1257,35 @@
     let controller: LowLatencyController
     var fill: Bool
 
-    func makeUIView(context: Context) -> IVSPlayerView {
-      let view = IVSPlayerView()
-      view.backgroundColor = .black
-      view.videoGravity = fill ? .resizeAspectFill : .resizeAspect
-      controller.attach(view)
-      return view
+    // A place for the stream's picture: the controller's one view is put in it (see `surface`).
+    // It takes the picture when it comes on screen, not on every update: during a transition the
+    // old place is still updated after the new one is up, and taking the picture back then left
+    // it in a place about to disappear.
+    func makeUIView(context: Context) -> PictureSlot {
+      let slot = PictureSlot()
+      slot.backgroundColor = .black
+      slot.clipsToBounds = true
+      controller.setFill(fill)
+      slot.onWindow = { [weak controller] slot in controller?.attach(slot) }
+      return slot
     }
 
-    func updateUIView(_ view: IVSPlayerView, context: Context) {
-      controller.attach(view)
-      let gravity: AVLayerVideoGravity = fill ? .resizeAspectFill : .resizeAspect
-      if view.videoGravity != gravity { view.videoGravity = gravity }
+    func updateUIView(_ slot: PictureSlot, context: Context) {
+      controller.setFill(fill)
+    }
+
+    static func dismantleUIView(_ slot: PictureSlot, coordinator: Void) {
+      slot.onWindow = nil
+    }
+  }
+
+  /// See LowLatencyVideoView.
+  final class PictureSlot: UIView {
+    var onWindow: (@MainActor (PictureSlot) -> Void)?
+
+    override func didMoveToWindow() {
+      super.didMoveToWindow()
+      if window != nil { onWindow?(self) }
     }
   }
 

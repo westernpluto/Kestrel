@@ -151,7 +151,9 @@
   /// The streams' pictures in the PiP window: two stacked, three or four in a 2×2 grid (a third
   /// centred under the first two), nothing else on them. The window takes no touches.
   final class PictureGridView: UIView {
-    private var cells: [(id: String, video: IVSPlayerView)] = []
+    /// Each stream's place in the window: the stream's own picture view is moved into it (see
+    /// LowLatencyController's `surface`).
+    private var cells: [(id: String, video: UIView)] = []
     private static let gap: CGFloat = 1
     /// The multi-view screen's layout: each picture's place as a share of the picture area.
     private var shares: [String: CGRect] = [:]
@@ -187,18 +189,17 @@
     /// Shows these streams (in order), keeping the views of ones already shown. Returns each
     /// stream's view.
     @discardableResult
-    func show(_ ids: [String]) -> [String: IVSPlayerView] {
+    func show(_ ids: [String]) -> [String: UIView] {
       let wanted = Set(ids)
       for cell in cells where !wanted.contains(cell.id) {
-        cell.video.player = nil
         cell.video.removeFromSuperview()
       }
       var kept = Dictionary(uniqueKeysWithValues: cells.filter { wanted.contains($0.id) }.map { ($0.id, $0.video) })
       cells = ids.map { id in
         if let video = kept.removeValue(forKey: id) { return (id, video) }
-        let video = IVSPlayerView()
+        let video = UIView()
         video.backgroundColor = .black
-        video.videoGravity = .resizeAspect
+        video.clipsToBounds = true
         addSubview(video)
         return (id, video)
       }

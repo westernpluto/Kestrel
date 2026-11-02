@@ -254,8 +254,14 @@ final class MultiviewModel: ObservableObject, Identifiable {
   func pictureInPictureChanged(_ active: Bool) {
     pictureInPictureActive = active
     if active {
-      let cap = tiles.count <= 2 ? 480 : 360
-      for tile in tiles { tile.player.setMaxHeight(cap) }
+      // Smaller pictures for the small window, a few seconds in: switching quality the moment
+      // the window opened made the pictures stutter as they went into it.
+      Task { [weak self] in
+        try? await Task.sleep(nanoseconds: 4_000_000_000)
+        guard let self, self.pictureInPictureActive else { return }
+        let cap = self.tiles.count <= 2 ? 480 : 360
+        for tile in self.tiles { tile.player.setMaxHeight(cap) }
+      }
     } else if !hidden {
       // Each picture sharp again for its place on screen, a moment after the hand-over (switching
       // quality right as the pictures move back added to the moment they went black).
