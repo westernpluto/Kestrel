@@ -142,12 +142,64 @@
       videoServer = text
     }
 
-    /// How much video to have before starting. Low latency: half a second, or what this channel's
-    /// stream has needed in hand lately if that's more (the player's own default is a second;
-    /// `LiveCatchUp` steers to the margin after that).
+    /// How much video to have before starting. Low latency: always half a second (the player's own
+    /// default is a second), even on a channel whose video arrived unevenly last time: waiting for
+    /// more started those channels up to two seconds further from live. What such a channel needs
+    /// is built up after the start instead, a touch slower for a few seconds (see `LiveCatchUp`).
     private func startBuffer(lowLatency: Bool) -> CMTime {
-      let learned = catchUp.targetBuffer > LiveCatchUp.startBuffer ? min(2.0, catchUp.targetBuffer * 0.7) : 0
-      return CMTime(seconds: lowLatency ? max(0.5, learned) : 2.0, preferredTimescale: 1000)
+      CMTime(seconds: lowLatency ? 0.5 : 2.0, preferredTimescale: 1000)
+    }
+
+    // MARK: Starting at the live edge
+
+    /// The jump to live after a start has been tried for this load.
+    private var startJumpTried = false
+    /// When it jumped (the buffering that can follow isn't a stall to learn from).
+    private var startJumpAt = Date.distantPast
+    /// Jumps only this soon after playback starts, and only for at least this much.
+    private static let startJumpWindow: ClosedRange<TimeInterval> = 0.8...10
+    private static let startJumpMinimum = 0.6
+
+    /// Right after a start, the player often begins a couple of seconds back from the newest video
+    /// it has. Winning that back by playing faster took up to half a minute; mid-stream that's the
+    /// right way (a jump there empties what's in hand and sets up the next stall), but at the start
+    /// there's nothing to lose. So once it's playing, it skips once over the extra video already
+    /// downloaded, keeping what this stream needs in hand: no new request, no rebuffer, just playing
+    /// from further ahead.
+    private func jumpToLiveAfterStart(latency: Double?) {
+      guard !startJumpTried, let since = playingSince else { return }
+      let playing = Date().timeIntervalSince(since)
+      guard playing >= Self.startJumpWindow.lowerBound else { return }
+      guard playing <= Self.startJumpWindow.upperBound, AppSettings.shared.lowLatency, player.isLiveLowLatency,
+        player.state == .playing, !pausedForBackground, let latency
+      else {
+        if playing > Self.startJumpWindow.upperBound { startJumpTried = true }
+        return
+      }
+      startJumpTried = true
+      // Only video known to be downloaded: the smaller of the two ways of reading `buffered` (see
+      // `bufferAhead`), so the jump can't land past the end of it.
+      let buffered = player.buffered.seconds
+      let position = player.position.seconds
+      guard buffered.isFinite, buffered > 0, position.isFinite else { return }
+      let surely = bufferedIsRemaining || position <= 0 ? buffered : max(0, buffered - position)
+      // Keep the margin in hand, lean: at most a second plus a little (more builds up after).
+      let keep = max(catchUp.floor, min(catchUp.targetBuffer, LiveCatchUp.startBuffer)) + 0.25
+      let skip = min(surely - keep, latency - keep - 0.3)
+      guard skip >= Self.startJumpMinimum else { return }
+      startJumpAt = Date()
+      catchUp.hold(for: 2)
+      if player.playbackRate != 1 { player.playbackRate = 1 }
+      let login = self.login
+      let before = latency
+      let skipped = String(format: "%.1f", skip), from = String(format: "%.1f", before)
+      player.seek(to: CMTime(seconds: position + skip, preferredTimescale: 1000)) { finished in
+        if finished {
+          ActivityLog.shared.add("\(login): skipped \(skipped) s closer to live at the start (it was \(from) s behind)")
+        } else {
+          ActivityLog.shared.add("\(login): the player didn't take the skip to live at the start; catching up by speed instead")
+        }
+      }
     }
 
     /// Quality-menu IDs at or above this pick a rendition for the Apple player.
@@ -183,7 +235,7 @@
       player.setNetworkRecoveryMode(.resume)
       if catchUp.learnedUneven {
         ActivityLog.shared.add(
-          "\(login)'s video arrived unevenly last time: starting with \(Self.seconds(catchUp.targetBuffer)) in hand")
+          "\(login)'s video arrived unevenly last time: starting close to live, then building up \(Self.seconds(catchUp.targetBuffer)) in hand")
       }
       player.autoQualityMode = false
       if tile { chosen = nil }
@@ -296,6 +348,7 @@
       playedSinceLoad = false
       playingSince = nil
       reportedStart = false
+      startJumpTried = false
       if player.playbackRate != 1 { player.playbackRate = 1 }
       player.load(url)
     }
@@ -375,7 +428,9 @@
       case .buffering:
         model.isBuffering = true
         // Ran dry mid-stream (not a start, a pause or a quality switch): keep a bigger margin.
-        if playedSinceLoad, !pausedForBackground, Date().timeIntervalSince(lastQualitySwitch) > 3 {
+        if playedSinceLoad, !pausedForBackground, Date().timeIntervalSince(lastQualitySwitch) > 3,
+          Date().timeIntervalSince(startJumpAt) > 3
+        {
           lastStall = Date()
           if player.playbackRate != 1 { player.playbackRate = 1 }
           if Date() < settlingUntil || NetworkWatch.shared.sinceChange < 10 {
@@ -627,6 +682,8 @@
       // touch slower while less is (see LiveCatchUp).
       let steering =
         AppSettings.shared.lowLatency && player.isLiveLowLatency && player.state == .playing && !pausedForBackground
+      // Just started a couple of seconds back: one skip over the extra in hand.
+      jumpToLiveAfterStart(latency: latency)
       let position = player.position.seconds
       let rate = catchUp.update(
         buffer: bufferAhead, latency: latency, playing: steering, position: position.isFinite ? position : nil)
