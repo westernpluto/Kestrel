@@ -1471,9 +1471,6 @@ final class PlayerModel: ObservableObject {
     /// window (nil: back in the tile). Kept for a player started afresh meanwhile.
     private weak var sharedPictureView: UIView?
 
-    /// See LowLatencyController.holdStill.
-    func holdStill() { lowLatency?.holdStill() }
-
     func showPicture(in view: UIView?) {
       sharedPictureView = view
       if let view { lowLatency?.show(in: view) } else { lowLatency?.showInTile() }

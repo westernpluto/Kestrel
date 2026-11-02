@@ -112,8 +112,6 @@
     private func ended() {
       guard isActive else { return }
       isActive = false
-      // Each picture's last frame held over it while it starts drawing in its tile again.
-      for tile in model?.tiles ?? [] { tile.player.holdStill() }
       for tile in model?.tiles ?? [] { tile.player.showPicture(in: nil) }
       grid.show([])
       model?.pictureInPictureChanged(false)
@@ -124,12 +122,14 @@
       setEnabled(on, source: source)
     }
 
+    // Right as the window opens or closes (AVKit calls on the main thread), not a moment later:
+    // the window grew empty and the pictures popped in after.
     nonisolated func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-      Task { @MainActor in self.began() }
+      MainActor.assumeIsolated { self.began() }
     }
 
     nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-      Task { @MainActor in self.ended() }
+      MainActor.assumeIsolated { self.ended() }
     }
 
     nonisolated func pictureInPictureController(
@@ -146,10 +146,7 @@
       _ pictureInPictureController: AVPictureInPictureController,
       restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
-      Task { @MainActor in
-        for tile in self.model?.tiles ?? [] { tile.player.holdStill() }
-        completionHandler(true)
-      }
+      completionHandler(true)
     }
   }
 

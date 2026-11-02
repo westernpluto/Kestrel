@@ -8,7 +8,6 @@
   import AmazonIVSPlayer
   import AVFoundation
   import AVKit
-  import CoreImage
   import SwiftUI
   import UIKit
 
@@ -76,6 +75,17 @@
     }()
     /// Where the picture goes on screen: the player screen's or tile's place for it.
     private weak var home: UIView?
+    /// The Picture in Picture window's content. PiP is the video-call kind (as multi-view's): the
+    /// stream's own picture view moves into the window and back. The regular kind takes the video
+    /// off the player's layer and hands it back on return, where it showed black until the next
+    /// keyframe; a view that's moved keeps drawing. (This kind of window has no play/pause button;
+    /// the lock screen, Control Center and headphones still pause.)
+    private let pipContent: AVPictureInPictureVideoCallViewController = {
+      let content = AVPictureInPictureVideoCallViewController()
+      content.view.backgroundColor = .black
+      content.preferredContentSize = CGSize(width: 1920, height: 1080)
+      return content
+    }()
     /// Muted by choice (multi-view: every tile but the one being listened to).
     private var userMuted = false
     /// The tallest picture worth fetching (multi-view: as big as the tile is shown); nil for any.
@@ -328,10 +338,6 @@
       player.pause()
       player.delegate = nil
       proxy.controller = nil
-      stillWatch?.cancel()
-      stillWatch = nil
-      still?.removeFromSuperview()
-      still = nil
       surface.player = nil
       surface.removeFromSuperview()
       pipObservation = nil
@@ -832,6 +838,11 @@
         lastFarJump = Date()
         reload(reason: String(format: "%.0f s behind live after a dropout", latency))
       }
+      // The PiP window takes the picture's shape.
+      let videoSize = player.videoSize
+      if videoSize.width > 0, videoSize.height > 0, pipContent.preferredContentSize != videoSize {
+        pipContent.preferredContentSize = videoSize
+      }
       // The picture lost the player or its place somehow: give them back.
       if let place = sharedView ?? home, surface.superview !== place { put(surface, in: place) }
       if view != nil, !detachedForBackground, surface.player !== player { surface.player = player }
@@ -1046,7 +1057,8 @@
       if first { surface.alpha = concealing ? 0 : 1 }
       if sharedView == nil { put(surface, in: place) }
       if !detachedForBackground, surface.player !== player { surface.player = player }
-      if first, offersPictureInPicture { makePictureInPicture(for: surface) }
+      // (PiP grows out of this place and goes back to it: set up again for a new one.)
+      if offersPictureInPicture, !(pip?.isPictureInPictureActive ?? false) { makePictureInPicture(for: surface) }
     }
 
     private func put(_ surface: IVSPlayerView, in place: UIView) {
@@ -1055,69 +1067,9 @@
       place.addSubview(surface)
     }
 
-    // MARK: A still frame over the picture while it comes back
-
-    /// The frame that was showing, laid over the picture while the picture can't draw yet. Coming
-    /// back from Picture in Picture (or from the background, where the picture is taken away for
-    /// background audio), the player draws nothing until the stream's next keyframe, up to a
-    /// couple of seconds: that showed as black. The last frame held still for that moment, then
-    /// live video, looks like the stream simply carrying on.
-    private var still: UIImageView?
-    private var stillWatch: Task<Void, Never>?
-    private static let stillContext = CIContext(options: [.cacheIntermediates: false])
-
-    /// Lays the frame showing now over the picture. It stays until `releaseStillWhenDrawing` sees
-    /// live frames again (or a few seconds have gone by, whatever happens).
-    func holdStill() {
-      guard !stopped, still == nil, let buffer = surface.playerLayer.displayedPixelBuffer() else { return }
-      let frame = CIImage(cvPixelBuffer: buffer)
-      guard let image = Self.stillContext.createCGImage(frame, from: frame.extent) else { return }
-      let cover = UIImageView(image: UIImage(cgImage: image))
-      cover.frame = surface.bounds
-      cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-      cover.contentMode = surface.videoGravity == .resizeAspectFill ? .scaleAspectFill : .scaleAspectFit
-      cover.isUserInteractionEnabled = false
-      surface.addSubview(cover)
-      still = cover
-      // Never left up if the picture doesn't come back the expected way.
-      Task { [weak self] in
-        try? await Task.sleep(nanoseconds: 6_000_000_000)
-        guard let self, self.still === cover, self.stillWatch == nil else { return }
-        self.dropStill()
-      }
-    }
-
-    /// The picture is back where it's shown: take the still away once it's drawing new frames.
-    func releaseStillWhenDrawing() {
-      guard still != nil else { return }
-      stillWatch?.cancel()
-      stillWatch = Task { [weak self] in
-        let started = Date()
-        var last = self?.surface.playerLayer.displayedPixelBuffer().map { Unmanaged.passUnretained($0).toOpaque() }
-        var fresh = 0
-        while !Task.isCancelled, Date().timeIntervalSince(started) < 2.5 {
-          try? await Task.sleep(nanoseconds: 80_000_000)
-          guard let self else { return }
-          if let buffer = self.surface.playerLayer.displayedPixelBuffer() {
-            let id = Unmanaged.passUnretained(buffer).toOpaque()
-            if id != last {
-              fresh += 1
-              last = id
-            }
-          }
-          // Two new frames in a row: it's drawing again.
-          if fresh >= 2 { break }
-        }
-        self?.dropStill()
-      }
-    }
-
-    private func dropStill() {
-      stillWatch?.cancel()
-      stillWatch = nil
-      guard let cover = still else { return }
-      still = nil
-      UIView.animate(withDuration: 0.15, animations: { cover.alpha = 0 }, completion: { _ in cover.removeFromSuperview() })
+    /// The stream's own Picture in Picture window is opening: the picture goes into it.
+    func pictureInPictureWillStart() {
+      show(in: pipContent.view)
     }
 
     /// Into the all-streams Picture in Picture window (see MultiviewPictureInPicture): the
@@ -1150,14 +1102,13 @@
       sharedView = nil
       if let home { put(surface, in: home) }
       if !detachedForBackground, surface.player !== player { surface.player = player }
-      releaseStillWhenDrawing()
       if UIApplication.shared.applicationState == .background { enteredBackground() }
     }
 
     private func makePictureInPicture(for view: IVSPlayerView) {
-      guard AVPictureInPictureController.isPictureInPictureSupported(),
-        let pip = AVPictureInPictureController(ivsPlayerLayer: view.playerLayer)
-      else { return }
+      guard AVPictureInPictureController.isPictureInPictureSupported(), let source = home else { return }
+      let pip = AVPictureInPictureController(
+        contentSource: .init(activeVideoCallSourceView: source, contentViewController: pipContent))
       pip.canStartPictureInPictureAutomaticallyFromInline = true
       pip.delegate = proxy
       pipObservation = pip.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
@@ -1198,7 +1149,6 @@
         // Keep the sound: take the picture off screen, and if it stays in the background a while,
         // switch to the audio-only rendition (saves data and battery while only listening).
         detachedForBackground = true
-        holdStill()
         view?.player = nil
         audioOnlyTask?.cancel()
         audioOnlyTask = Task { [weak self] in
@@ -1228,12 +1178,9 @@
       audioOnlyTask?.cancel()
       audioOnlyTask = nil
       guard !stopped, !suspended else { return }
-      // Picture in Picture closing as the app comes back: hold the frame until it's drawing here.
-      if pip?.isPictureInPictureActive ?? false { holdStill() }
       if detachedForBackground {
         detachedForBackground = false
         view?.player = player
-        releaseStillWhenDrawing()
         // A fresh PiP controller for the picture that's back (the old one could stop working).
         if let view, offersPictureInPicture, !(pip?.isPictureInPictureActive ?? false) { makePictureInPicture(for: view) }
       }
@@ -1306,32 +1253,30 @@
       Task { @MainActor in controller?.qualityChanged(quality) }
     }
 
+    // The picture moves into the window as it opens and back as it closes, right then (not a
+    // moment later: the window grew empty and the picture popped in after).
     func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
       pictureInPictureStarting = true
+      MainActor.assumeIsolated { controller?.pictureInPictureWillStart() }
     }
 
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
       pictureInPictureStarting = false
-      let controller = self.controller
-      Task { @MainActor in controller?.releaseStillWhenDrawing() }
+      MainActor.assumeIsolated { controller?.showInTile() }
     }
 
     func pictureInPictureController(
       _ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error
     ) {
       pictureInPictureStarting = false
+      MainActor.assumeIsolated { controller?.showInTile() }
     }
 
     func pictureInPictureController(
       _ pictureInPictureController: AVPictureInPictureController,
       restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
-      // The picture comes back to the app: hold its last frame there until it's drawing again.
-      let controller = self.controller
-      Task { @MainActor in
-        controller?.holdStill()
-        completionHandler(true)
-      }
+      completionHandler(true)
     }
   }
 
