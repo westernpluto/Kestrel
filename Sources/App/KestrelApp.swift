@@ -83,9 +83,9 @@ struct RootView: View {
       }
       // The player sits over the app (not in a separate screen) so it can shrink into the mini
       // player and keep playing while you browse.
-      if let target = app.playing {
-        PlayerScreen(target: target)
-          .id(target.id)
+      if let target = app.playing, let key = app.playerKey {
+        PlayerScreen(target: target, key: key)
+          .id(key)
           .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
           .zIndex(1)
       }
@@ -103,7 +103,7 @@ struct RootView: View {
     // tapped (one thing plays at a time).
     .onChange(of: app.playing?.id) { playing in
       // The stream that was playing stops now, not whenever its screen is finally taken away.
-      app.stopPlayers(except: playing)
+      app.stopPlayers(except: app.playerKey)
       guard playing != nil, let session = app.multiview else { return }
       session.park()
       if !app.multiviewMinimized { app.multiviewMinimized = true }

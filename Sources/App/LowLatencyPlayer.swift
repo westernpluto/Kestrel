@@ -154,6 +154,21 @@
 
     /// The jump to live after a start has been tried for this load.
     private var startJumpTried = false
+    /// The first start: picture hidden and sound off (the spinner shows) until the jump to live is
+    /// done, so it appears already close to live instead of visibly skipping ahead.
+    private var concealing = false
+    private static let concealAtMost: TimeInterval = 2.5
+
+    private func reveal() {
+      guard concealing else { return }
+      concealing = false
+      if let view {
+        UIView.animate(withDuration: 0.18) { view.alpha = 1 }
+      }
+      let mute = userMuted || (model?.coveringAd ?? false)
+      if player.muted != mute { player.muted = mute }
+      if player.state == .playing { model?.isBuffering = false }
+    }
     /// When it jumped (the buffering that can follow isn't a stall to learn from).
     private var startJumpAt = Date.distantPast
     /// Jumps only this soon after playback starts, and only for at least this much.
@@ -169,11 +184,15 @@
     private func jumpToLiveAfterStart(latency: Double?) {
       guard !startJumpTried, let since = playingSince else { return }
       let playing = Date().timeIntervalSince(since)
-      guard playing >= Self.startJumpWindow.lowerBound else { return }
+      // Hidden, it decides a little sooner (the extra video has come down by then).
+      guard playing >= (concealing ? 0.5 : Self.startJumpWindow.lowerBound) else { return }
       guard playing <= Self.startJumpWindow.upperBound, AppSettings.shared.lowLatency, player.isLiveLowLatency,
         player.state == .playing, !pausedForBackground, let latency
       else {
-        if playing > Self.startJumpWindow.upperBound { startJumpTried = true }
+        if playing > Self.startJumpWindow.upperBound || pausedForBackground || !AppSettings.shared.lowLatency {
+          startJumpTried = true
+          reveal()
+        }
         return
       }
       startJumpTried = true
@@ -181,23 +200,33 @@
       // `bufferAhead`), so the jump can't land past the end of it.
       let buffered = player.buffered.seconds
       let position = player.position.seconds
-      guard buffered.isFinite, buffered > 0, position.isFinite else { return }
+      guard buffered.isFinite, buffered > 0, position.isFinite else {
+        reveal()
+        return
+      }
       let surely = bufferedIsRemaining || position <= 0 ? buffered : max(0, buffered - position)
       // Keep the margin in hand, lean: at most a second plus a little (more builds up after).
       let keep = max(catchUp.floor, min(catchUp.targetBuffer, LiveCatchUp.startBuffer)) + 0.25
       let skip = min(surely - keep, latency - keep - 0.3)
-      guard skip >= Self.startJumpMinimum else { return }
+      guard skip >= Self.startJumpMinimum else {
+        reveal()
+        return
+      }
       startJumpAt = Date()
       catchUp.hold(for: 2)
       if player.playbackRate != 1 { player.playbackRate = 1 }
       let login = self.login
-      let before = latency
-      let skipped = String(format: "%.1f", skip), from = String(format: "%.1f", before)
-      player.seek(to: CMTime(seconds: position + skip, preferredTimescale: 1000)) { finished in
+      let skipped = String(format: "%.1f", skip), from = String(format: "%.1f", latency)
+      player.seek(to: CMTime(seconds: position + skip, preferredTimescale: 1000)) { [weak self] finished in
         if finished {
           ActivityLog.shared.add("\(login): skipped \(skipped) s closer to live at the start (it was \(from) s behind)")
         } else {
           ActivityLog.shared.add("\(login): the player didn't take the skip to live at the start; catching up by speed instead")
+        }
+        // A moment for the picture after the skip to come up, then show it.
+        Task { @MainActor in
+          try? await Task.sleep(nanoseconds: 150_000_000)
+          self?.reveal()
         }
       }
     }
@@ -210,8 +239,10 @@
       self.codecs = codecs
       self.model = model
       // What this channel needed last time, so it doesn't have to stall to learn it again.
+      // (At most a second to start with: more had it start close to live and then drift a couple
+      // of seconds back while it built the rest up. It's learned again if this session needs it.)
       let remembered = ChannelMargins.margin(for: login, network: NetworkWatch.shared.memoryKey)
-      catchUp = LiveCatchUp(targetBuffer: remembered)
+      catchUp = LiveCatchUp(targetBuffer: remembered.map { min($0, LiveCatchUp.startBuffer) })
       catchUp.setFloor(NetworkWatch.shared.floor)
       loggedMargin = catchUp.targetBuffer
       super.init()
@@ -349,6 +380,13 @@
       playingSince = nil
       reportedStart = false
       startJumpTried = false
+      // Only the first start of the stream is hidden (later loads take over from a picture
+      // that's already showing: going back to live, reloads).
+      if !everReady, !tile, AppSettings.shared.lowLatency {
+        concealing = true
+        view?.alpha = 0
+        if !player.muted { player.muted = true }
+      }
       if player.playbackRate != 1 { player.playbackRate = 1 }
       player.load(url)
     }
@@ -449,7 +487,8 @@
       case .playing:
         if playingSince == nil { playingSince = Date() }
         playedSinceLoad = true
-        model.isBuffering = false
+        // (Still hidden while it jumps to live: the spinner stays until it's shown.)
+        model.isBuffering = concealing
         setWaitingForStream(false)
         if model.phase != .playing { model.phase = .playing }
         model.liveResumed()
@@ -684,6 +723,8 @@
         AppSettings.shared.lowLatency && player.isLiveLowLatency && player.state == .playing && !pausedForBackground
       // Just started a couple of seconds back: one skip over the extra in hand.
       jumpToLiveAfterStart(latency: latency)
+      // Never hidden for long, whatever happened to the skip.
+      if concealing, let since = playingSince, Date().timeIntervalSince(since) > Self.concealAtMost { reveal() }
       let position = player.position.seconds
       let rate = catchUp.update(
         buffer: bufferAhead, latency: latency, playing: steering, position: position.isFinite ? position : nil)
@@ -774,7 +815,7 @@
       // on screen (stamped `latency` seconds ago) is inside an ad.
       let inAd = latency.map { adTimeline.covers(Date().addingTimeInterval(-$0)) } ?? adTimeline.isActive
       if inAd != model.coveringAd { model.coveringAd = inAd }
-      if player.muted != (inAd || userMuted) { player.muted = inAd || userMuted }
+      if player.muted != (inAd || userMuted || concealing) { player.muted = inAd || userMuted || concealing }
       let shown: AdState = inAd ? .covering : (adState == .covering ? .searching : adState)
       if model.adState != shown { model.adState = shown }
     }
@@ -928,7 +969,7 @@
 
     func setMuted(_ muted: Bool) {
       userMuted = muted
-      let wanted = muted || (model?.coveringAd ?? false)
+      let wanted = muted || (model?.coveringAd ?? false) || concealing
       if player.muted != wanted { player.muted = wanted }
     }
 
@@ -970,6 +1011,7 @@
       // still playing.
       if let old = self.view, old.player === player { old.player = nil }
       self.view = view
+      view.alpha = concealing ? 0 : 1
       if !detachedForBackground, sharedView == nil { view.player = player }
       if offersPictureInPicture { makePictureInPicture(for: view) }
     }
@@ -1096,7 +1138,8 @@
       settlingUntil = Date().addingTimeInterval(8)
       // Heard: make sure the sound has somewhere to go (a call or another app may have taken it).
       if !userMuted { try? AVAudioSession.sharedInstance().setActive(true) }
-      if player.muted != (userMuted || (model?.coveringAd ?? false)) { player.muted = userMuted || (model?.coveringAd ?? false) }
+      let mute = userMuted || (model?.coveringAd ?? false) || concealing
+      if player.muted != mute { player.muted = mute }
       if pausedForBackground {
         // Multi-view's quiet streams come back one after another, not all at once: starting
         // together, they took the bandwidth from the one still playing, which stalled. (Each

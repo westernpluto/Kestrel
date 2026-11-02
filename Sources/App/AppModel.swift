@@ -316,8 +316,15 @@ final class AppModel: ObservableObject {
   @Published var playing: PlaybackTarget? {
     didSet {
       if playing != nil { playerMinimized = false }
+      if playing?.id != oldValue?.id { presentation += 1 }
     }
   }
+  /// Counts openings of the player. Each opening gets its own player screen (`playerKey`): keyed by
+  /// the stream alone, reopening a stream just closed brought back its closing, stopped screen
+  /// while that was still fading away (invisible, nothing playing) until another stream was opened.
+  private(set) var presentation = 0
+  /// What identifies the player screen open now.
+  var playerKey: String? { playing.map { "\($0.id)#\(presentation)" } }
   /// Multi-view (several live streams at once): open, on screen or tucked into its dock; nil while
   /// closed.
   @Published private(set) var multiview: MultiviewModel?

@@ -935,6 +935,8 @@ private struct ChatFollower: View {
 /// The player, shown over the app: full screen, or shrunk into the mini player.
 struct PlayerScreen: View {
   let target: PlaybackTarget
+  /// This opening of the player (see `AppModel.playerKey`).
+  let key: String
   /// The player and chat are owned here but not watched: this screen's layout doesn't depend on
   /// their state, so it isn't rebuilt every time the player ticks (the views that show player
   /// state watch it themselves). Rebuilding all of it twice a second cost animations frames.
@@ -967,8 +969,9 @@ struct PlayerScreen: View {
 
   static let spring = Animation.spring(response: 0.38, dampingFraction: 0.86)
 
-  init(target: PlaybackTarget) {
+  init(target: PlaybackTarget, key: String) {
     self.target = target
+    self.key = key
     _session = StateObject(wrappedValue: PlayerSession(target: target))
     var offline = false
     if case .live(let channel) = target { offline = PlayerModel.openedOffline.contains(channel.login.lowercased()) }
@@ -1205,8 +1208,8 @@ struct PlayerScreen: View {
       OrientationLock.playerVisible(!app.playerMinimized)
       if app.playerMinimized { model.setMaxHeight(480) }
       // A screen that's already been replaced by another stream must not start.
-      guard app.playing?.id == target.id else { return }
-      let id = target.id
+      guard app.playerKey == key else { return }
+      let id = key
       let player = model, chatRoom = chat, raidWatcher = raids
       app.registerPlayer(id) {
         player.stop()
@@ -1217,7 +1220,7 @@ struct PlayerScreen: View {
       if case .live(let channel) = target {
         raids.follow = { next in
           let app = AppModel.shared
-          guard app.playing?.id == id else { return }
+          guard app.playerKey == id else { return }
           // In the mini player, the raided stream carries on in the mini player.
           let minimized = app.playerMinimized
           app.playing = .live(next)
@@ -1246,7 +1249,7 @@ struct PlayerScreen: View {
       }
     }
     .onDisappear {
-      app.unregisterPlayer(target.id)
+      app.unregisterPlayer(key)
       model.stop()
       chat.stop()
       raids.stop()
@@ -1279,7 +1282,7 @@ struct PlayerScreen: View {
     }
     withAnimation(.easeIn(duration: 0.2)) { closing = true }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-      if app.playing?.id == target.id { app.playing = nil }
+      if app.playerKey == key { app.playing = nil }
     }
   }
 
