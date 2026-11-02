@@ -10,7 +10,7 @@
 // buffer and sets up the next stall: on a shaky stream that turned into a loop of skips and
 // reloads. So this never jumps: it steers with the playback speed alone, the way YouTube's and
 // ExoPlayer's live players do: faster in proportion to how much more is in hand than needed (1.04×
-// a second over, at most 1.1×), easing off as it nears the margin so it never overshoots into a
+// a second over, at most 1.06×, or 1.2× far behind), easing off as it nears the margin so it never overshoots into a
 // stall; slower in proportion while there's less (at least 0.95×). Right after a start it catches
 // up a little more keenly (what's over then is only how far back the player joined), so it's close
 // to live within seconds.
@@ -27,6 +27,16 @@
 // than any lately raises the margin at once; once none that big has come for a few minutes, the
 // margin comes back down within a minute or two. A steady stream on good Wi-Fi ends up around a
 // second from live; a shaky one a little further back, but without the stalls and skips.
+//
+// Tuned against a simulation of Twitch's low-latency delivery (steady Wi-Fi, small hiccups, a shaky
+// broadcaster, cellular with dropouts, video in big pieces): a hiccup is remembered in full for a
+// few minutes and then fades over ten (forgetting it all at once let the next one of the same size
+// stall it again, then the margin jumped back up: a loop of stalls, slowing down and catching up);
+// it only speeds up for a clear surplus (0.4 s over), and only gently (1.06× for the usual
+// surplus), so the speed changes far less often; and a gap longer than any margin could cover (a
+// dropout on the connection) is only learned up to a point, instead of holding several seconds
+// in hand for minutes afterwards. Compared with before: on a shaky stream, under half the stalls
+// and speed changes, for under a tenth of a second more latency.
 
 import Foundation
 
@@ -45,6 +55,10 @@ struct LiveCatchUp: Sendable {
   /// When the shortfall last got deeper: one that stops deepening without the late video ever
   /// turning up is over all the same after a while (it kept the margin up indefinitely).
   private var deepenedAt: Date?
+  /// The margin when the current gap in delivery began: a gap that turns out to be an outage
+  /// takes it back there (plus what an outage teaches), rather than leaving it as high as the gap
+  /// pushed it on the way.
+  private var marginBeforeGap: Double?
   private static let settleAfter: TimeInterval = 10
   /// The last reading: buffer, when, the rate it played at since, and where the playhead was.
   private var last: (buffer: Double, at: Date, rate: Float, position: Double?)?
@@ -65,24 +79,33 @@ struct LiveCatchUp: Sendable {
   static let startBuffer = 1.0
   /// Speed limits: well behind (after an outage), the usual most, a gentle one (multi-view's), and
   /// the slowest. Small enough that speech still sounds natural.
-  static let rates: (fast: Float, medium: Float, gentle: Float, slow: Float) = (1.2, 1.1, 1.05, 0.95)
+  static let rates: (fast: Float, medium: Float, gentle: Float, slow: Float) = (1.2, 1.06, 1.05, 0.95)
   /// Kept on top of the biggest hiccup lately.
-  static let air = 0.3
+  static let air = 0.4
   /// How quickly the average follows the readings (seconds).
   static let levelTime = 3.0
   /// Speed change per second of difference from the margin; a little more just after a start.
   static let gain = 0.04
   static let startGain = 0.1
   /// Steering starts this far from the margin and stops this close to it (no flip-flopping on a
-  /// reading's wobble).
-  static let deadband = 0.2
+  /// reading's wobble). Speeding up waits for a clearer surplus than slowing down waits for a
+  /// shortfall: a little extra in hand costs a fraction of a second, a speed change is noticed.
+  static let deadband = 0.25
+  static let speedUpBand = 0.4
   static let settle = 0.05
   /// The least change made (it eases in, but doesn't crawl over the last bit).
   static let minStep = 0.02
   /// The reading itself this low: slower at once, whatever the average says.
   static let nearlyDry = 0.35
-  /// How long a hiccup counts.
-  static let memory: TimeInterval = 180
+  /// How long a hiccup counts: in full for `fullMemory`, then less and less (down to `fadeTo` of
+  /// its depth) until `memory`.
+  static let memory: TimeInterval = 600
+  static let fullMemory: TimeInterval = 150
+  static let fadeTo = 0.4
+  /// A gap in delivery longer than this is an outage (the connection, not the stream's rhythm):
+  /// no sensible margin covers it, so it's learned as no more than `outageLearned`.
+  static let outage = 2.2
+  static let outageLearned = 1.5
   /// Smaller shortfalls are just the buffer's reading wobbling.
   private static let noise = 0.2
   /// Back down toward what's needed: a quarter of the way every few seconds, once the margin
@@ -108,9 +131,18 @@ struct LiveCatchUp: Sendable {
   /// The margin the stream has needed lately (the biggest recent hiccup plus air; the minimum when
   /// there's been none).
   func neededBuffer(now: Date = Date()) -> Double {
-    let recent = hiccups.filter { now.timeIntervalSince($0.at) < Self.memory }.map(\.depth).max()
+    var recent: Double?
+    for hiccup in hiccups {
+      let age = now.timeIntervalSince(hiccup.at)
+      guard age < Self.memory else { continue }
+      let fade = age <= Self.fullMemory ? 0 : (age - Self.fullMemory) / (Self.memory - Self.fullMemory)
+      recent = max(recent ?? 0, hiccup.depth * (1 - (1 - Self.fadeTo) * fade))
+    }
     return min(Self.maxBuffer, max(floor, recent.map { $0 + Self.air } ?? 0))
   }
+
+  /// How much of a gap is learned (see `outage`).
+  static func learnable(_ depth: Double) -> Double { depth > outage ? min(depth, outageLearned) : depth }
 
   /// Whether the margin is above the minimum because the stream's video arrives unevenly.
   var learnedUneven: Bool { targetBuffer > max(Self.startBuffer, floor) + 0.25 }
@@ -174,7 +206,7 @@ struct LiveCatchUp: Sendable {
     } else if excess < -(rate < 1 ? Self.settle : Self.deadband), !wellBehind {
       // Less in hand than needed: slower in proportion, building it back up.
       next = max(Double(Self.rates.slow), 1 + min(-Self.minStep, excess * Self.gain))
-    } else if excess > (rate > 1 ? Self.settle : Self.deadband), latency > targetBuffer + 0.3, maxRate > 1,
+    } else if excess > (rate > 1 ? Self.settle : starting ? Self.deadband : Self.speedUpBand), latency > targetBuffer + 0.3, maxRate > 1,
       buffer > Self.nearlyDry + 0.15
     {
       // More than needed: faster in proportion, easing off toward the margin. Just started and
@@ -206,11 +238,13 @@ struct LiveCatchUp: Sendable {
     let deficit = elapsed - (buffer - previous.buffer) - played
     let before = shortfall
     shortfall = max(0, shortfall + deficit)
+    if before == 0, shortfall > 0 { marginBeforeGap = targetBuffer }
     if shortfall > before + 0.05 || before == 0 { deepenedAt = now }
     if shortfall > 0, let deepenedAt, now.timeIntervalSince(deepenedAt) >= Self.settleAfter {
       if shortfallPeak > Self.noise { remember(shortfallPeak, now: now) }
       shortfall = 0
       shortfallPeak = 0
+      marginBeforeGap = nil
       return
     }
     if shortfall > 0 {
@@ -220,16 +254,23 @@ struct LiveCatchUp: Sendable {
       // Caught up again: remember how deep it went.
       if shortfallPeak > Self.noise { remember(shortfallPeak, now: now) }
       shortfallPeak = 0
+      marginBeforeGap = nil
     }
   }
 
   private mutating func remember(_ depth: Double, now: Date) {
+    let depth = Self.learnable(depth)
     hiccups.removeAll { now.timeIntervalSince($0.at) >= Self.memory }
     hiccups.append((now, depth))
   }
 
   private mutating func grow(toCover depth: Double, now: Date) {
-    let wanted = min(Self.maxBuffer, depth + Self.air)
+    if depth > Self.outage, let before = marginBeforeGap {
+      let capped = max(before, min(Self.maxBuffer, Self.outageLearned + Self.air))
+      if targetBuffer > capped { targetBuffer = capped }
+      return
+    }
+    let wanted = min(Self.maxBuffer, Self.learnable(depth) + Self.air)
     guard wanted > targetBuffer + 0.01 else { return }
     targetBuffer = wanted
     grewAt = now
@@ -243,6 +284,7 @@ struct LiveCatchUp: Sendable {
     grow(toCover: depth, now: now)
     shortfall = 0
     shortfallPeak = 0
+    marginBeforeGap = nil
     rate = 1
     last = nil
     level = nil
@@ -267,6 +309,7 @@ struct LiveCatchUp: Sendable {
     level = nil
     shortfall = 0
     shortfallPeak = 0
+    marginBeforeGap = nil
     holdUntil = now.addingTimeInterval(1)
   }
 }

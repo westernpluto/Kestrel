@@ -1524,6 +1524,103 @@ func testRaids() {
   check(Hermes.parse("not json") == .other, "garbage")
 }
 
+/// A shaky broadcaster over Twitch's low-latency delivery (hiccups of 0.4–1.5 s about every 25 s,
+/// video in half-second pieces), played for half an hour with the speed steering: few stalls, few
+/// speed changes, close to live. (The tuning's guard: it used to stall about 1.6 times and change
+/// speed about 11 times every ten minutes here.)
+func testCatchUpSimulation() {
+  struct Rand {
+    var s: UInt64
+    mutating func next() -> Double {
+      s = s &* 6364136223846793005 &+ 1442695040888963407
+      return Double(s >> 11) / Double(1 << 53)
+    }
+  }
+  var stalls = 0, changes = 0, readings = 0
+  var latencySum = 0.0
+  let seeds: [UInt64] = [1, 2, 3, 4]
+  let duration = 1800.0
+  for seed in seeds {
+    var rng = Rand(s: seed)
+    let t0 = Date(timeIntervalSince1970: 1_000_000)
+    var catchUp = LiveCatchUp(now: t0)
+    let dt = 0.05
+    var extra = 0.0, growing = 0.0, wobble = 0.0, arrived = 0.0, visible = 0.0
+    var nextHiccup = -log(1 - rng.next()) * 25
+    var t = 0.0, tick = 0.0, position = -1.6
+    var stalled = true
+    var rate: Float = 1, lastRate: Float = 1
+    while t < duration {
+      if t >= nextHiccup {
+        growing = 0.4 + rng.next() * 1.1
+        nextHiccup = t - log(1 - rng.next()) * 25
+      }
+      if growing > 0 {
+        let step = min(dt, growing)
+        extra += step
+        growing -= step
+      } else if extra > 0 {
+        extra = max(0, extra - dt * 3)
+      }
+      if Int(t / 0.5) != Int((t - dt) / 0.5) { wobble = (rng.next() - 0.5) * 0.4 }
+      arrived = max(arrived, t - 0.35 - extra - max(0, wobble))
+      visible = max(visible, (arrived / 0.5).rounded(.down) * 0.5)
+      let buffer = visible - position
+      if stalled {
+        if buffer >= 0.5 { stalled = false }
+      } else if buffer <= 0 {
+        stalled = true
+        if t > 3 { stalls += 1 }
+        catchUp.stalled(now: t0.addingTimeInterval(t))
+        rate = 1
+      }
+      if !stalled { position += Double(rate) * dt }
+      if t >= tick {
+        tick += 0.5
+        let latency = t - position + 0.8
+        rate = catchUp.update(
+          buffer: max(0, visible - position), latency: latency, playing: !stalled, position: position, now: t0.addingTimeInterval(t))
+        if t > 5 {
+          latencySum += latency
+          readings += 1
+          // Each spell of faster or slower playback, not each step within one.
+          if rate != 1, (rate > 1) != (lastRate > 1) || lastRate == 1 { changes += 1 }
+        }
+        lastRate = rate
+      }
+      t += dt
+    }
+  }
+  let per10 = 600 / (duration * Double(seeds.count))
+  let stallRate = Double(stalls) * per10, changeRate = Double(changes) * per10, latency = latencySum / Double(readings)
+  check(stallRate < 1.0, "shaky stream: \(stallRate) stalls per 10 min")
+  check(changeRate < 6, "shaky stream: \(changeRate) speed changes per 10 min")
+  check(latency < 3.6, "shaky stream: \(latency) s from live on average")
+
+  // A dropout on the connection (3 s with nothing arriving, ridden out on a big buffer): learned as
+  // no more than an outage's worth, not three seconds in hand for the next ten minutes.
+  let o0 = Date(timeIntervalSince1970: 2_000_000)
+  var outage = LiveCatchUp(now: o0)
+  var o = o0.addingTimeInterval(45)
+  var held = 3.5
+  var rateNow = outage.update(buffer: held, latency: 4.5, playing: true, now: o)
+  for _ in 0..<6 {
+    o += 0.5
+    held -= Double(rateNow) * 0.5
+    rateNow = outage.update(buffer: held, latency: 4.5, playing: true, now: o)
+  }
+  check(LiveCatchUp.learnable(4) == LiveCatchUp.outageLearned && LiveCatchUp.learnable(1) == 1, "learnable")
+  check(outage.targetBuffer <= LiveCatchUp.outageLearned + LiveCatchUp.air + 0.01, "outage learned in moderation: \(outage.targetBuffer)")
+  // A hiccup fades from memory rather than dropping out of it all at once.
+  var fading = LiveCatchUp(now: o0)
+  fading.stalled(now: o0.addingTimeInterval(50))
+  let fresh = fading.neededBuffer(now: o0.addingTimeInterval(60))
+  let mid = fading.neededBuffer(now: o0.addingTimeInterval(50 + 375))
+  let gone = fading.neededBuffer(now: o0.addingTimeInterval(50 + 601))
+  check(fresh > mid && mid > gone && gone == LiveCatchUp.minBuffer, "fades: \(fresh) \(mid) \(gone)")
+}
+
+testCatchUpSimulation()
 testRestrictedVOD()
 testRaids()
 testAdFreeProxy()
