@@ -218,11 +218,24 @@ final class MultiviewModel: ObservableObject, Identifiable {
     #endif
   }
 
+  /// Where each picture is on the multi-view screen, and the size of the area they're in.
+  private var pictureLayout: (rects: [String: CGRect], size: CGSize)?
+
+  func setPictureLayout(_ rects: [String: CGRect], in size: CGSize) {
+    guard size.width > 0, size.height > 0 else { return }
+    pictureLayout = (rects, size)
+    #if canImport(AmazonIVSPlayer)
+      sharedPiP.setLayout(rects, in: size)
+      sharedPiP.fit(count: tiles.count)
+    #endif
+  }
+
   /// Sets up whichever Picture in Picture applies now.
   func updatePictureInPicture() {
     let together = picturesTogether
     for tile in tiles { tile.player.pictureInPictureAllowed = !together && tile.id == selectedID }
     #if canImport(AmazonIVSPlayer)
+      if let pictureLayout { sharedPiP.setLayout(pictureLayout.rects, in: pictureLayout.size) }
       sharedPiP.fit(count: tiles.count)
       sharedPiP.setEnabled(together && running && !hidden, source: pictureSource)
       sharedPiP.sync()
@@ -243,9 +256,15 @@ final class MultiviewModel: ObservableObject, Identifiable {
     if active {
       let cap = tiles.count <= 2 ? 480 : 360
       for tile in tiles { tile.player.setMaxHeight(cap) }
-    } else if let lastFit, !hidden {
-      fit(heights: lastFit.heights, scale: lastFit.scale)
-    } else if hidden {
+    } else if !hidden {
+      // Each picture sharp again for its place on screen, a moment after the hand-over (switching
+      // quality right as the pictures move back added to the moment they went black).
+      Task { [weak self] in
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        guard let self, !self.pictureInPictureActive, !self.hidden, let lastFit = self.lastFit else { return }
+        self.fit(heights: lastFit.heights, scale: lastFit.scale)
+      }
+    } else {
       for tile in tiles { tile.player.setMaxHeight(Self.hiddenHeight) }
     }
   }
@@ -508,6 +527,13 @@ struct MultiviewScreen: View {
       for (index, tile) in model.tiles.enumerated() where index < rects.count { heights[tile.id] = rects[index].height }
       model.fit(heights: heights, scale: displayScale)
     }
+    // The all-streams PiP window lays the pictures out just as they are here, so going into it and
+    // back is one picture growing or shrinking, not a 2×2 grid turning into another layout.
+    .task(id: layoutKey(rects, in: areas.grid.size)) {
+      var placed: [String: CGRect] = [:]
+      for (index, tile) in model.tiles.enumerated() where index < rects.count { placed[tile.id] = rects[index] }
+      model.setPictureLayout(placed, in: areas.grid.size)
+    }
   }
 
   /// Shows the controls, and hides them again after a few seconds without a touch.
@@ -564,6 +590,12 @@ struct MultiviewScreen: View {
       return MultiviewLayout.focus(count: count, main: main, in: size)
     }
     return MultiviewLayout.grid(count: count, in: size)
+  }
+
+  private func layoutKey(_ rects: [CGRect], in size: CGSize) -> String {
+    "\(Int(size.width))x\(Int(size.height))|"
+      + zip(model.tiles, rects).map { "\($0.id):\(Int($1.minX)),\(Int($1.minY)),\(Int($1.width)),\(Int($1.height))" }
+      .joined(separator: ";")
   }
 
   private func capsKey(_ rects: [CGRect]) -> String {

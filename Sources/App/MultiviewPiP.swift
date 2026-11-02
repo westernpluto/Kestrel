@@ -59,10 +59,17 @@
       controller = pip
     }
 
-    /// The window's shape for this many streams (each picture 16:9).
+    /// The window's shape: the multi-view screen's picture area when it's known (so the window
+    /// grows out of it and shrinks back into it without anything moving), else one made for this
+    /// many 16:9 pictures.
     func fit(count: Int) {
-      let size = PictureGridView.contentSize(count)
+      let size = grid.layoutSize.map(PictureGridView.contentSize(matching:)) ?? PictureGridView.contentSize(count)
       if content.preferredContentSize != size { content.preferredContentSize = size }
+    }
+
+    /// The pictures' places on the multi-view screen, to lay them out the same way in the window.
+    func setLayout(_ rects: [String: CGRect], in size: CGSize) {
+      grid.setLayout(rects, in: size)
     }
 
     func toggle() {
@@ -146,6 +153,24 @@
   final class PictureGridView: UIView {
     private var cells: [(id: String, video: IVSPlayerView)] = []
     private static let gap: CGFloat = 1
+    /// The multi-view screen's layout: each picture's place as a share of the picture area.
+    private var shares: [String: CGRect] = [:]
+    private(set) var layoutSize: CGSize?
+
+    func setLayout(_ rects: [String: CGRect], in size: CGSize) {
+      guard size.width > 0, size.height > 0 else { return }
+      shares = rects.mapValues {
+        CGRect(x: $0.minX / size.width, y: $0.minY / size.height, width: $0.width / size.width, height: $0.height / size.height)
+      }
+      layoutSize = size
+      setNeedsLayout()
+    }
+
+    /// A window of the same shape as the picture area (iOS takes the shape, not the size).
+    static func contentSize(matching size: CGSize) -> CGSize {
+      let scale = 1920 / max(size.width, size.height)
+      return CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+    }
 
     override init(frame: CGRect) {
       super.init(frame: frame)
@@ -183,6 +208,17 @@
 
     override func layoutSubviews() {
       super.layoutSubviews()
+      // As on the multi-view screen when every picture has its place there; otherwise a grid.
+      if !cells.isEmpty, cells.allSatisfy({ shares[$0.id] != nil }) {
+        for cell in cells {
+          let share = shares[cell.id]!
+          cell.video.frame = CGRect(
+            x: bounds.minX + share.minX * bounds.width, y: bounds.minY + share.minY * bounds.height,
+            width: share.width * bounds.width, height: share.height * bounds.height
+          ).integral
+        }
+        return
+      }
       let frames = Self.frames(count: cells.count, in: bounds)
       for (cell, frame) in zip(cells, frames) { cell.video.frame = frame }
     }
