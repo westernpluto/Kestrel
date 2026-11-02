@@ -1067,9 +1067,20 @@
       place.addSubview(surface)
     }
 
-    /// The stream's own Picture in Picture window is opening: the picture goes into it.
+    /// The current PiP controller is the seamless kind: the picture moves into its window.
+    private var pipMovesPicture = false
+
+    /// The stream's own Picture in Picture window is opening: the picture goes into it (the
+    /// seamless kind; the regular kind takes the video itself).
     func pictureInPictureWillStart() {
+      guard pipMovesPicture else { return }
       show(in: pipContent.view)
+    }
+
+    /// The stream's own Picture in Picture window closed.
+    func pictureInPictureDidStop() {
+      guard pipMovesPicture else { return }
+      showInTile()
     }
 
     /// Into the all-streams Picture in Picture window (see MultiviewPictureInPicture): the
@@ -1106,9 +1117,19 @@
     }
 
     private func makePictureInPicture(for view: IVSPlayerView) {
-      guard AVPictureInPictureController.isPictureInPictureSupported(), let source = home else { return }
-      let pip = AVPictureInPictureController(
-        contentSource: .init(activeVideoCallSourceView: source, contentViewController: pipContent))
+      guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
+      let pip: AVPictureInPictureController
+      if AppSettings.shared.pipControls {
+        // The regular window, with play and pause: it takes the video off the player's layer.
+        guard let regular = AVPictureInPictureController(ivsPlayerLayer: view.playerLayer) else { return }
+        pip = regular
+        pipMovesPicture = false
+      } else {
+        guard let source = home else { return }
+        pip = AVPictureInPictureController(
+          contentSource: .init(activeVideoCallSourceView: source, contentViewController: pipContent))
+        pipMovesPicture = true
+      }
       pip.canStartPictureInPictureAutomaticallyFromInline = true
       pip.delegate = proxy
       pipObservation = pip.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
@@ -1262,14 +1283,14 @@
 
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
       pictureInPictureStarting = false
-      MainActor.assumeIsolated { controller?.showInTile() }
+      MainActor.assumeIsolated { controller?.pictureInPictureDidStop() }
     }
 
     func pictureInPictureController(
       _ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error
     ) {
       pictureInPictureStarting = false
-      MainActor.assumeIsolated { controller?.showInTile() }
+      MainActor.assumeIsolated { controller?.pictureInPictureDidStop() }
     }
 
     func pictureInPictureController(

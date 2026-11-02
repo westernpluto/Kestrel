@@ -48,6 +48,7 @@ struct SettingsView: View {
           LabeledContent("Ad blocking", value: settings.adBlocking.shortTitle)
         }
         Toggle("Background audio", isOn: $settings.backgroundAudio)
+        Toggle("PiP playback controls", isOn: $settings.pipControls)
         Picker("Raids", selection: $settings.raidMode) {
           ForEach(RaidMode.allCases) { mode in Text(mode.title).tag(mode) }
         }
@@ -63,7 +64,7 @@ struct SettingsView: View {
         Text("Playback")
       } footer: {
         Text(
-          "Low latency keeps streams as close to live as your connection allows: when one falls behind, it plays slightly faster for a few seconds to catch up. Streams start at the highest quality; pick Auto in the player's gear menu and they start on Auto from then on, which settles on a quality your connection keeps up with instead of bouncing between them. Video stats are in the gear menu too. Multi-view's Picture in Picture shows all its streams together (experimental); off, it shows the picked one. Raids: when the channel you're watching raids another, Follow automatically counts down like Twitch and then takes you there (tap Stay to remain), Ask me offers the raided channel with a Watch button."
+          "Low latency keeps streams as close to live as your connection allows: when one falls behind, it plays slightly faster for a few seconds to catch up. Streams start at the highest quality; pick Auto in the player's gear menu and they start on Auto from then on, which settles on a quality your connection keeps up with instead of bouncing between them. Video stats are in the gear menu too. Multi-view's Picture in Picture shows all its streams together (experimental); off, it shows the picked one. PiP playback controls: Picture in Picture with play and pause; off, the window has no buttons, but the stream comes back from it without a moment of black. Raids: when the channel you're watching raids another, Follow automatically counts down like Twitch and then takes you there (tap Stay to remain), Ask me offers the raided channel with a Watch button."
         )
       }
 

@@ -121,6 +121,10 @@ final class AppSettings: ObservableObject {
   @Published var multiviewPiPAll: Bool { didSet { defaults.set(multiviewPiPAll, forKey: "multiviewPiPAll") } }
   /// When the channel you're watching raids another: follow it (like Twitch), ask, or nothing.
   @Published var raidMode: RaidMode { didSet { defaults.set(raidMode.rawValue, forKey: "raidMode") } }
+  /// A single stream's Picture in Picture: the regular window with play/pause (the picture can
+  /// show black for a moment on the way back), or a seamless one without buttons (see
+  /// LowLatencyController.pipContent).
+  @Published var pipControls: Bool { didSet { defaults.set(pipControls, forKey: "pipControls") } }
   // The user's own HTTP proxy (AdBlocking.customProxy).
   @Published var proxyHost: String { didSet { defaults.set(proxyHost, forKey: "proxyHost"); applyProxy() } }
   @Published var proxyPort: String { didSet { defaults.set(proxyPort, forKey: "proxyPort"); applyProxy() } }
@@ -142,7 +146,7 @@ final class AppSettings: ObservableObject {
   private init() {
     defaults.register(defaults: [
       "lowLatency": true, "nearbyServers": true, "adBlocking": "auto", "backgroundAudio": true, "showVideoStats": false, "chatFontSize": 15.0,
-      "multiviewPiPAll": true, "raidMode": RaidMode.follow.rawValue,
+      "multiviewPiPAll": true, "raidMode": RaidMode.follow.rawValue, "pipControls": true,
     ])
     lowLatency = defaults.bool(forKey: "lowLatency")
     adBlocking = AdBlocking(stored: defaults.string(forKey: "adBlocking"))
@@ -154,6 +158,7 @@ final class AppSettings: ObservableObject {
     skipMutedParts = defaults.bool(forKey: "skipMutedParts")
     multiviewPiPAll = defaults.bool(forKey: "multiviewPiPAll")
     raidMode = RaidMode(rawValue: defaults.string(forKey: "raidMode") ?? "") ?? .follow
+    pipControls = defaults.bool(forKey: "pipControls")
     proxyHost = defaults.string(forKey: "proxyHost") ?? ""
     proxyPort = defaults.string(forKey: "proxyPort") ?? ""
     proxyUsername = defaults.string(forKey: "proxyUsername") ?? ""

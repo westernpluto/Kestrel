@@ -74,6 +74,7 @@ struct FeedList<Content: View>: View {
   var refresh: @MainActor () async -> Void
   @ViewBuilder var content: () -> Content
   @State private var width: CGFloat = 0
+  @State private var foldGap: CGFloat = 0
 
   var body: some View {
     List {
@@ -83,18 +84,40 @@ struct FeedList<Content: View>: View {
     .listStyle(.plain)
     .environment(\.defaultMinListRowHeight, 1)
     .environment(\.feedWidth, width)
+    .environment(\.feedFoldGap, foldGap)
     .refreshable { await detachedRefresh(refresh) }
     .background(
       GeometryReader { proxy in
+        let gap = Self.foldGap(proxy)
         Color.clear
-          .onAppear { width = proxy.size.width }
+          .onAppear {
+            width = proxy.size.width
+            foldGap = gap
+          }
           .onChange(of: proxy.size.width) { newWidth in width = newWidth }
+          .onChange(of: gap) { newGap in withAnimation(.easeInOut(duration: 0.25)) { foldGap = newGap } }
       }
     )
+  }
+
+  /// iPhone Duo partly folded like a book, with the fold down the middle of the feed: how wide it
+  /// is (the middle gap between columns of tiles widens to it, so no tile runs across the fold).
+  private static func foldGap(_ proxy: GeometryProxy) -> CGFloat {
+    if #available(iOS 27.1, *) {
+      guard let crease = proxy.reservedRegions(kind: .division).first?.frame, crease.height > crease.width,
+        abs(crease.midX - proxy.size.width / 2) < 48
+      else { return 0 }
+      return crease.width
+    }
+    return 0
   }
 }
 
 private struct FeedWidthKey: EnvironmentKey {
+  static let defaultValue: CGFloat = 0
+}
+
+private struct FeedFoldGapKey: EnvironmentKey {
   static let defaultValue: CGFloat = 0
 }
 
@@ -107,6 +130,12 @@ extension EnvironmentValues {
   var feedWidth: CGFloat {
     get { self[FeedWidthKey.self] }
     set { self[FeedWidthKey.self] = newValue }
+  }
+
+  /// iPhone Duo partly folded: the fold's width down the middle of the feed (0: none).
+  var feedFoldGap: CGFloat {
+    get { self[FeedFoldGapKey.self] }
+    set { self[FeedFoldGapKey.self] = newValue }
   }
 
   /// How many columns of tiles the feed shows (1: a list of rows).
@@ -138,6 +167,7 @@ struct AdaptiveFeed<Item: Identifiable, Tile: View>: View {
   var reached: (Item) -> Void = { _ in }
   @ViewBuilder var tile: (Item) -> Tile
   @Environment(\.feedWidth) private var width
+  @Environment(\.feedFoldGap) private var foldGap
 
   var body: some View {
     let columns = FeedGrid.columns(width, tile: tileWidth)
@@ -150,12 +180,19 @@ struct AdaptiveFeed<Item: Identifiable, Tile: View>: View {
     } else {
       let lines = stride(from: 0, to: items.count, by: columns).map { Array(items[$0..<min($0 + columns, items.count)]) }
       ForEach(lines, id: \.first?.id) { line in
+        let half = columns / 2
         HStack(alignment: .top, spacing: 16) {
-          ForEach(line) { item in
+          ForEach(Array(line.prefix(half))) { item in
             tile(item).frame(maxWidth: .infinity, alignment: .topLeading)
           }
           // The last line's tiles stay the same width as the others.
-          ForEach(0..<(columns - line.count), id: \.self) { _ in Color.clear.frame(maxWidth: .infinity, maxHeight: 0) }
+          ForEach(0..<max(0, half - line.count), id: \.self) { _ in Color.clear.frame(maxWidth: .infinity, maxHeight: 0) }
+          // iPhone Duo partly folded: the middle gap as wide as the fold.
+          if foldGap > 0 { Color.clear.frame(width: max(0, foldGap - 16), height: 0) }
+          ForEach(Array(line.dropFirst(half))) { item in
+            tile(item).frame(maxWidth: .infinity, alignment: .topLeading)
+          }
+          ForEach(0..<(columns - max(line.count, half)), id: \.self) { _ in Color.clear.frame(maxWidth: .infinity, maxHeight: 0) }
         }
         .environment(\.feedColumns, columns)
         .feedRow(top: 9, bottom: 9)

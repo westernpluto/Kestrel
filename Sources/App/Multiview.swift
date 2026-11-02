@@ -347,7 +347,7 @@ struct MultiviewScreen: View {
   var body: some View {
     GeometryReader { geometry in
       let size = geometry.size
-      expanded(size: size, safeBottom: geometry.safeAreaInsets.bottom)
+      expanded(size: size, safeBottom: geometry.safeAreaInsets.bottom, crease: Self.crease(geometry))
         .frame(width: size.width, height: size.height, alignment: .topLeading)
     }
     .ignoresSafeArea(.keyboard)
@@ -421,7 +421,7 @@ struct MultiviewScreen: View {
   // MARK: On screen
 
   @ViewBuilder
-  private func expanded(size: CGSize, safeBottom: CGFloat) -> some View {
+  private func expanded(size: CGSize, safeBottom: CGFloat, crease: CGRect?) -> some View {
     let landscape = size.width > size.height
     let bar: CGFloat = landscape ? 40 : 44
     let showChat = chatShown && model.chat != nil
@@ -429,7 +429,9 @@ struct MultiviewScreen: View {
     let areas = Self.areas(
       size: size, safeBottom: safeBottom, landscape: landscape, chat: showChat, keyboardSpace: keyboardSpace,
       count: model.tiles.count, focus: focus)
-    let rects = layout(in: areas.grid.size)
+    let rects = layout(
+      in: areas.grid.size,
+      crease: crease.flatMap { $0.intersects(areas.grid) ? $0.offsetBy(dx: -areas.grid.minX, dy: -areas.grid.minY) : nil })
     let chrome = chromeVisible || keyboard.overlap > 0 || model.tiles.isEmpty
 
     ZStack(alignment: .topLeading) {
@@ -587,6 +589,43 @@ struct MultiviewScreen: View {
     return Areas(
       grid: CGRect(x: 0, y: 0, width: size.width, height: gridHeight),
       chat: CGRect(x: 0, y: gridHeight + 1, width: size.width, height: max(0, size.height - gridHeight - 1 + safeBottom)))
+  }
+
+  /// iPhone Duo partly folded: where the fold runs through the screen.
+  private static func crease(_ geometry: GeometryProxy) -> CGRect? {
+    if #available(iOS 27.1, *) {
+      return geometry.reservedRegions(kind: .division).first?.frame
+    }
+    return nil
+  }
+
+  /// The pictures' places, kept off iPhone Duo's fold when it's partly folded (`crease`, in the
+  /// pictures' area's coordinates): the streams split between the two sides (focus: the big one
+  /// on one side, the rest on the other), so none runs across the fold.
+  private func layout(in size: CGSize, crease: CGRect?) -> [CGRect] {
+    let count = model.tiles.count
+    guard count > 1, let crease, crease.width > 0, crease.height > 0 else { return layout(in: size) }
+    let vertical = crease.height > crease.width
+    let first: CGRect
+    let second: CGRect
+    if vertical {
+      guard crease.minX > 120, crease.maxX < size.width - 120 else { return layout(in: size) }
+      first = CGRect(x: 0, y: 0, width: crease.minX, height: size.height)
+      second = CGRect(x: crease.maxX, y: 0, width: size.width - crease.maxX, height: size.height)
+    } else {
+      guard crease.minY > 90, crease.maxY < size.height - 90 else { return layout(in: size) }
+      first = CGRect(x: 0, y: 0, width: size.width, height: crease.minY)
+      second = CGRect(x: 0, y: crease.maxY, width: size.width, height: size.height - crease.maxY)
+    }
+    // Which streams go on the first side.
+    let firstSide = focus ? [model.tiles.firstIndex { $0.id == model.selectedID } ?? 0] : Array(0..<((count + 1) / 2))
+    let secondSide = (0..<count).filter { !firstSide.contains($0) }
+    var rects = Array(repeating: CGRect.zero, count: count)
+    for (side, indices) in [(first, firstSide), (second, secondSide)] {
+      let placed = MultiviewLayout.grid(count: indices.count, in: side.size)
+      for (index, rect) in zip(indices, placed) { rects[index] = rect.offsetBy(dx: side.minX, dy: side.minY) }
+    }
+    return rects
   }
 
   private func layout(in size: CGSize) -> [CGRect] {

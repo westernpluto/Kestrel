@@ -392,6 +392,8 @@ struct PlayerLayout: Equatable {
   /// when that still leaves it plenty of width; otherwise it goes over the picture instead).
   var topBarExtra = EdgeInsets()
   var bottomRowExtra = EdgeInsets()
+  /// Laid out around iPhone Duo's fold (see `aroundFold`): chat's width is the fold's to set.
+  var foldAligned = false
 
   static let infoHeight: CGFloat = 62
   /// iPhone Duo's outer screen: iOS keeps a status strip this wide (84 pt) clear along its right
@@ -821,6 +823,68 @@ struct PlayerLayout: Equatable {
     fold ? folded(safe: safe, insets: insets) : self
   }
 
+  /// iPhone Duo partly folded (the fold, `crease`, in safe-area coordinates): nothing sits across
+  /// it. Folded like a book, the video (with its info bar and details) takes one side and chat the
+  /// other; folded like a laptop, the video takes the top half and the info bar and chat the
+  /// bottom. Only with chat beside the video in a large window, not typing: full screen, the
+  /// keyboard and the mini player keep their layouts (small adjustments, not rearranging, as
+  /// Apple's guidelines for iPhone Duo put it).
+  func aroundFold(_ crease: CGRect?, safe: CGSize, insets: EdgeInsets, keyboard: CGFloat) -> PlayerLayout {
+    guard let crease, large, !fullScreen, panelVisible, keyboard == 0, crease.width > 0, crease.height > 0 else { return self }
+    var out = self
+    let windowLeft = -insets.leading
+    let windowRight = safe.width + insets.trailing
+    let windowTop = -insets.top
+    let windowBottom = safe.height + insets.bottom
+    out.foldAligned = true
+    out.chatOverlay = false
+    if crease.height > crease.width {
+      // Like a book: a side each. Chat goes on the side away from a status strip, as in landscape.
+      guard crease.minX > windowLeft + 200, crease.maxX < windowRight - 200 else { return self }
+      let chatOnLeft = insets.trailing > insets.leading + 1
+      let columnLeft = chatOnLeft ? crease.maxX : windowLeft
+      let columnRight = chatOnLeft ? windowRight : crease.minX
+      let column = columnRight - columnLeft
+      let height = windowBottom - windowTop
+      let videoHeight = min((column * 9 / 16).rounded(), max(0, height - Self.infoHeight))
+      out.video = CGRect(x: columnLeft, y: windowTop, width: column, height: videoHeight)
+      let textLeft = max(columnLeft, 0)
+      let textWidth = min(columnRight, safe.width) - textLeft
+      out.info = CGRect(x: textLeft, y: out.video.maxY, width: textWidth, height: Self.infoHeight)
+      let detailsTop = out.video.maxY + Self.infoHeight
+      out.details = windowBottom - detailsTop >= 80 ? CGRect(x: textLeft, y: detailsTop, width: textWidth, height: windowBottom - detailsTop) : nil
+      out.panel = chatOnLeft
+        ? CGRect(x: windowLeft, y: windowTop, width: crease.minX - windowLeft, height: height)
+        : CGRect(x: crease.maxX, y: windowTop, width: windowRight - crease.maxX, height: height)
+      out.panelPadding = EdgeInsets(
+        top: insets.top + 6, leading: chatOnLeft ? insets.leading : 0, bottom: insets.bottom, trailing: chatOnLeft ? 0 : insets.trailing)
+      out.chatOnLeft = chatOnLeft
+      out.landscape = true
+      out.controls = EdgeInsets(
+        top: max(0, -out.video.minY) + 2, leading: max(0, -columnLeft) + 6, bottom: 2,
+        trailing: max(0, columnRight - safe.width) + 6)
+    } else {
+      // Like a laptop: the video above the fold, the info bar and chat below it.
+      guard crease.minY > windowTop + 160, crease.maxY < windowBottom - 200 else { return self }
+      let top = crease.minY - windowTop
+      let span = windowRight - windowLeft
+      let width = min(span, (top * 16 / 9).rounded())
+      let height = min(top, (width * 9 / 16).rounded())
+      out.video = CGRect(
+        x: windowLeft + ((span - width) / 2).rounded(), y: windowTop + ((top - height) / 2).rounded(), width: width, height: height)
+      out.info = CGRect(x: 0, y: crease.maxY, width: safe.width, height: Self.infoHeight)
+      out.details = nil
+      let chatTop = crease.maxY + Self.infoHeight
+      out.panel = CGRect(x: 0, y: chatTop, width: safe.width, height: max(0, windowBottom - chatTop))
+      out.panelPadding = EdgeInsets(top: 0, leading: 0, bottom: insets.bottom, trailing: 0)
+      out.landscape = false
+      out.controls = EdgeInsets(
+        top: max(0, -out.video.minY) + 2, leading: max(0, -out.video.minX) + 6, bottom: 2,
+        trailing: max(0, out.video.maxX - safe.width) + 6)
+    }
+    return out
+  }
+
   /// The same layout moved by (dx, dy) (into another safe area's coordinates).
   func shifted(dx: CGFloat, dy: CGFloat) -> PlayerLayout {
     guard dx != 0 || dy != 0 else { return self }
@@ -1001,6 +1065,9 @@ struct PlayerScreen: View {
         cameraOnLeft: landscape && !large ? (InterfaceOrientationObserver.cameraOnLeftNow ?? orientation.cameraOnLeft) : nil,
         large: large, theater: theater && !folded, chatOverVideo: chatOverVideo && !folded
       )
+      .aroundFold(
+        crease(geometry, large: large)?.offsetBy(dx: insets.leading - layoutInsets.leading, dy: insets.top - layoutInsets.top),
+        safe: layoutSafe, insets: layoutInsets, keyboard: keyboard.overlap)
       .foldedIf(folded, safe: layoutSafe, insets: layoutInsets)
       .shifted(dx: layoutInsets.leading - insets.leading, dy: layoutInsets.top - insets.top)
       // The layout choice offered on the video, if any.
@@ -1146,7 +1213,7 @@ struct PlayerScreen: View {
           .allowsHitTesting(progress == 0)
           .zIndex(3)
 
-        if layout.landscape && layout.panelVisible && progress == 0 && !folded {
+        if layout.landscape && layout.panelVisible && progress == 0 && !folded && !layout.foldAligned {
           resizeHandle(layout, screenWidth: screenWidth).zIndex(2)
         }
 
@@ -1288,6 +1355,16 @@ struct PlayerScreen: View {
 
   private func dismissKeyboard() {
     Keyboard.dismiss()
+  }
+
+  /// iPhone Duo partly folded: where the fold runs through the player's area (in its safe area's
+  /// coordinates), while the player is open in a large window.
+  private func crease(_ geometry: GeometryProxy, large: Bool) -> CGRect? {
+    guard large, !app.playerMinimized else { return nil }
+    if #available(iOS 27.1, *) {
+      return geometry.reservedRegions(kind: .division).first?.frame
+    }
+    return nil
   }
 
   /// Distances from the safe area to the window's edges (the window, not the screen: iPhone Duo
