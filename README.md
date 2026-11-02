@@ -60,11 +60,24 @@ A client for watching Twitch without ads, with low-latency playback, chat and yo
 
 **Settings → Activity log** shows which ad-free server delivered each stream (and where Twitch thinks you are), ad breaks, player fallbacks, and image hosts that fail to load.
 
+## Apple TV
+
+**Kestrel for Apple TV 4K** (the `Kestrel-tv-ipa` artifact, tvOS 17+), made for the Siri Remote:
+
+- **Live**, **Categories**, **Search** and **Following** as rows of cards (focus lifts them); Following shows your follows that are live.
+- **Sign in with a code**: Kestrel shows a code and a QR code; enter the code at twitch.tv/activate on your phone or computer (or scan the QR code) and the TV is signed in. No typing a password with the remote. The login is kept in the Apple TV's Keychain and renewed when it runs out.
+- **Player**: full screen, with **chat beside the video** (left or right on the remote shows or hides it), play/pause (resuming goes back to live), a click shows who and what's playing, Back closes it.
+- **Ad blocking** through the same ad-free servers as the iPhone app (Settings), with ads covered and muted if one gets through anyway.
+- It shares the iPhone app's core (Sources/Core, Sources/Twitch): the ad-free stream sessions, the local playlist server, the Twitch API and chat. Amazon's low-latency player isn't available for Apple TV, so streams play in the Apple player, kept about 4–5 seconds behind live (instead of its usual 8–12).
+
+Sideload `Kestrel-tv.ipa` onto the Apple TV with a tool that supports tvOS (e.g. Sideloadly, or Xcode's Devices window with your own signing).
+
 ## Install
 
 Download the IPA from the latest GitHub Actions run (**Actions → Build IPA and APK → Artifacts**) and sideload it with your usual tool (SideStore, AltStore, Feather, TrollStore…). Requires iOS 16+.
 
 - **Kestrel-ipa**: the iPhone app (Xcode 27.1, iOS 27.1 SDK).
+- **Kestrel-tv-ipa**: the Apple TV app (tvOS 17+). See [Apple TV](#apple-tv).
 - **Kestrel-apk**: the Android app (Android 8.0+). Open the APK on the phone to install it; it can be shared with anyone as is. See [android/README.md](android/README.md).
 
 ## Build

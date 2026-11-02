@@ -206,8 +206,8 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     var request = URLRequest(url: URL(string: "https://gql.twitch.tv/gql")!)
     request.httpMethod = "POST"
     request.timeoutInterval = 10
-    request.setValue(Self.webClientID, forHTTPHeaderField: "Client-ID")
     let auth = anonymous ? nil : TwitchAuth.shared.session
+    request.setValue(auth?.clientID ?? Self.webClientID, forHTTPHeaderField: "Client-ID")
     request.setValue(auth?.deviceID ?? deviceID, forHTTPHeaderField: "X-Device-Id")
     if let auth { request.setValue("OAuth \(auth.token)", forHTTPHeaderField: "Authorization") }
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")

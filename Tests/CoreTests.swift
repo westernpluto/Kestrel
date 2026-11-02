@@ -1655,6 +1655,31 @@ func testCatchUpSimulation() {
   check(fresh > mid && mid > gone && gone == LiveCatchUp.minBuffer, "fades: \(fresh) \(mid) \(gone)")
 }
 
+func testDeviceLogin() {
+  let started = Date(timeIntervalSince1970: 1000)
+  let code = TwitchDeviceLogin.parseCode(
+    Data(#"{"device_code":"dev123","expires_in":1800,"interval":5,"user_code":"ABCDEFGH","verification_uri":"https://www.twitch.tv/activate?device-code=ABCDEFGH"}"#.utf8),
+    status: 200, scopes: "chat:read", now: started)
+  check(code?.userCode == "ABCDEFGH" && code?.deviceCode == "dev123" && code?.interval == 5, "device code \(String(describing: code))")
+  check(code?.expiresAt == started.addingTimeInterval(1800), "expiry")
+  check(TwitchDeviceLogin.parseCode(Data(#"{"message":"invalid scope"}"#.utf8), status: 400, scopes: "x") == nil, "refused code")
+  check(TwitchDeviceLogin.parsePoll(Data(#"{"status":400,"message":"authorization_pending"}"#.utf8), status: 400) == .pending, "pending")
+  check(TwitchDeviceLogin.parsePoll(Data(#"{"message":"slow_down"}"#.utf8), status: 400) == .slowDown, "slow down")
+  check(TwitchDeviceLogin.parsePoll(Data(#"{"message":"invalid device code"}"#.utf8), status: 400) == .expired, "expired")
+  check(TwitchDeviceLogin.parsePoll(Data(#"{"message":"boom"}"#.utf8), status: 503) == .pending, "server error: try again")
+  check(TwitchDeviceLogin.parsePoll(Data(#"{"message":"access_denied"}"#.utf8), status: 400) == .refused("access_denied"), "denied")
+  let done = TwitchDeviceLogin.parsePoll(Data(#"{"access_token":"tok","refresh_token":"ref","expires_in":14000}"#.utf8), status: 200)
+  check(done == .done(.init(accessToken: "tok", refreshToken: "ref", expiresIn: 14000)), "granted \(done)")
+  let request = TwitchDeviceLogin.form("https://id.twitch.tv/oauth2/device", [("client_id", "abc"), ("scopes", "chat:read user_read")])
+  let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+  check(body == "client_id=abc&scopes=chat%3Aread%20user_read" && request.httpMethod == "POST", "form \(body)")
+  // A session saved before the client ID existed still loads (no client ID: the website's).
+  let old = #"{"token":"t","login":"l","userID":"1","deviceID":"d"}"#
+  let session = try? JSONDecoder().decode(TwitchAuth.Session.self, from: Data(old.utf8))
+  check(session?.clientID == nil && session?.refreshToken == nil && session?.login == "l", "old session decodes")
+}
+
+testDeviceLogin()
 testCatchUpSimulation()
 testRestrictedVOD()
 testRaids()
