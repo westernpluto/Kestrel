@@ -59,6 +59,9 @@ final class RaidWatcher: ObservableObject {
 
   var mode: RaidMode { AppSettings.shared.raidMode }
 
+  /// (Made by PlayerSession, which isn't on the main actor; nothing here needs it yet.)
+  nonisolated init() {}
+
   func start(channel: Channel) {
     guard stopped, !channel.id.isEmpty, mode != .off else { return }
     stopped = false
