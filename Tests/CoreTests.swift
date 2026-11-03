@@ -318,6 +318,28 @@ func testMediaParsing() {
   check(csai.segments.filter(\.isPrefetch).count == 2, "prefetch kept during client-side break")
 }
 
+func testCatchUpHoversWithoutFlipping() {
+  // Latency hovering right at the speed-up line (target + 0.3) with a surplus in hand: the speed
+  // changes a few times at most, not with every wobble.
+  var catchUp = LiveCatchUp(targetBuffer: 0.6, noise: 0.35, now: Date(timeIntervalSince1970: 0))
+  var changes = 0
+  var previous: Float = 1
+  var buffer = 1.06
+  var latency = 0.95
+  for i in 0..<240 {
+    let now = Date(timeIntervalSince1970: 60 + Double(i) * 0.25)
+    let wobble = (i % 3 == 0) ? 0.03 : -0.02
+    let rate = catchUp.update(buffer: buffer + wobble, latency: latency + wobble, playing: true, position: Double(i) * 0.25, now: now)
+    if rate != previous { changes += 1 }
+    previous = rate
+    // Speeding up brings both down; at 1x, they drift back up to where they were.
+    let drain = Double(rate - 1) * 0.25
+    buffer = max(0.7, buffer - drain + (rate > 1 ? 0 : 0.01))
+    latency = max(0.6, latency - drain + (rate > 1 ? 0 : 0.01))
+  }
+  check(changes <= 12, "hovering at the line: \(changes) speed changes in a minute")
+}
+
 func testFrameGrid() {
   // 60 fps stamped in whole milliseconds (16, 17, 17 ms): put on the exact 1/60 s grid.
   var grid = FrameGrid()
@@ -1943,6 +1965,7 @@ testMultiviewLayout()
 testStreamArrival()
 testMediaParsing()
 testFrameGrid()
+testCatchUpHoversWithoutFlipping()
 testAdTimeline()
 testTimelineAndRender()
 testSession(lowLatency: true)

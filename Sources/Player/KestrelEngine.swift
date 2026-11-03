@@ -168,6 +168,9 @@ final class KestrelEngine: NSObject {
     displayLayer.videoGravity = .resizeAspect
     synchronizer.addRenderer(displayLayer)
     synchronizer.addRenderer(audioRenderer)
+    // Speed changes take effect at once: the engine only plays when it has the video in hand, and
+    // waiting for the renderers on each small change held the picture for a few frames.
+    synchronizer.delaysRateChangeUntilHasSufficientMediaData = false
   }
 
   // MARK: Lifecycle
