@@ -379,6 +379,11 @@ struct TVSettingsView: View {
           Text("Plays streams through ad-free servers (the iPhone app's Automatic ad blocking). Off, streams come straight from Twitch, ads included unless you're subscribed or have Turbo.")
         }
         Section {
+          Toggle("Low-latency player", isOn: $store.lowLatencyPlayer)
+        } footer: {
+          Text("Kestrel's own player keeps streams about a second behind live. Off, or if it can't play a stream, the Apple player plays it (about 4–5 seconds behind).")
+        }
+        Section {
           Toggle("Chat beside the video", isOn: $store.chatShown)
         } footer: {
           Text("In the player, press left or right on the remote to show or hide chat.")

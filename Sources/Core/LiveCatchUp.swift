@@ -112,8 +112,9 @@ struct LiveCatchUp: Sendable {
   /// no sensible margin covers it, so it's learned as no more than `outageLearned`.
   static let outage = 2.2
   static let outageLearned = 1.5
-  /// Smaller shortfalls are just the buffer's reading wobbling.
-  private static let noise = 0.2
+  /// Smaller shortfalls are just the buffer's reading wobbling (or, for a player that sees video
+  /// arrive in bursts, the bursts): not hiccups to keep a margin for.
+  let noise: Double
   /// Back down toward what's needed: a quarter of the way every few seconds, once the margin
   /// hasn't had to grow for a while (from 2 s to the minimum in about a minute and a half).
   private static let shrinkEvery: TimeInterval = 5
@@ -127,7 +128,9 @@ struct LiveCatchUp: Sendable {
 
   /// - Parameter targetBuffer: the margin to start from (what this channel needed lately, so it
   ///   doesn't have to stall to learn it again); otherwise the least the connection allows.
-  init(targetBuffer: Double? = nil, now: Date = Date()) {
+  /// - Parameter noise: shortfalls up to this are ignored (see `noise`).
+  init(targetBuffer: Double? = nil, noise: Double = 0.2, now: Date = Date()) {
+    self.noise = noise
     self.targetBuffer = min(Self.maxBuffer, max(Self.minBuffer, targetBuffer ?? Self.minBuffer))
     holdUntil = now.addingTimeInterval(1)
     lastShrink = now
@@ -251,7 +254,7 @@ struct LiveCatchUp: Sendable {
     if before == 0, shortfall > 0 { marginBeforeGap = targetBuffer }
     if shortfall > before + 0.05 || before == 0 { deepenedAt = now }
     if shortfall > 0, let deepenedAt, now.timeIntervalSince(deepenedAt) >= Self.settleAfter {
-      if shortfallPeak > Self.noise { remember(shortfallPeak, now: now) }
+      if shortfallPeak > noise { remember(shortfallPeak, now: now) }
       shortfall = 0
       shortfallPeak = 0
       marginBeforeGap = nil
@@ -259,10 +262,10 @@ struct LiveCatchUp: Sendable {
     }
     if shortfall > 0 {
       shortfallPeak = max(shortfallPeak, shortfall)
-      if shortfallPeak > Self.noise { grow(toCover: shortfallPeak, now: now) }
+      if shortfallPeak > noise { grow(toCover: shortfallPeak, now: now) }
     } else if shortfallPeak > 0 {
       // Caught up again: remember how deep it went.
-      if shortfallPeak > Self.noise { remember(shortfallPeak, now: now) }
+      if shortfallPeak > noise { remember(shortfallPeak, now: now) }
       shortfallPeak = 0
       marginBeforeGap = nil
     }

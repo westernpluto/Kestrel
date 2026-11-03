@@ -22,6 +22,10 @@ final class TVPlayerModel: ObservableObject {
   /// An ad is in the stream and no ad-free copy was found: covered and muted meanwhile.
   @Published private(set) var coveringAd = false
   @Published private(set) var info: ChannelPage?
+  /// Kestrel's own low-latency player (see KestrelEngine), when it's the one playing; the Apple
+  /// player takes over if it can't play the stream.
+  @Published private(set) var engine: KestrelEngine?
+  private var lowLatencySession: LowLatencySession?
   private var session: StreamSession?
   private var statusObservation: NSKeyValueObservation?
   private var stopped = false
@@ -31,12 +35,82 @@ final class TVPlayerModel: ObservableObject {
   /// of about three times the segment length plus whatever a stall cost.
   static let behindLive: Double = 4.5
 
-  func start(_ channel: Channel, adBlocking: Bool) async {
-    guard session == nil, !stopped else { return }
+  func start(_ channel: Channel, adBlocking: Bool, lowLatency: Bool = true) async {
+    guard session == nil, engine == nil, !stopped else { return }
     Task { [weak self] in
       let page = try? await TwitchAPI.shared.channelPage(login: channel.login)
       self?.info = page
     }
+    if lowLatency, await startKestrel(channel, adBlocking: adBlocking) { return }
+    await startApple(channel, adBlocking: adBlocking)
+  }
+
+  // MARK: Kestrel's own player
+
+  /// - Returns: false when the Apple player should play it instead.
+  private func startKestrel(_ channel: Channel, adBlocking: Bool) async -> Bool {
+    var config = LowLatencyConfig()
+    config.codecs = "h265,h264"
+    config.adFreeProxies = adBlocking ? AdFreeProxy.automaticHosts : []
+    config.checkAccountFirst = TwitchAuth.shared.session != nil
+    let session = LowLatencySession(
+      login: channel.login, config: config, http: URLSessionHTTPClient(timeout: 8), tokens: TwitchAPI.shared
+    ) { [weak self] update in
+      Task { @MainActor in self?.adStateChanged(update.state) }
+    }
+    let found: [HLSVariant]
+    do {
+      found = try await session.start()
+    } catch StreamSession.StartError.offline {
+      phase = .offline
+      return true
+    } catch {
+      return false
+    }
+    guard !stopped else { return true }
+    let videos = found.indices.filter { !found[$0].isAudioOnly }.sorted {
+      (found[$0].height, found[$0].frameRate, found[$0].bandwidth) > (found[$1].height, found[$1].frameRate, found[$1].bandwidth)
+    }
+    guard let best = videos.first else { return false }
+    let engine = KestrelEngine(rendition: best, renditions: videos) { [session] index in
+      let result = await session.mediaPlaylist(index)
+      return result.status == 200 ? result.body : nil
+    }
+    engine.onState = { [weak self] state in
+      guard let model = self else { return }
+      switch state {
+      case .playing: model.phase = .playing
+      case .failed: model.fallBack(channel, adBlocking: adBlocking, reason: "it failed")
+      default: break
+      }
+    }
+    lowLatencySession = session
+    self.engine = engine
+    engine.start()
+    ActivityLog.shared.add("Kestrel player (Apple TV): \(channel.login) at \(found[best].label)")
+    // No picture after a while: the Apple player instead.
+    Task { [weak self] in
+      try? await Task.sleep(nanoseconds: 10_000_000_000)
+      guard let model = self, model.engine === engine, model.phase != .playing else { return }
+      model.fallBack(channel, adBlocking: adBlocking, reason: "nothing played within 10 s")
+    }
+    return true
+  }
+
+  private func fallBack(_ channel: Channel, adBlocking: Bool, reason: String) {
+    guard engine != nil, !stopped else { return }
+    ActivityLog.shared.add("Kestrel player (Apple TV): \(reason); playing in the Apple player instead")
+    engine?.stop()
+    engine = nil
+    lowLatencySession = nil
+    phase = .loading
+    Task { await startApple(channel, adBlocking: adBlocking) }
+  }
+
+  // MARK: The Apple player
+
+  private func startApple(_ channel: Channel, adBlocking: Bool) async {
+    guard session == nil, !stopped else { return }
     var config = StreamSessionConfig()
     // Apple TV 4K decodes HEVC in hardware: Enhanced Broadcasting channels' sharper renditions too.
     config.codecs = "h265,h264"
@@ -88,10 +162,17 @@ final class TVPlayerModel: ObservableObject {
     guard covering != coveringAd else { return }
     coveringAd = covering
     player.isMuted = covering
+    engine?.setMuted(covering)
   }
 
   func togglePause() {
     guard phase == .playing else { return }
+    if let engine {
+      // (Resuming starts again at live.)
+      engine.setPaused(!paused)
+      paused.toggle()
+      return
+    }
     if paused {
       // Back to live, not to where it was paused.
       if let item = player.currentItem, let end = item.seekableTimeRanges.last?.timeRangeValue.end {
@@ -106,11 +187,48 @@ final class TVPlayerModel: ObservableObject {
 
   func stop() {
     stopped = true
+    engine?.stop()
+    engine = nil
+    lowLatencySession = nil
     player.pause()
     player.replaceCurrentItem(with: nil)
     statusObservation = nil
     if let session { StreamProxy.shared.remove(session.id) }
     session = nil
+  }
+}
+
+/// The Kestrel player's picture: its display layer, filling the view.
+struct TVKestrelSurface: UIViewRepresentable {
+  let engine: KestrelEngine
+
+  final class LayerView: UIView {
+    var videoLayer: AVSampleBufferDisplayLayer? {
+      didSet {
+        oldValue?.removeFromSuperlayer()
+        if let videoLayer { layer.addSublayer(videoLayer) }
+        setNeedsLayout()
+      }
+    }
+
+    override func layoutSubviews() {
+      super.layoutSubviews()
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      videoLayer?.frame = bounds
+      CATransaction.commit()
+    }
+  }
+
+  func makeUIView(context: Context) -> LayerView {
+    let view = LayerView()
+    view.backgroundColor = .black
+    view.videoLayer = engine.displayLayer
+    return view
+  }
+
+  func updateUIView(_ view: LayerView, context: Context) {
+    if view.videoLayer !== engine.displayLayer { view.videoLayer = engine.displayLayer }
   }
 }
 
@@ -149,7 +267,11 @@ struct TVPlayerView: View {
   var body: some View {
     HStack(spacing: 0) {
       ZStack {
-        TVVideoSurface(player: model.player)
+        if let engine = model.engine {
+          TVKestrelSurface(engine: engine)
+        } else {
+          TVVideoSurface(player: model.player)
+        }
         overlay
       }
       if chatShown {
@@ -171,7 +293,7 @@ struct TVPlayerView: View {
     .task {
       chatShown = store.chatShown
       chat.start(channel.login)
-      await model.start(channel, adBlocking: store.adBlocking)
+      await model.start(channel, adBlocking: store.adBlocking, lowLatency: store.lowLatencyPlayer)
       showInfo()
     }
     .onDisappear {

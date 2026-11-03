@@ -3,6 +3,7 @@
 // with ads swapped for ad-free copies), wired into PlayerModel like the other players.
 
 import AVFoundation
+import AVKit
 import SwiftUI
 import UIKit
 
@@ -33,9 +34,8 @@ final class KestrelController {
 
   private func load() async {
     var config = LowLatencyConfig()
-    // Twitch's H.264 renditions come as MPEG-TS, which this player unpacks; its HEVC and AV1
-    // ones come in fragmented MP4, which it doesn't (yet).
-    config.codecs = "h264"
+    // H.264 and HEVC (MPEG-TS or fragmented MP4, both unpacked here); not AV1 yet.
+    config.codecs = "h265,h264"
     config.backupStreams = AppSettings.shared.backupStreams
     config.allowLowQualityBackup = AppSettings.shared.allowLowQualityBackup
     config.adFreeProxies = model?.adFreeProxies ?? AppSettings.shared.adFreeProxyHosts
@@ -61,10 +61,13 @@ final class KestrelController {
       let preferred = model?.takePreferredQualityLabel().flatMap { label in videoIndices.first { found[$0].label == label } }
       let start = preferred ?? best
       model?.route = await session.route
-      model?.qualities = videoIndices.map { PlayerModel.Quality(id: $0, label: found[$0].label) }
+      model?.qualities = videoIndices.map { PlayerModel.Quality(id: $0, label: found[$0].label) } + [PlayerModel.Quality(id: nil, label: "Auto")]
       model?.selectedQuality = start
       let margin = ChannelMargins.margin(for: login, network: NetworkWatch.shared.memoryKey).map { min($0, LiveCatchUp.startBuffer) }
-      let engine = KestrelEngine(rendition: start, startMargin: margin) { [session] index in
+      // The best quality, stepped down while the connection can't carry it (a quality picked by
+      // hand, or the one handed over, stays).
+      let engine = KestrelEngine(rendition: start, renditions: videoIndices, auto: preferred == nil, startMargin: margin) {
+        [session] index in
         let result = await session.mediaPlaylist(index)
         return result.status == 200 ? result.body : nil
       }
@@ -73,6 +76,7 @@ final class KestrelController {
       engine.setVolume(volume)
       self.engine = engine
       model?.kestrelEngineReady()
+      setUpPictureInPicture(engine)
       engine.start()
       ActivityLog.shared.add("Kestrel player: \(login) at \(found[start].label)")
     } catch StreamSession.StartError.offline {
@@ -104,6 +108,10 @@ final class KestrelController {
 
   func stop() {
     stopped = true
+    pip?.stopPictureInPicture()
+    pipObservation = nil
+    pip = nil
+    pipDelegate = nil
     loadTask?.cancel()
     if let engine { ChannelMargins.remember(engine.catchUp.targetBuffer, for: login, network: NetworkWatch.shared.memoryKey) }
     engine?.stop()
@@ -123,14 +131,72 @@ final class KestrelController {
   }
 
   func select(_ id: Int?) {
-    guard let id, let engine else { return }
+    guard let engine else { return }
+    guard let id else {
+      engine.setAuto()
+      ActivityLog.shared.add("Kestrel player: Auto quality (the best that plays smoothly)")
+      return
+    }
     engine.setRendition(id)
     ActivityLog.shared.add("Kestrel player: switching to \(variants.indices.contains(id) ? variants[id].label : "?") from the next segment")
+  }
+
+  // MARK: Picture in Picture
+
+  /// The system's window for a sample buffer display layer: play and pause in the window, and
+  /// the picture never leaves the layer, so there's nothing to hand back (no black on return).
+  private var pip: AVPictureInPictureController?
+  private var pipDelegate: KestrelPictureInPicture?
+  private(set) var pictureInPictureActive = false
+  private var pipObservation: NSKeyValueObservation?
+  private var pipWanted = false
+
+  private func setUpPictureInPicture(_ engine: KestrelEngine) {
+    guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
+    let delegate = KestrelPictureInPicture(controller: self)
+    let controller = AVPictureInPictureController(
+      contentSource: .init(sampleBufferDisplayLayer: engine.displayLayer, playbackDelegate: delegate))
+    controller.canStartPictureInPictureAutomaticallyFromInline = true
+    pipObservation = controller.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
+      let active = pip.isPictureInPictureActive
+      Task { @MainActor in self?.pictureInPictureActive = active }
+    }
+    pip = controller
+    pipDelegate = delegate
+  }
+
+  func togglePictureInPicture() {
+    guard let pip else { return }
+    if pip.isPictureInPictureActive {
+      pip.stopPictureInPicture()
+    } else if pip.isPictureInPicturePossible {
+      pip.startPictureInPicture()
+    } else {
+      pipWanted = true
+      Task { [weak self] in
+        for _ in 0..<10 {
+          try? await Task.sleep(nanoseconds: 250_000_000)
+          guard let self, self.pipWanted, let pip = self.pip else { return }
+          if pip.isPictureInPicturePossible {
+            self.pipWanted = false
+            pip.startPictureInPicture()
+            return
+          }
+        }
+        self?.pipWanted = false
+      }
+    }
   }
 
   func setPaused(_ paused: Bool) {
     isPaused = paused
     engine?.setPaused(paused)
+    pip?.invalidatePlaybackState()
+  }
+
+  /// Play or pause pressed in the PiP window: the player screen follows.
+  func setPausedFromPictureInPicture(_ paused: Bool) {
+    if let model { model.setPaused(paused) } else { setPaused(paused) }
   }
 
   func goLive() {
@@ -169,6 +235,11 @@ final class KestrelController {
         value: rate > 1.001 ? String(format: "%.2f× (catching up)", rate) : rate < 0.999 && rate > 0 ? String(format: "%.2f× (building margin)", rate) : "1.00×"))
     lines.append(StatLine(label: "Margin", value: String(format: "%.1f s", engine.catchUp.targetBuffer)))
     lines.append(StatLine(label: "Stalls", value: "\(engine.stalls)"))
+    lines.append(
+      StatLine(
+        label: "Arrival",
+        value: String(format: "longest gap %.2f s, segment handoff %.2f s (last minute)", engine.longestArrivalGap, engine.longestHandoffWait)))
+    lines.append(StatLine(label: "Quality mode", value: engine.autoQuality ? "best that plays smoothly" : "picked"))
     lines.append(StatLine(label: "Segments", value: "\(engine.segmentsLoaded) (\(engine.container))"))
     // What to look at when a stream won't show: frames handed to the decoder (and how many only
     // decoded ahead of the start), its state, its last error.
@@ -188,7 +259,10 @@ final class KestrelController {
         value: "\(engine.framesDecoded) pictures, \(engine.framesShown) shown, \(engine.decodeErrors) errors"
           + (engine.decodeErrors > 0 ? " (last \(engine.lastDecodeStatus))" : "")))
     lines.append(
-      StatLine(label: "Display", value: engine.decoderFailures > 0 ? "\(decoder), \(engine.decoderFailures) failures" : decoder))
+      StatLine(
+        label: "Display",
+        value: (engine.decoderFailures > 0 ? "\(decoder), \(engine.decoderFailures) failures" : decoder)
+          + (engine.decodeInLayer ? " (decodes)" : " (pictures from VideoToolbox)")))
     if let error = engine.lastDecoderError { lines.append(StatLine(label: "Decoder error", value: error)) }
     if let behind = engine.startedBehind { lines.append(StatLine(label: "Started", value: String(format: "%.2f s behind newest", behind))) }
     lines.append(StatLine(label: "Ads", value: AppSettings.shared.adBlockingSummary))
@@ -231,5 +305,39 @@ struct KestrelVideoView: UIViewRepresentable {
     if view.videoLayer !== engine.displayLayer { view.videoLayer = engine.displayLayer }
     let gravity: AVLayerVideoGravity = fill ? .resizeAspectFill : .resizeAspect
     if engine.displayLayer.videoGravity != gravity { engine.displayLayer.videoGravity = gravity }
+  }
+}
+
+/// The Picture in Picture window's controls for the Kestrel player (a live stream: play and pause,
+/// no seeking).
+final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPlaybackDelegate {
+  private weak var controller: KestrelController?
+
+  init(controller: KestrelController) {
+    self.controller = controller
+  }
+
+  func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool) {
+    MainActor.assumeIsolated { controller?.setPausedFromPictureInPicture(!playing) }
+  }
+
+  func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {
+    // Live: an unbounded range shows the window's live controls.
+    CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
+  }
+
+  func pictureInPictureControllerIsPlaybackPaused(_ pictureInPictureController: AVPictureInPictureController) -> Bool {
+    MainActor.assumeIsolated { controller?.isPaused ?? false }
+  }
+
+  func pictureInPictureController(
+    _ pictureInPictureController: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions
+  ) {}
+
+  func pictureInPictureController(
+    _ pictureInPictureController: AVPictureInPictureController, skipByInterval skipInterval: CMTime,
+    completion completionHandler: @escaping () -> Void
+  ) {
+    completionHandler()
   }
 }

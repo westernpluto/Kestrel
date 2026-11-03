@@ -68,11 +68,14 @@ final class TVStore: ObservableObject {
   @Published var adBlocking: Bool { didSet { UserDefaults.standard.set(adBlocking, forKey: "tv.adBlocking") } }
   /// Chat beside the video when a stream opens.
   @Published var chatShown: Bool { didSet { UserDefaults.standard.set(chatShown, forKey: "tv.chatShown") } }
+  /// Kestrel's own low-latency player (about a second behind live); off, the Apple player.
+  @Published var lowLatencyPlayer: Bool { didSet { UserDefaults.standard.set(lowLatencyPlayer, forKey: "tv.lowLatencyPlayer") } }
 
   private init() {
-    UserDefaults.standard.register(defaults: ["tv.adBlocking": true, "tv.chatShown": true])
+    UserDefaults.standard.register(defaults: ["tv.adBlocking": true, "tv.chatShown": true, "tv.lowLatencyPlayer": true])
     adBlocking = UserDefaults.standard.bool(forKey: "tv.adBlocking")
     chatShown = UserDefaults.standard.bool(forKey: "tv.chatShown")
+    lowLatencyPlayer = UserDefaults.standard.bool(forKey: "tv.lowLatencyPlayer")
     if let data = TVKeychain.get("session"), let saved = try? JSONDecoder().decode(TwitchAuth.Session.self, from: data) {
       session = saved
       TwitchAuth.shared.update(saved)

@@ -107,15 +107,53 @@ final class KestrelEngine: NSObject {
   private(set) var decodeErrors = 0
   private(set) var lastDecodeStatus: OSStatus = noErr
   private var muted = false
+  /// Compressed frames go to the display layer, which decodes them itself: that keeps decoding in
+  /// Picture in Picture and the background, where our own decoding session is shut down. If the
+  /// layer keeps failing on a stream, decoding moves here (VideoToolbox) for the rest of it.
+  private(set) var decodeInLayer = true
+  private var layerFailures: [Date] = []
+
+  // Quality: the best that plays smoothly (ConnectionFit), unless one is picked by hand.
+  /// The renditions, best first.
+  let renditions: [Int]
+  private var fit: ConnectionFit
+  /// Steps down after stalls and back up later (at the start and with Auto); off for a quality
+  /// picked by hand.
+  private(set) var autoQuality = true
+
+  // How the video arrives (for the stats, and to tell bursts from hiccups).
+  private var lastArrival: Date?
+  private var arrivalGaps: [(at: Date, gap: Double)] = []
+  /// The longest wait between pieces of a segment still being made, in the last minute.
+  var longestArrivalGap: Double {
+    arrivalGaps.filter { Date().timeIntervalSince($0.at) < 60 }.map(\.gap).max() ?? 0
+  }
+  /// The longest wait at a segment's end, in the last minute (its frames all in, the download
+  /// not yet closed, the next one's frames waiting).
+  private var handoffWaits: [(at: Date, wait: Double)] = []
+  var longestHandoffWait: Double {
+    handoffWaits.filter { Date().timeIntervalSince($0.at) < 60 }.map(\.wait).max() ?? 0
+  }
 
   static let clock: Int32 = 90_000
   /// Rate limits for the synchronizer (it plays audio pitch-corrected within these).
   static let maxRate: Float = 1.2
 
-  init(rendition: Int, startMargin: Double? = nil, playlist: @escaping @Sendable (Int) async -> String?) {
+  /// - Parameters:
+  ///   - renditions: the session's video renditions, best first (for stepping down and up).
+  ///   - auto: steps down when the connection can't keep up (off: `rendition` stays).
+  init(
+    rendition: Int, renditions: [Int], auto: Bool = true, startMargin: Double? = nil,
+    playlist: @escaping @Sendable (Int) async -> String?
+  ) {
     self.rendition = rendition
+    self.renditions = renditions
     self.playlist = playlist
-    catchUp = LiveCatchUp(targetBuffer: startMargin)
+    autoQuality = auto
+    fit = ConnectionFit(count: renditions.count)
+    // Video arrives over HTTP in bursts, so the buffer reading dips a few tenths between them:
+    // those aren't hiccups to keep a margin for (counted, they raised it to over a second).
+    catchUp = LiveCatchUp(targetBuffer: startMargin, noise: 0.35)
     super.init()
     displayLayer.videoGravity = .resizeAspect
     synchronizer.addRenderer(displayLayer)
@@ -184,10 +222,19 @@ final class KestrelEngine: NSObject {
   }
 
   /// Another rendition: from the next segment on (Twitch's renditions share their timeline).
-  func setRendition(_ index: Int) {
+  /// Picked by hand, it stays (no stepping down).
+  func setRendition(_ index: Int, byHand: Bool = true) {
+    if byHand { autoQuality = false }
     guard index != rendition else { return }
     rendition = index
     catchUp.hold(for: 3)
+  }
+
+  /// Auto: the best quality that plays smoothly.
+  func setAuto() {
+    autoQuality = true
+    fit = ConnectionFit(count: renditions.count)
+    if let best = renditions.first { setRendition(best, byHand: false) }
   }
 
   func setMuted(_ mute: Bool) {
@@ -257,6 +304,21 @@ final class KestrelEngine: NSObject {
         first.frames = []
         for frame in frames { enqueue(frame, from: first) }
       }
+      if !first.finished, loads.count > 1, readyToHandOver(first, to: loads[1]) {
+        // Its frames are all in (it's gone quiet and the next one's frames have started): go on
+        // without waiting for its download to close, which can come a while later.
+        if let quiet = first.lastArrival {
+          handoffWaits.append((Date(), Date().timeIntervalSince(quiet)))
+          if handoffWaits.count > 200 { handoffWaits.removeFirst(100) }
+        }
+        first.frames += first.demuxer?.flush() ?? []
+        let frames = first.frames
+        first.frames = []
+        for frame in frames { enqueue(frame, from: first) }
+        first.handedOver = true
+        first.finished = true
+        first.task?.cancel()
+      }
       guard first.finished else { break }
       loads.removeFirst()
       segmentsLoaded += 1
@@ -266,6 +328,13 @@ final class KestrelEngine: NSObject {
       }
     }
     startIfReady()
+  }
+
+  /// The front segment has gone quiet for a moment and the next one's frames are coming in (so
+  /// nothing more of this one is on its way).
+  private func readyToHandOver(_ first: SegmentLoad, to next: SegmentLoad) -> Bool {
+    guard first.demuxer != nil, first.received > 0, let quiet = first.lastArrival, !next.frames.isEmpty else { return false }
+    return Date().timeIntervalSince(quiet) > 0.25
   }
 
   private func enqueue(_ frame: DemuxedFrame, from load: SegmentLoad) {
@@ -286,7 +355,7 @@ final class KestrelEngine: NSObject {
       }
       if clockRunning {
         enqueueVideo(video, pts: time, dts: decodeTime, hidden: false)
-      } else if video.codec == .h264, video.isKeyframe || !heldVideo.isEmpty {
+      } else if video.isKeyframe || !heldVideo.isEmpty {
         heldVideo.append((video, time, decodeTime))
         if firstVideoTime == nil { firstVideoTime = time }
         if lastVideoTime.map({ time > $0 }) ?? true { lastVideoTime = time }
@@ -302,39 +371,66 @@ final class KestrelEngine: NSObject {
   }
 
   private func enqueueVideo(_ frame: VideoFrame, pts time: Int64, dts: Int64, hidden: Bool) {
-    guard frame.codec == .h264 else { return }
     if waitingForKeyframe, !frame.isKeyframe { return }
     let units = AnnexB.units(frame.data)
-    if frame.isKeyframe, let sets = H264.parameterSets(units) {
-      let key = sets.sps + sets.pps
-      if key != parameterSets || videoFormat == nil {
-        videoFormat = Self.h264Format(sps: sets.sps, pps: sets.pps)
-        parameterSets = key
+    let payload: Data
+    switch frame.codec {
+    case .h264:
+      if frame.isKeyframe, let sets = H264.parameterSets(units) {
+        let key = sets.sps + sets.pps
+        if key != parameterSets || videoFormat == nil {
+          videoFormat = Self.h264Format(sps: sets.sps, pps: sets.pps)
+          parameterSets = key
+        }
       }
+      payload = H264.sample(units)
+    case .hevc:
+      if frame.isKeyframe, let sets = HEVC.parameterSets(units) {
+        let key = sets.vps + sets.sps + sets.pps
+        if key != parameterSets || videoFormat == nil {
+          videoFormat = Self.hevcFormat(vps: sets.vps, sps: sets.sps, pps: sets.pps)
+          parameterSets = key
+        }
+      }
+      payload = HEVC.sample(units)
     }
     guard let format = videoFormat else { return }
     if let last = lastDecodeTime, dts > last, dts - last < 9000 { frameLength = dts - last }
     lastDecodeTime = dts
     guard
       let sample = Self.videoSample(
-        H264.sample(units), format: format, pts: time, dts: dts, duration: frameLength, keyframe: frame.isKeyframe, hidden: false)
+        payload, format: format, pts: time, dts: dts, duration: frameLength, keyframe: frame.isKeyframe,
+        hidden: hidden && decodeInLayer)
     else { return }
     if displayLayer.status == .failed || displayLayer.requiresFlushToResumeDecoding {
-      // The layer gave up, or the app was in the background: start it again.
+      // The layer gave up (a frame it couldn't decode), or the app was in the background.
       if displayLayer.status == .failed {
         decoderFailures += 1
         let error = displayLayer.error as NSError?
         lastDecoderError = error.map { "layer \($0.domain) \($0.code)" } ?? "layer failed"
+        layerFailures = layerFailures.filter { Date().timeIntervalSince($0) < 30 } + [Date()]
+        if decodeInLayer, layerFailures.count >= 3 {
+          // It keeps failing on this stream: decode here instead.
+          decodeInLayer = false
+          ActivityLog.shared.add("Kestrel player: the display layer kept failing (\(lastDecoderError ?? "?")); decoding with VideoToolbox")
+        }
       }
       displayLayer.flush()
-    }
-    guard let session = decoderSession(for: format) else {
       waitingForKeyframe = true
-      return
+      if !frame.isKeyframe { return }
     }
-    waitingForKeyframe = false
-    if hidden { showFrom = max(showFrom, time + 1) }
-    decode(sample, in: session)
+    if decodeInLayer {
+      waitingForKeyframe = false
+      displayLayer.enqueue(sample)
+    } else {
+      guard let session = decoderSession(for: format) else {
+        waitingForKeyframe = true
+        return
+      }
+      waitingForKeyframe = false
+      if hidden { showFrom = max(showFrom, time + 1) }
+      decode(sample, in: session)
+    }
     videoFramesQueued += 1
     if hidden { videoFramesHidden += 1 }
     if firstVideoTime == nil { firstVideoTime = time }
@@ -466,7 +562,10 @@ final class KestrelEngine: NSObject {
   // MARK: Ticking: margin, stalls
 
   private func tick() {
-    guard running, clockRunning else { return }
+    guard running else { return }
+    // A segment whose frames are all in can hand over to the next before its download closes.
+    pump()
+    guard clockRunning else { return }
     let ahead = bufferAhead ?? 0
     if stalledSince == nil, ahead < 0.03 {
       // Ran dry: hold the clock until there's the margin again.
@@ -475,7 +574,17 @@ final class KestrelEngine: NSObject {
       synchronizer.rate = 0
       catchUp.stalled()
       state = .stalled
+      // Twice in a few minutes while the video kept arriving: the connection can't carry this
+      // quality; one lower from the next segment.
+      if autoQuality, fit.stalled(), fit.step < renditions.count {
+        setRendition(renditions[fit.step], byHand: false)
+        ActivityLog.shared.add("Kestrel player: stalling at this quality; one lower for now (trying again in a few minutes)")
+      }
       return
+    }
+    if autoQuality, fit.tick(), fit.step < renditions.count {
+      setRendition(renditions[fit.step], byHand: false)
+      ActivityLog.shared.add("Kestrel player: trying the better quality again")
     }
     if let since = stalledSince {
       let resumeAt = max(0.4, min(catchUp.targetBuffer, 1.5))
@@ -527,6 +636,25 @@ final class KestrelEngine: NSObject {
         return CMVideoFormatDescriptionCreateFromH264ParameterSets(
           allocator: kCFAllocatorDefault, parameterSetCount: 2, parameterSetPointers: pointers, parameterSetSizes: sizes,
           nalUnitHeaderLength: 4, formatDescriptionOut: &format)
+      }
+    }
+    return status == noErr ? format : nil
+  }
+
+  static func hevcFormat(vps: Data, sps: Data, pps: Data) -> CMVideoFormatDescription? {
+    var format: CMVideoFormatDescription?
+    let status = vps.withUnsafeBytes { v in
+      sps.withUnsafeBytes { s in
+        pps.withUnsafeBytes { p -> OSStatus in
+          let pointers = [
+            v.bindMemory(to: UInt8.self).baseAddress!, s.bindMemory(to: UInt8.self).baseAddress!,
+            p.bindMemory(to: UInt8.self).baseAddress!,
+          ]
+          let sizes = [vps.count, sps.count, pps.count]
+          return CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+            allocator: kCFAllocatorDefault, parameterSetCount: 3, parameterSetPointers: pointers, parameterSetSizes: sizes,
+            nalUnitHeaderLength: 4, extensions: nil, formatDescriptionOut: &format)
+        }
       }
     }
     return status == noErr ? format : nil
@@ -679,6 +807,10 @@ final class SegmentLoad {
   var raw = Data()
   /// Downloaded completely (it may still wait for its init segment).
   var downloaded = false
+  /// When its last bytes came in.
+  var lastArrival: Date?
+  /// Handed over to the next segment before its download closed (its end is ignored).
+  var handedOver = false
   /// Unpacked, not yet handed to the renderers.
   var frames: [DemuxedFrame] = []
   var received = 0
@@ -696,7 +828,17 @@ extension KestrelEngine: URLSessionDataDelegate {
   // (The session's delegate queue is the main queue.)
   nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
     MainActor.assumeIsolated {
-      guard let load = loads.first(where: { $0.task === dataTask }) else { return }
+      guard let load = loads.first(where: { $0.task === dataTask }), !load.handedOver else { return }
+      let now = Date()
+      if load.planned.live, let last = load.lastArrival {
+        let gap = now.timeIntervalSince(last)
+        if gap > 0.15 {
+          arrivalGaps.append((now, gap))
+          if arrivalGaps.count > 200 { arrivalGaps.removeFirst(100) }
+        }
+      }
+      load.lastArrival = now
+      lastArrival = now
       load.received += data.count
       feed(load, data)
       pump()
@@ -705,7 +847,7 @@ extension KestrelEngine: URLSessionDataDelegate {
 
   nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     MainActor.assumeIsolated {
-      guard let load = loads.first(where: { $0.task === task }) else { return }
+      guard let load = loads.first(where: { $0.task === task }), !load.handedOver else { return }
       let status = (task.response as? HTTPURLResponse)?.statusCode ?? 0
       if error != nil || status != 200 {
         load.failed = true

@@ -781,6 +781,10 @@ final class PlayerModel: ObservableObject {
       if pip.isPictureInPictureActive { pip.stopPictureInPicture() } else { pip.startPictureInPicture() }
       return
     }
+    if let kestrel {
+      kestrel.togglePictureInPicture()
+      return
+    }
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
         lowLatency.togglePictureInPicture()
@@ -1058,6 +1062,7 @@ final class PlayerModel: ObservableObject {
     if let kestrel {
       kestrel.tick()
       if wantsStats { stats = kestrel.stats() }
+      if pictureInPictureActive != kestrel.pictureInPictureActive { pictureInPictureActive = kestrel.pictureInPictureActive }
       return
     }
     #if canImport(AmazonIVSPlayer)

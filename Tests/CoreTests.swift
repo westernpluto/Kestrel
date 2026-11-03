@@ -1646,6 +1646,24 @@ func testCatchUpSimulation() {
   let taught = short.targetBuffer
   short.update(buffer: 0.6, latency: 3, playing: true, now: o0.addingTimeInterval(61.2))
   check(short.targetBuffer == taught, "short stall kept: \(taught) -> \(short.targetBuffer)")
+  // Bursty delivery: a player that sees video arrive in bursts ignores dips up to its noise level
+  // (they raised the Kestrel player's margin to over a second with no stalls at all).
+  func dip(_ noise: Double) -> Double {
+    var c = LiveCatchUp(noise: noise, now: o0)
+    var t = o0.addingTimeInterval(45)
+    var held = 0.9
+    c.update(buffer: held, latency: 1.4, playing: true, now: t)
+    for step in 0..<40 {
+      t += 0.25
+      // 0.3 s without video every two seconds, then a burst that brings it back.
+      let phase = step % 8
+      held += phase < 2 ? -0.15 : (phase == 2 ? 0.3 : 0)
+      c.update(buffer: held, latency: held + 0.5, playing: true, now: t)
+    }
+    return c.targetBuffer
+  }
+  check(dip(0.35) <= LiveCatchUp.minBuffer + 0.01, "bursts below the noise level don't raise the margin: \(dip(0.35))")
+  check(dip(0.2) > LiveCatchUp.minBuffer + 0.05, "with the default level they do (the low-latency player's reading is smooth): \(dip(0.2))")
   // A hiccup fades from memory rather than dropping out of it all at once.
   var fading = LiveCatchUp(now: o0)
   fading.stalled(now: o0.addingTimeInterval(50))
