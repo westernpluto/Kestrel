@@ -70,6 +70,10 @@ final class KestrelEngine: NSObject {
   private var group: [GroupFrame] = []
   /// The screen's layer missed frames in the background and needs bringing up to date.
   private var screenBehind = false
+  /// The app's in the background (from the notifications: the application state lags behind
+  /// them, and still read "background" while the app was already coming back).
+  private var inBackground = UIApplication.shared.applicationState == .background
+  private var lifecycleTokens: [NSObjectProtocol] = []
   /// The Picture in Picture copy (see `makeMirror`).
   private(set) var mirrorLayer: AVSampleBufferDisplayLayer?
   private var mirrorWaiting = true
@@ -165,6 +169,15 @@ final class KestrelEngine: NSObject {
     // those aren't hiccups to keep a margin for (counted, they raised it to over a second).
     catchUp = LiveCatchUp(targetBuffer: startMargin, noise: 0.35)
     super.init()
+    let center = NotificationCenter.default
+    lifecycleTokens.append(
+      center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.inBackground = true }
+      })
+    lifecycleTokens.append(
+      center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.enteringForeground() }
+      })
     displayLayer.videoGravity = .resizeAspect
     synchronizer.addRenderer(displayLayer)
     synchronizer.addRenderer(audioRenderer)
@@ -429,7 +442,7 @@ final class KestrelEngine: NSObject {
     if decodeInLayer {
       // The picture on screen (left alone in the background: it can't decode there, and is
       // brought back up to the frame showing when the app returns).
-      if UIApplication.shared.applicationState == .background {
+      if inBackground {
         // (Past the keyframe check above: the copy goes on from here.)
         waitingForKeyframe = false
         screenBehind = true
@@ -495,17 +508,14 @@ final class KestrelEngine: NSObject {
       // Back from the background: decode what came since the last keyframe out of sight, so the
       // picture is the one playing now straight away (not the one from before, or nothing until
       // the next keyframe up to two seconds later).
-      layer.flush()
-      screenBehind = false
       if !entry.keyframe {
-        guard group.first?.keyframe == true else {
+        guard catchUpScreen() else {
           waitingForKeyframe = true
           return false
         }
-        let showing = Int64(synchronizer.currentTime().convertScale(Self.clock, method: .default).value)
-        for earlier in group {
-          if let sample = earlier.sample(hidden: earlier.pts < showing - frameLength) { layer.enqueue(sample) }
-        }
+      } else {
+        layer.flush()
+        screenBehind = false
       }
     }
     if waitingForKeyframe {
@@ -515,6 +525,30 @@ final class KestrelEngine: NSObject {
     guard let sample = entry.sample(hidden: hidden) else { return false }
     layer.enqueue(sample)
     return true
+  }
+
+  /// Brings the screen's layer up to the frame playing now from the frames since the last
+  /// keyframe (decoded out of sight up to now): false if there's no keyframe to start from.
+  @discardableResult
+  private func catchUpScreen() -> Bool {
+    let layer = displayLayer
+    layer.flush()
+    screenBehind = false
+    guard group.first?.keyframe == true else { return false }
+    let showing = Int64(synchronizer.currentTime().convertScale(Self.clock, method: .default).value)
+    for earlier in group {
+      if let sample = earlier.sample(hidden: earlier.pts < showing - frameLength) { layer.enqueue(sample) }
+    }
+    return true
+  }
+
+  /// The app is coming back (Picture in Picture's window is on its way back): the screen's layer
+  /// catches up now, during that animation, instead of at the next frame; by the time the window
+  /// goes, the picture underneath is the one playing (it showed the frame from before for a moment).
+  private func enteringForeground() {
+    inBackground = false
+    guard running, decodeInLayer, screenBehind || displayLayer.requiresFlushToResumeDecoding else { return }
+    if !catchUpScreen() { waitingForKeyframe = true }
   }
 
   /// The Picture in Picture copy: when it can't decode (the app's in the background without
@@ -611,7 +645,7 @@ final class KestrelEngine: NSObject {
       allocator: kCFAllocatorDefault, imageBuffer: image, formatDescription: format, sampleTiming: &timing, sampleBufferOut: &sample)
     guard let sample else { return }
     // (A picture layer that stopped in the background just needs flushing.)
-    if UIApplication.shared.applicationState != .background {
+    if !inBackground {
       if displayLayer.status == .failed || displayLayer.requiresFlushToResumeDecoding { displayLayer.flush() }
       displayLayer.enqueue(sample)
     }

@@ -876,6 +876,9 @@ func testLowLatencySession() {
     check(usedBackup && sawMainAfter, "switched to the copy and back (\(usedBackup), \(sawMainAfter))")
     check(log.messages.contains { $0.contains("Switched to ad-free copy (mobile_web") }, "\(log.messages)")
     check(box.last?.state == AdState.none, "state cleared after the break")
+    // Only the ad from before the switch is covered, not the rest of the break (the player was on
+    // the clean copy by then: covering it put "Skipping an ad" over the stream).
+    check(box.last?.ads.covers(fake.pdt(24).addingTimeInterval(1)) == false, "clean copy not covered")
   }
 
   // No ad-free copy: the ad goes through without prefetch, and the app is told to hide it.

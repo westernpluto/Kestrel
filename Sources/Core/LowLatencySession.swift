@@ -64,6 +64,8 @@ actor LowLatencySession: PlaylistSource {
   private var lastServed: [Int: String] = [:]
 
   private var inBreak = false
+  /// This break's ad-free copy is already being served.
+  private var replacedInBreak = false
   private var breakStart = Date.distantPast
   private var breakID = 0
   private var markerBreak = false
@@ -260,9 +262,11 @@ actor LowLatencySession: PlaylistSource {
     // Ad video stitched into the stream. Where it sits in time is noted straight away: the
     // player may already have some of it (the segment being made when the ad began), and that
     // part needs hiding even when an ad-free copy takes over at once.
-    ads.update(with: main.playlist)
+    // Only until the player is on the ad-free copy: after that it gets no more of the ad, and
+    // noting the rest of the break covered clean video ("Skipping an ad…" over the stream).
     let firstPoll = !inBreak
     if firstPoll { beginBreak() }
+    if !replacedInBreak { ads.update(with: main.playlist) }
     if config.backupStreams {
       if active == nil {
         startSearchIfNeeded(target: target)
@@ -272,6 +276,7 @@ actor LowLatencySession: PlaylistSource {
         switch await fetch(URL(string: match.uri)) {
         case .success(let copy) where copy.playlist.isClean && !copy.playlist.regularSegments.isEmpty:
           ads.closeOpenBreak()
+          replacedInBreak = true
           publish(.replaced("\(backup.type) · \(match.label)"))
           return serve(index, LowLatencyPlaylist.filter(copy.text, base: copy.url, dropPrefetch: false))
         case .success:
@@ -302,6 +307,7 @@ actor LowLatencySession: PlaylistSource {
 
   private func beginBreak() {
     inBreak = true
+    replacedInBreak = false
     breakID += 1
     breakStart = Date()
     contaminated = []
