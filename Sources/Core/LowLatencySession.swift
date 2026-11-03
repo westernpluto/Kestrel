@@ -257,7 +257,10 @@ actor LowLatencySession: PlaylistSource {
       return serve(index, body)
     }
 
-    // Ad video stitched into the stream.
+    // Ad video stitched into the stream. Where it sits in time is noted straight away: the
+    // player may already have some of it (the segment being made when the ad began), and that
+    // part needs hiding even when an ad-free copy takes over at once.
+    ads.update(with: main.playlist)
     let firstPoll = !inBreak
     if firstPoll { beginBreak() }
     if config.backupStreams {

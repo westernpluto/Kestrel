@@ -17,6 +17,7 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import UIKit
 import VideoToolbox
 
 @MainActor
@@ -65,9 +66,18 @@ final class KestrelEngine: NSObject {
   private var audioConfig: ADTS.Config?
   /// The decoder needs a keyframe first (at the start, and after a gap).
   private var waitingForKeyframe = true
+  /// The frames since the last keyframe (see `feedScreen`).
+  private var group: [GroupFrame] = []
+  /// The screen's layer missed frames in the background and needs bringing up to date.
+  private var screenBehind = false
+  /// The Picture in Picture copy (see `makeMirror`).
+  private(set) var mirrorLayer: AVSampleBufferDisplayLayer?
+  private var mirrorWaiting = true
   private var firstVideoTime: Int64?
   private var lastVideoTime: Int64?
   private var lastDecodeTime: Int64?
+  /// Frame times put on an even rhythm (see FrameGrid).
+  private var grid = FrameGrid()
   private var frameLength: Int64 = 3000
   /// Before the clock starts: the frames so far, held until where to start is known (then the
   /// ones before it are decoded but not shown).
@@ -184,6 +194,8 @@ final class KestrelEngine: NSObject {
     loads = []
     synchronizer.setRate(0, time: synchronizer.currentTime())
     displayLayer.flushAndRemoveImage()
+    mirrorLayer?.flushAndRemoveImage()
+    group = []
     audioRenderer.flush()
     closeDecoder()
   }
@@ -196,6 +208,7 @@ final class KestrelEngine: NSObject {
     heldVideo = []
     heldAudio = []
     lastDecodeTime = nil
+    grid.reset()
     videoFormat = nil
     parameterSets = nil
     audioFormat = nil
@@ -345,10 +358,14 @@ final class KestrelEngine: NSObject {
     }
     switch frame {
     case .video(let video):
-      let time = timeline.map(video.pts, isVideo: true)
+      let mapped = timeline.map(video.pts, isVideo: true)
       // The decode time moves with it (streams with B-frames decode in another order than they
       // show: each frame has both times, and the decoder needs the decode one).
-      let decodeTime = video.dts + (time - video.pts)
+      let rawDecode = video.dts + (mapped - video.pts)
+      // Both on an even rhythm: millisecond-rounded times made frames judder on 120 Hz screens.
+      grid.learn(decodeTime: rawDecode)
+      let time = grid.snap(mapped)
+      let decodeTime = min(grid.snap(rawDecode), time)
       if !load.dated, let date = load.planned.programDate {
         load.dated = true
         anchor = (time, date)
@@ -397,33 +414,20 @@ final class KestrelEngine: NSObject {
     guard let format = videoFormat else { return }
     if let last = lastDecodeTime, dts > last, dts - last < 9000 { frameLength = dts - last }
     lastDecodeTime = dts
-    guard
-      let sample = Self.videoSample(
-        payload, format: format, pts: time, dts: dts, duration: frameLength, keyframe: frame.isKeyframe,
-        hidden: hidden && decodeInLayer)
-    else { return }
-    if displayLayer.status == .failed || displayLayer.requiresFlushToResumeDecoding {
-      // The layer gave up (a frame it couldn't decode), or the app was in the background.
-      if displayLayer.status == .failed {
-        decoderFailures += 1
-        let error = displayLayer.error as NSError?
-        lastDecoderError = error.map { "layer \($0.domain) \($0.code)" } ?? "layer failed"
-        layerFailures = layerFailures.filter { Date().timeIntervalSince($0) < 30 } + [Date()]
-        if decodeInLayer, layerFailures.count >= 3 {
-          // It keeps failing on this stream: decode here instead.
-          decodeInLayer = false
-          ActivityLog.shared.add("Kestrel player: the display layer kept failing (\(lastDecoderError ?? "?")); decoding with VideoToolbox")
-        }
-      }
-      displayLayer.flush()
-      waitingForKeyframe = true
-      if !frame.isKeyframe { return }
-    }
+    let entry = GroupFrame(payload: payload, format: format, pts: time, dts: dts, duration: frameLength, keyframe: frame.isKeyframe)
     if decodeInLayer {
-      waitingForKeyframe = false
-      displayLayer.enqueue(sample)
+      // The picture on screen (left alone in the background: it can't decode there, and is
+      // brought back up to the frame showing when the app returns).
+      if UIApplication.shared.applicationState == .background {
+        // (Past the keyframe check above: the copy goes on from here.)
+        waitingForKeyframe = false
+        screenBehind = true
+      } else if !feedScreen(entry, hidden: hidden) {
+        return
+      }
+      if let mirrorLayer { feedMirror(mirrorLayer, entry, hidden: hidden) }
     } else {
-      guard let session = decoderSession(for: format) else {
+      guard let session = decoderSession(for: format), let sample = entry.sample(hidden: false) else {
         waitingForKeyframe = true
         return
       }
@@ -431,10 +435,98 @@ final class KestrelEngine: NSObject {
       if hidden { showFrom = max(showFrom, time + 1) }
       decode(sample, in: session)
     }
+    // Everything since the last keyframe, to bring the screen back up to date in one go.
+    if frame.isKeyframe { group = [] }
+    if group.count < 600 { group.append(entry) }
     videoFramesQueued += 1
     if hidden { videoFramesHidden += 1 }
     if firstVideoTime == nil { firstVideoTime = time }
     if lastVideoTime.map({ time > $0 }) ?? true { lastVideoTime = time }
+  }
+
+  /// A frame as handed to the decoder, kept to hand it again.
+  struct GroupFrame {
+    let payload: Data
+    let format: CMVideoFormatDescription
+    let pts: Int64
+    let dts: Int64
+    let duration: Int64
+    let keyframe: Bool
+
+    @MainActor func sample(hidden: Bool) -> CMSampleBuffer? {
+      KestrelEngine.videoSample(payload, format: format, pts: pts, dts: dts, duration: duration, keyframe: keyframe, hidden: hidden)
+    }
+  }
+
+  /// The screen's layer: false when the frame can't go (it's waiting for a keyframe).
+  private func feedScreen(_ entry: GroupFrame, hidden: Bool) -> Bool {
+    let layer = displayLayer
+    if layer.status == .failed {
+      // A frame it couldn't decode.
+      decoderFailures += 1
+      let error = layer.error as NSError?
+      lastDecoderError = error.map { "layer \($0.domain) \($0.code)" } ?? "layer failed"
+      layerFailures = layerFailures.filter { Date().timeIntervalSince($0) < 30 } + [Date()]
+      if layerFailures.count >= 3 {
+        // It keeps failing on this stream: decode here instead.
+        decodeInLayer = false
+        ActivityLog.shared.add("Kestrel player: the display layer kept failing (\(lastDecoderError ?? "?")); decoding with VideoToolbox")
+      }
+      layer.flush()
+      screenBehind = false
+      waitingForKeyframe = true
+      guard entry.keyframe else { return false }
+    } else if layer.requiresFlushToResumeDecoding || screenBehind {
+      // Back from the background: decode what came since the last keyframe out of sight, so the
+      // picture is the one playing now straight away (not the one from before, or nothing until
+      // the next keyframe up to two seconds later).
+      layer.flush()
+      screenBehind = false
+      if !entry.keyframe {
+        guard group.first?.keyframe == true else {
+          waitingForKeyframe = true
+          return false
+        }
+        let showing = Int64(synchronizer.currentTime().convertScale(Self.clock, method: .default).value)
+        for earlier in group {
+          if let sample = earlier.sample(hidden: earlier.pts < showing - frameLength) { layer.enqueue(sample) }
+        }
+      }
+    }
+    if waitingForKeyframe {
+      guard entry.keyframe else { return false }
+      waitingForKeyframe = false
+    }
+    guard let sample = entry.sample(hidden: hidden) else { return false }
+    layer.enqueue(sample)
+    return true
+  }
+
+  /// The Picture in Picture copy: when it can't decode (the app's in the background without
+  /// Picture in Picture), it starts again from the next keyframe.
+  private func feedMirror(_ layer: AVSampleBufferDisplayLayer, _ entry: GroupFrame, hidden: Bool) {
+    if layer.status == .failed || layer.requiresFlushToResumeDecoding {
+      layer.flush()
+      mirrorWaiting = true
+    }
+    if mirrorWaiting {
+      guard entry.keyframe else { return }
+      mirrorWaiting = false
+    }
+    if let sample = entry.sample(hidden: hidden) { layer.enqueue(sample) }
+  }
+
+  /// A second picture of the same video for Picture in Picture, kept behind the one on screen:
+  /// the system puts its "playing in Picture in Picture" placeholder on the layer it takes, and on
+  /// the screen's own layer that showed for a moment each time the window came back.
+  func makeMirror() -> AVSampleBufferDisplayLayer {
+    if let mirrorLayer { return mirrorLayer }
+    let layer = AVSampleBufferDisplayLayer()
+    layer.videoGravity = displayLayer.videoGravity
+    synchronizer.addRenderer(layer)
+    mirrorLayer = layer
+    mirrorWaiting = true
+    return layer
   }
 
   // MARK: Decoding (VideoToolbox)
@@ -503,7 +595,15 @@ final class KestrelEngine: NSObject {
     CMSampleBufferCreateReadyWithImageBuffer(
       allocator: kCFAllocatorDefault, imageBuffer: image, formatDescription: format, sampleTiming: &timing, sampleBufferOut: &sample)
     guard let sample else { return }
-    displayLayer.enqueue(sample)
+    // (A picture layer that stopped in the background just needs flushing.)
+    if UIApplication.shared.applicationState != .background {
+      if displayLayer.status == .failed || displayLayer.requiresFlushToResumeDecoding { displayLayer.flush() }
+      displayLayer.enqueue(sample)
+    }
+    if let mirrorLayer {
+      if mirrorLayer.status == .failed || mirrorLayer.requiresFlushToResumeDecoding { mirrorLayer.flush() }
+      mirrorLayer.enqueue(sample)
+    }
     framesShown += 1
   }
 

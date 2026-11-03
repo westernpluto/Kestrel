@@ -401,6 +401,74 @@ struct StreamTimeline {
   }
 }
 
+/// Evens out frame times that were rounded to whole milliseconds on the way in (RTMP carries
+/// milliseconds: 60 frames a second arrive 16, 17, 17 ms apart instead of 16.67). On a 120 Hz
+/// screen that jitter lands some frames a refresh early or late, so one shows twice as long as
+/// the next: a fast, constant judder. Once the rhythm matches a standard frame rate, each time is
+/// put on that rate's exact grid (never more than a third of a frame from where it was, so
+/// sound stays in step and decode order is kept).
+struct FrameGrid {
+  /// The exact frame length on the 90 kHz clock, once known.
+  private(set) var nominal: Double?
+  private var base: Int64?
+  /// The current run of evenly following frames: where it began and how many since.
+  private var runStart: Int64?
+  private var runFrames = 0
+  private var lastDecode: Int64?
+
+  static let rates: [Double] = [24, 25, 30, 48, 50, 60, 120, 24000.0 / 1001, 30000.0 / 1001, 60000.0 / 1001]
+
+  init() {}
+
+  /// Learns from a frame's decode time (these come in order).
+  mutating func learn(decodeTime dts: Int64) {
+    defer { lastDecode = dts }
+    guard let last = lastDecode, dts > last, dts - last < 9000 else {
+      runStart = dts
+      runFrames = 0
+      return
+    }
+    runFrames += 1
+    // The average over the whole run: millisecond rounding is worth under a millisecond in all.
+    guard let start = runStart, runFrames >= 20 else { return }
+    let average = Double(dts - start) / Double(runFrames)
+    // How close counts as a match: two milliseconds of rounding over the run, so 60 and 59.94
+    // (a tenth of a percent apart) are told apart once the run is a few seconds long.
+    let tolerance = 0.0003 + 180 / Double(dts - start)
+    // The current rate stays while it fits (no flipping between close ones).
+    if let nominal, abs(nominal - average) / nominal < tolerance { return }
+    let match = Self.rates.map { 90_000 / $0 }.min { abs($0 - average) < abs($1 - average) }
+    if let match, abs(match - average) / match < tolerance {
+      if nominal != match { base = nil }
+      nominal = match
+    } else if runFrames >= 60 {
+      nominal = nil
+      base = nil
+    }
+  }
+
+  /// A time on the grid (as is, until the rate is known).
+  mutating func snap(_ time: Int64) -> Int64 {
+    guard let nominal else { return time }
+    guard let base else {
+      self.base = time
+      return time
+    }
+    let steps = (Double(time - base) / nominal).rounded()
+    let snapped = base + Int64((steps * nominal).rounded())
+    if Double(abs(snapped - time)) > nominal / 3 {
+      // Off the grid (a jump, a new rendition): a new grid from here.
+      self.base = time
+      return time
+    }
+    return snapped
+  }
+
+  mutating func reset() {
+    self = FrameGrid()
+  }
+}
+
 // MARK: - Which segments to fetch
 
 /// Decides, from each new playlist, which segments to fetch next and in what order: every

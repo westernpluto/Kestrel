@@ -226,7 +226,8 @@ struct AdTimeline {
 
   mutating func update(with playlist: HLSMediaPlaylist, now: Date = Date()) {
     markerActive = playlist.adMarkerActive
-    for segment in playlist.regularSegments where segment.isAd {
+    // (Prefetch ones too: the player is fetching those already.)
+    for segment in playlist.segments where segment.isAd {
       guard let start = segment.pdt, let end = segment.end else { continue }
       insert(start...end)
       lastAdEnd = max(lastAdEnd ?? end, end)

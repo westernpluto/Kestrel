@@ -318,6 +318,46 @@ func testMediaParsing() {
   check(csai.segments.filter(\.isPrefetch).count == 2, "prefetch kept during client-side break")
 }
 
+func testFrameGrid() {
+  // 60 fps stamped in whole milliseconds (16, 17, 17 ms): put on the exact 1/60 s grid.
+  var grid = FrameGrid()
+  var ms = 1000.0
+  var out: [Int64] = []
+  for i in 0..<300 {
+    let raw = Int64(ms.rounded(.down)) * 90
+    ms += 1000.0 / 60
+    grid.learn(decodeTime: raw)
+    let snapped = grid.snap(raw)
+    check(abs(snapped - raw) <= 500, "frame \(i) moved at most a third of a frame")
+    out.append(snapped)
+  }
+  check(grid.nominal == 1500, "60 fps found")
+  let tail = zip(out.dropFirst(40), out.dropFirst(41)).map { $1 - $0 }
+  check(tail.allSatisfy { $0 == 1500 }, "even rhythm once known: \(Set(tail))")
+  // A jump starts a new grid instead of pulling frames toward the old one.
+  let jumped = grid.snap(out.last! + 1500 * 10 + 700)
+  check(jumped == out.last! + 1500 * 10 + 700, "jump kept as is")
+  // 59.94 fps in milliseconds: told apart from 60 within a few seconds and kept even after.
+  var ntsc = FrameGrid()
+  var t = 0.0
+  var last: Int64?
+  var steps: Set<Int64> = []
+  for i in 0..<1200 {
+    let raw = Int64(t.rounded(.down)) * 90
+    t += 1001.0 / 60
+    ntsc.learn(decodeTime: raw)
+    let snapped = ntsc.snap(raw)
+    if i > 600, let last { steps.insert(snapped - last) }
+    last = snapped
+  }
+  check(ntsc.nominal == 90_000 / (60000.0 / 1001), "59.94 fps found")
+  check(steps.isSubset(of: [1501, 1502]), "59.94 kept even: \(steps)")
+  // An odd rate is left alone.
+  var odd = FrameGrid()
+  for i in 0..<100 { odd.learn(decodeTime: Int64(i) * 2200) }
+  check(odd.nominal == nil && odd.snap(12345) == 12345, "unknown rate untouched")
+}
+
 func testAdTimeline() {
   let fake = FakeTwitch()
   var ads = AdTimeline()
@@ -1902,6 +1942,7 @@ testMutedParts()
 testMultiviewLayout()
 testStreamArrival()
 testMediaParsing()
+testFrameGrid()
 testAdTimeline()
 testTimelineAndRender()
 testSession(lowLatency: true)

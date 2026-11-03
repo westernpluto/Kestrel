@@ -75,8 +75,9 @@ final class KestrelController {
       engine.setMuted(userMuted)
       engine.setVolume(volume)
       self.engine = engine
-      model?.kestrelEngineReady()
+      // (Picture in Picture first: its copy of the picture goes in with the player's view.)
       setUpPictureInPicture(engine)
+      model?.kestrelEngineReady()
       engine.start()
       ActivityLog.shared.add("Kestrel player: \(login) at \(found[start].label)")
     } catch StreamSession.StartError.offline {
@@ -155,7 +156,7 @@ final class KestrelController {
     guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
     let delegate = KestrelPictureInPicture(controller: self)
     let controller = AVPictureInPictureController(
-      contentSource: .init(sampleBufferDisplayLayer: engine.displayLayer, playbackDelegate: delegate))
+      contentSource: .init(sampleBufferDisplayLayer: engine.makeMirror(), playbackDelegate: delegate))
     controller.canStartPictureInPictureAutomaticallyFromInline = true
     pipObservation = controller.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
       let active = pip.isPictureInPictureActive
@@ -216,6 +217,7 @@ final class KestrelController {
 
   func setFill(_ fill: Bool) {
     engine?.displayLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+    engine?.mirrorLayer?.videoGravity = fill ? .resizeAspectFill : .resizeAspect
   }
 
   func stats() -> [StatLine] {
@@ -275,19 +277,28 @@ struct KestrelVideoView: UIViewRepresentable {
   let engine: KestrelEngine
   var fill: Bool
 
+  /// The screen's layer on top, the Picture in Picture copy right behind it (see
+  /// `KestrelEngine.makeMirror`).
   final class LayerView: UIView {
-    var videoLayer: AVSampleBufferDisplayLayer? {
-      didSet {
-        oldValue?.removeFromSuperlayer()
-        if let videoLayer { layer.addSublayer(videoLayer) }
-        setNeedsLayout()
-      }
+    private(set) var videoLayer: AVSampleBufferDisplayLayer?
+    private(set) var mirrorLayer: AVSampleBufferDisplayLayer?
+
+    func show(_ video: AVSampleBufferDisplayLayer, mirror: AVSampleBufferDisplayLayer?) {
+      guard video !== videoLayer || mirror !== mirrorLayer else { return }
+      videoLayer?.removeFromSuperlayer()
+      mirrorLayer?.removeFromSuperlayer()
+      videoLayer = video
+      mirrorLayer = mirror
+      if let mirror { layer.addSublayer(mirror) }
+      layer.addSublayer(video)
+      setNeedsLayout()
     }
 
     override func layoutSubviews() {
       super.layoutSubviews()
       CATransaction.begin()
       CATransaction.setDisableActions(true)
+      mirrorLayer?.frame = bounds
       videoLayer?.frame = bounds
       CATransaction.commit()
     }
@@ -296,15 +307,16 @@ struct KestrelVideoView: UIViewRepresentable {
   func makeUIView(context: Context) -> LayerView {
     let view = LayerView()
     view.backgroundColor = .black
-    view.videoLayer = engine.displayLayer
-    engine.displayLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+    updateUIView(view, context: context)
     return view
   }
 
   func updateUIView(_ view: LayerView, context: Context) {
-    if view.videoLayer !== engine.displayLayer { view.videoLayer = engine.displayLayer }
+    view.show(engine.displayLayer, mirror: engine.mirrorLayer)
     let gravity: AVLayerVideoGravity = fill ? .resizeAspectFill : .resizeAspect
-    if engine.displayLayer.videoGravity != gravity { engine.displayLayer.videoGravity = gravity }
+    for layer in [engine.displayLayer, engine.mirrorLayer].compactMap({ $0 }) where layer.videoGravity != gravity {
+      layer.videoGravity = gravity
+    }
   }
 }
 
