@@ -100,7 +100,8 @@ final class TVPlayerModel: ObservableObject {
   private func fallBack(_ channel: Channel, adBlocking: Bool, reason: String) {
     guard engine != nil, !stopped else { return }
     ActivityLog.shared.add("Kestrel player (Apple TV): \(reason); playing in the Apple player instead")
-    engine?.stop()
+    engine?.shutDown()
+    engine?.audio.shutDown()
     engine = nil
     lowLatencySession = nil
     phase = .loading
@@ -187,7 +188,8 @@ final class TVPlayerModel: ObservableObject {
 
   func stop() {
     stopped = true
-    engine?.stop()
+    engine?.shutDown()
+    engine?.audio.shutDown()
     engine = nil
     lowLatencySession = nil
     player.pause()

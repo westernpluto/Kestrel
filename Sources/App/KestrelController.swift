@@ -123,6 +123,8 @@ final class KestrelController {
     loadTask?.cancel()
     if let engine { ChannelMargins.remember(engine.catchUp.targetBuffer, for: login, network: NetworkWatch.shared.memoryKey) }
     engine?.stop()
+    // Its downloads' session holds it (a URLSession keeps its delegate): let go of it for good.
+    engine?.shutDown()
     // The sound engine too: left running, it held the audio session (switching that off then
     // waited for it).
     engine?.audio.shutDown()
@@ -301,10 +303,11 @@ struct KestrelVideoView: UIViewRepresentable {
   /// The screen's layer on top, the Picture in Picture copy right behind it (see
   /// `KestrelEngine.makeMirror`).
   final class LayerView: UIView {
-    /// The Picture in Picture copy lives in a view of its own, behind the picture: while it hands
-    /// the window back, the system hides the copy's container for a moment, and when the screen's
-    /// picture shared it, the picture went black for a few frames too (only for single streams:
-    /// multi-view's window works another way).
+    /// The Picture in Picture copy lives outside this view altogether: in a view at the very back
+    /// of the window, kept over the same spot (the window grows out of it and goes back into it).
+    /// As the system hands the window back it blanks what's around the copy for a few frames; with
+    /// the copy in here (even in a view of its own) the picture went black then, though it had a
+    /// frame up the whole time (only for single streams: multi-view's window works another way).
     private let mirrorHost = UIView()
     /// The screen's layers, bottom to top: a retiring layer, a still of the last frame (back from
     /// Picture in Picture), the screen's layer.
@@ -317,8 +320,31 @@ struct KestrelVideoView: UIViewRepresentable {
       for host in [mirrorHost, screenHost] {
         host.isUserInteractionEnabled = false
         host.backgroundColor = .clear
-        addSubview(host)
       }
+      addSubview(screenHost)
+    }
+
+    deinit {
+      let host = mirrorHost
+      DispatchQueue.main.async { host.removeFromSuperview() }
+    }
+
+    override func didMoveToWindow() {
+      super.didMoveToWindow()
+      if let window {
+        if mirrorHost.superview !== window { window.insertSubview(mirrorHost, at: 0) }
+        placeMirror()
+      }
+    }
+
+    /// The copy's view over this view's spot in the window.
+    func placeMirror() {
+      guard let window, mirrorHost.superview === window else { return }
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      mirrorHost.frame = convert(bounds, to: window)
+      mirror?.frame = mirrorHost.bounds
+      CATransaction.commit()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -357,11 +383,10 @@ struct KestrelVideoView: UIViewRepresentable {
       super.layoutSubviews()
       CATransaction.begin()
       CATransaction.setDisableActions(true)
-      mirrorHost.frame = bounds
       screenHost.frame = bounds
-      mirror?.frame = bounds
       for layer in shown { layer.frame = bounds }
       CATransaction.commit()
+      placeMirror()
     }
   }
 
@@ -375,6 +400,8 @@ struct KestrelVideoView: UIViewRepresentable {
   func updateUIView(_ view: LayerView, context: Context) {
     let engine = self.engine
     view.show(engine.displayLayer, retiring: engine.retiringLayer, cover: engine.coverLayer, mirror: engine.mirrorLayer)
+    view.placeMirror()
+    engine.placeMirror = { [weak view] in view?.placeMirror() }
     engine.onScreenLayers = { [weak view, weak engine] in
       guard let view, let engine else { return }
       view.show(engine.displayLayer, retiring: engine.retiringLayer, cover: engine.coverLayer, mirror: engine.mirrorLayer)
@@ -392,7 +419,10 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
   // The picture in the app steps aside while the window is up (the window plays the copy; both
   // playing at once looked like a second video), and is back as the window heads home.
   func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-    MainActor.assumeIsolated { controller?.engine?.screenHiddenForPictureInPicture = true }
+    MainActor.assumeIsolated {
+      controller?.engine?.placeMirror?()
+      controller?.engine?.screenHiddenForPictureInPicture = true
+    }
   }
 
   func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {

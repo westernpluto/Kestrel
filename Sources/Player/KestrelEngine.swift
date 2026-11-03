@@ -56,6 +56,8 @@ final class KestrelEngine: NSObject {
   /// Told when the screen's layers change (the view puts the new one on top of the retiring one).
   /// Without it, the layer is caught up in place (flushed: black until it has a picture again).
   var onScreenLayers: (() -> Void)?
+  /// Puts the Picture in Picture copy's view over the picture's spot again (set by the view).
+  var placeMirror: (() -> Void)?
   /// The sound, decoded here and played through AVAudioEngine; it's also the clock (see `syncClock`).
   let audio = AudioOutput()
   /// The picture's clock: on the host clock, kept on the sound's (every screen layer runs on it).
@@ -270,6 +272,14 @@ final class KestrelEngine: NSObject {
     audioHistory = []
     lastAudioTime = nil
     closeDecoder()
+  }
+
+  /// For good: the downloads' session is let go (it holds its delegate, this engine, until then).
+  func shutDown() {
+    stop()
+    urlSession.invalidateAndCancel()
+    placeMirror = nil
+    onScreenLayers = nil
   }
 
   /// Starts over at the live edge (after a pause, a long dropout, a failure).
