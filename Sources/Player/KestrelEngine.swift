@@ -84,6 +84,13 @@ final class KestrelEngine: NSObject {
   /// them, and still read "background" while the app was already coming back).
   private var inBackground = UIApplication.shared.applicationState == .background
   private var lifecycleTokens: [NSObjectProtocol] = []
+  /// The last few seconds of sound handed over (to refill after an automatic flush).
+  private var audioHistory: [(AudioFrame, Int64)] = []
+  private var lastAudioTime: Int64?
+  private(set) var audioAutoFlushes = 0
+  private(set) var lateAudio = 0
+  private(set) var audioGaps = 0
+  private(set) var largestAudioGap = 0.0
   /// The Picture in Picture copy (see `makeMirror`).
   private(set) var mirrorLayer: AVSampleBufferDisplayLayer?
   private var mirrorWaiting = true
@@ -181,6 +188,13 @@ final class KestrelEngine: NSObject {
     super.init()
     let center = NotificationCenter.default
     lifecycleTokens.append(
+      center.addObserver(forName: AVSampleBufferAudioRenderer.wasFlushedAutomaticallyNotification, object: audioRenderer, queue: .main) {
+        [weak self] note in
+        let value = note.userInfo?[AVSampleBufferAudioRenderer.flushTimeKey] as? NSValue
+        let time = value?.timeValue ?? .invalid
+        MainActor.assumeIsolated { self?.audioFlushedAutomatically(at: time) }
+      })
+    lifecycleTokens.append(
       center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
         MainActor.assumeIsolated { self?.inBackground = true }
       })
@@ -228,6 +242,8 @@ final class KestrelEngine: NSObject {
     mirrorLayer?.flushAndRemoveImage()
     group = []
     audioRenderer.flush()
+    audioHistory = []
+    lastAudioTime = nil
     closeDecoder()
   }
 
@@ -757,14 +773,40 @@ final class KestrelEngine: NSObject {
     }
   }
 
-  private func enqueueAudio(_ frame: AudioFrame, time: Int64) {
+  private func enqueueAudio(_ frame: AudioFrame, time: Int64, refill: Bool = false) {
     if frame.config != audioConfig || audioFormat == nil {
       audioFormat = Self.aacFormat(frame.config)
       audioConfig = frame.config
     }
     guard let format = audioFormat, let sample = Self.audioSample(frame.data, format: format, pts: time) else { return }
+    if !refill {
+      // What the stats show about the sound: arriving after its time, or not following on.
+      if clockRunning, time < now { lateAudio += 1 }
+      if let last = lastAudioTime {
+        let step = Int64(1024 * 90_000 / max(frame.config.sampleRate, 8000))
+        let off = time - last - step
+        if abs(off) > 180 {
+          audioGaps += 1
+          largestAudioGap = max(largestAudioGap, Double(off) / 90)
+        }
+      }
+      lastAudioTime = time
+      audioHistory.append((frame, time))
+      if audioHistory.count > 250 { audioHistory.removeFirst(audioHistory.count - 250) }
+    }
     audioRenderer.enqueue(sample)
     audioFramesQueued += 1
+  }
+
+  /// The audio renderer dropped what it had queued by itself (sound that reached it too late,
+  /// a route change): silence until new sound came. What's kept from the flush time on goes back
+  /// in at once, as Apple advises.
+  private func audioFlushedAutomatically(at flushTime: CMTime) {
+    audioAutoFlushes += 1
+    let from = flushTime.isValid ? Int64(flushTime.convertScale(Self.clock, method: .default).value) : now
+    ActivityLog.shared.add(
+      String(format: "Kestrel player: the sound was flushed by the system at %.2f s; refilled", Double(from) / Double(Self.clock)))
+    for (frame, time) in audioHistory where time >= from { enqueueAudio(frame, time: time, refill: true) }
   }
 
   /// Starts the clock once there's video: just behind the newest frame in hand (the stream's

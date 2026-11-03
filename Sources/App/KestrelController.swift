@@ -239,6 +239,11 @@ final class KestrelController {
     lines.append(StatLine(label: "Stalls", value: "\(engine.stalls)"))
     lines.append(
       StatLine(
+        label: "Sound",
+        value: "\(engine.audioAutoFlushes) system flushes, \(engine.lateAudio) late, \(engine.audioGaps) gaps"
+          + (engine.audioGaps > 0 ? String(format: " (largest %.0f ms)", engine.largestAudioGap) : "")))
+    lines.append(
+      StatLine(
         label: "Arrival",
         value: String(format: "longest gap %.2f s, segment handoff %.2f s (last minute)", engine.longestArrivalGap, engine.longestHandoffWait)))
     lines.append(StatLine(label: "Quality mode", value: engine.autoQuality ? "best that plays smoothly" : "picked"))
