@@ -8,6 +8,8 @@ enum PlayerEngine: String {
   case lowLatency
   /// Apple's AVPlayer with Kestrel's playlist filtering in front of it.
   case standard
+  /// Kestrel's own low-latency player (KestrelEngine): experimental, chosen in Settings.
+  case kestrel
 
   static var isLowLatencyBuilt: Bool {
     #if canImport(AmazonIVSPlayer)
@@ -17,5 +19,8 @@ enum PlayerEngine: String {
     #endif
   }
 
-  static var preferredDefault: PlayerEngine { isLowLatencyBuilt ? .lowLatency : .standard }
+  static var preferredDefault: PlayerEngine {
+    if AppSettings.shared.kestrelPlayer { return .kestrel }
+    return isLowLatencyBuilt ? .lowLatency : .standard
+  }
 }

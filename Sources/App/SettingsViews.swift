@@ -180,6 +180,14 @@ struct PlaybackSettingsView: View {
         }
       }
       Section {
+        Picker("Player", selection: $settings.kestrelPlayer) {
+          Text(PlayerEngine.isLowLatencyBuilt ? "Amazon low latency" : "Apple").tag(false)
+          Text("Kestrel (experimental)").tag(true)
+        }
+      } footer: {
+        Text("Kestrel's own player downloads each piece of the stream while it's still being made and shows it as it arrives, aiming at about a second behind live. It's new: if a stream misbehaves, switch back. Applies from the next stream you open; multi-view keeps the regular player.")
+      }
+      Section {
         Toggle("Background audio", isOn: $settings.backgroundAudio)
       } footer: {
         Text("Keeps the sound playing when you leave Kestrel or lock the phone.")

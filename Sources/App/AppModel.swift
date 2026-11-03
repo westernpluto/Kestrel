@@ -125,6 +125,8 @@ final class AppSettings: ObservableObject {
   /// show black for a moment on the way back), or a seamless one without buttons (see
   /// LowLatencyController.pipContent).
   @Published var pipControls: Bool { didSet { defaults.set(pipControls, forKey: "pipControls") } }
+  /// Live streams play in Kestrel's own low-latency player (experimental) instead of Amazon's.
+  @Published var kestrelPlayer: Bool { didSet { defaults.set(kestrelPlayer, forKey: "kestrelPlayer") } }
   // The user's own HTTP proxy (AdBlocking.customProxy).
   @Published var proxyHost: String { didSet { defaults.set(proxyHost, forKey: "proxyHost"); applyProxy() } }
   @Published var proxyPort: String { didSet { defaults.set(proxyPort, forKey: "proxyPort"); applyProxy() } }
@@ -159,6 +161,7 @@ final class AppSettings: ObservableObject {
     multiviewPiPAll = defaults.bool(forKey: "multiviewPiPAll")
     raidMode = RaidMode(rawValue: defaults.string(forKey: "raidMode") ?? "") ?? .follow
     pipControls = defaults.bool(forKey: "pipControls")
+    kestrelPlayer = defaults.bool(forKey: "kestrelPlayer")
     proxyHost = defaults.string(forKey: "proxyHost") ?? ""
     proxyPort = defaults.string(forKey: "proxyPort") ?? ""
     proxyUsername = defaults.string(forKey: "proxyUsername") ?? ""

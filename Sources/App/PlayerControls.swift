@@ -196,15 +196,19 @@ struct PlayerVideoArea: View {
   @ViewBuilder
   private var surface: some View {
     ZStack {
-      #if canImport(AmazonIVSPlayer)
-        if let controller = model.lowLatency {
-          LowLatencyVideoView(controller: controller, fill: model.fillsScreen)
-        } else {
+      if let engine = model.kestrelEngine {
+        KestrelVideoView(engine: engine, fill: model.fillsScreen)
+      } else {
+        #if canImport(AmazonIVSPlayer)
+          if let controller = model.lowLatency {
+            LowLatencyVideoView(controller: controller, fill: model.fillsScreen)
+          } else {
+            ApplePlayerSurface(model: model, fill: model.fillsScreen)
+          }
+        #else
           ApplePlayerSurface(model: model, fill: model.fillsScreen)
-        }
-      #else
-        ApplePlayerSurface(model: model, fill: model.fillsScreen)
-      #endif
+        #endif
+      }
       // Rewinding: the broadcast's VOD plays on top once it has a picture; the live player stays
       // underneath, paused on its last frame, so the switch never flashes black.
       if model.rewind != nil {

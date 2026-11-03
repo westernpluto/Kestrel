@@ -203,9 +203,27 @@ final class PlayerModel: ObservableObject {
   private var tileMaxHeight: Int?
   private(set) var volume: Float = 1
 
+  /// Kestrel's own live player (see KestrelController), when it's the one playing.
+  private(set) var kestrel: KestrelController?
+  /// Its engine once it's set up (the video view shows its picture).
+  @Published private(set) var kestrelEngine: KestrelEngine?
+
+  func kestrelEngineReady() {
+    kestrelEngine = kestrel?.engine
+  }
+
+  private func startKestrel(_ channel: Channel) {
+    let controller = KestrelController(login: channel.login, model: self)
+    kestrel = controller
+    controller.start()
+    if userMuted { controller.setMuted(true) }
+    if volume < 1 { controller.setVolume(volume) }
+  }
+
   /// This stream's own volume (multi-view, with several heard at once).
   func setVolume(_ value: Float) {
     volume = min(1, max(0, value))
+    kestrel?.setVolume(volume)
     #if canImport(AmazonIVSPlayer)
       lowLatency?.setVolume(volume)
     #endif
@@ -214,6 +232,10 @@ final class PlayerModel: ObservableObject {
 
   func setMuted(_ muted: Bool) {
     userMuted = muted
+    if let kestrel {
+      kestrel.setMuted(muted)
+      return
+    }
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
         lowLatency.setMuted(muted)
@@ -271,6 +293,16 @@ final class PlayerModel: ObservableObject {
       Self.openedOffline.remove(channel.login.lowercased())
       lastInfoRefresh = Date()
       Task { await refreshInfo() }
+      if engine == .kestrel {
+        if isTile {
+          // Multi-view keeps the regular player (its tiles lean on its sizing and PiP).
+          engine = PlayerEngine.isLowLatencyBuilt ? .lowLatency : .standard
+        } else {
+          startKestrel(channel)
+          startTimer()
+          return
+        }
+      }
       #if canImport(AmazonIVSPlayer)
         if engine == .lowLatency {
           startLowLatency(channel)
@@ -639,6 +671,11 @@ final class PlayerModel: ObservableObject {
       }
     }
     guard quality.id != selectedQuality else { return }
+    if let kestrel {
+      selectedQuality = quality.id
+      kestrel.select(quality.id)
+      return
+    }
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
         selectedQuality = quality.id
@@ -659,6 +696,11 @@ final class PlayerModel: ObservableObject {
   func goLive() {
     if isRewinding {
       returnToLive()
+      return
+    }
+    if let kestrel {
+      kestrel.goLive()
+      isPaused = false
       return
     }
     #if canImport(AmazonIVSPlayer)
@@ -686,6 +728,11 @@ final class PlayerModel: ObservableObject {
     defer { NowPlaying.shared.update(self) }
     if isRewinding {
       if paused { rewindPlayer.pause() } else { rewindPlayer.play() }
+      isPaused = paused
+      return
+    }
+    if let kestrel {
+      kestrel.setPaused(paused)
       isPaused = paused
       return
     }
@@ -781,6 +828,7 @@ final class PlayerModel: ObservableObject {
 
   func setFill(_ fill: Bool) {
     fillsScreen = fill
+    kestrel?.setFill(fill)
     #if canImport(AmazonIVSPlayer)
       lowLatency?.setFill(fill)
     #endif
@@ -852,6 +900,9 @@ final class PlayerModel: ObservableObject {
   /// Stops whichever player is running, keeping the model usable.
   private func teardownPlayback() {
     stopRewindPlayback()
+    kestrel?.stop()
+    kestrel = nil
+    kestrelEngine = nil
     #if canImport(AmazonIVSPlayer)
       lowLatency?.stop()
       lowLatency = nil
@@ -1004,6 +1055,11 @@ final class PlayerModel: ObservableObject {
     }
     let wantsStats = AppSettings.shared.showVideoStats
     if !wantsStats, !stats.isEmpty { stats = [] }
+    if let kestrel {
+      kestrel.tick()
+      if wantsStats { stats = kestrel.stats() }
+      return
+    }
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
         lowLatency.tick()
@@ -1344,6 +1400,10 @@ final class PlayerModel: ObservableObject {
   }
 
   private func suspendLive() {
+    if let kestrel {
+      kestrel.setPaused(true)
+      return
+    }
     #if canImport(AmazonIVSPlayer)
       if let lowLatency {
         lowLatency.suspend()

@@ -1679,6 +1679,103 @@ func testDeviceLogin() {
   check(session?.clientID == nil && session?.refreshToken == nil && session?.login == "l", "old session decodes")
 }
 
+func testTSDemux() {
+  let dir = URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent()
+  guard let segment = try? Data(contentsOf: dir.appendingPathComponent("twitch_160p_segment.ts")) else {
+    check(false, "fixture missing")
+    return
+  }
+  // All at once.
+  var whole = TSDemuxer()
+  let all = whole.feed(segment) + whole.flush()
+  let video = all.compactMap { if case .video(let f) = $0 { return f } else { return nil } }
+  let audio = all.compactMap { if case .audio(let f) = $0 { return f } else { return nil } }
+  check(video.count == 60, "video frames \(video.count)")
+  check(video.first?.isKeyframe == true && video.first?.codec == .h264, "starts on a keyframe")
+  let steps = Set(zip(video, video.dropFirst()).map { $1.pts - $0.pts })
+  check(steps.allSatisfy { (2900...3100).contains($0) }, "30 fps steps \(steps)")
+  check(audio.count >= 80 && audio.count <= 100, "audio frames \(audio.count)")
+  check(audio.first.map { [44100, 48000].contains($0.config.sampleRate) && $0.config.objectType == 2 } ?? false, "AAC LC \(String(describing: audio.first?.config))")
+  check(audio.first?.config.audioSpecificConfig.count == 2, "audio specific config")
+  let audioSteps = Set(zip(audio, audio.dropFirst()).map { $1.pts - $0.pts })
+  check(audioSteps.allSatisfy { (1800...2200).contains($0) }, "audio steps \(audioSteps)")
+  // In awkward pieces (as a segment arrives over the network): exactly the same frames.
+  var pieces = TSDemuxer()
+  var chunked: [DemuxedFrame] = []
+  var offset = 0
+  var size = 1
+  while offset < segment.count {
+    let end = min(segment.count, offset + size)
+    chunked += pieces.feed(segment.subdata(in: offset..<end))
+    offset = end
+    size = (size * 7 + 13) % 3001 + 1
+  }
+  chunked += pieces.flush()
+  check(chunked.count == all.count, "chunked count \(chunked.count) vs \(all.count)")
+  check(Set(chunked.map(\.pts)) == Set(all.map(\.pts)), "chunked frames match")
+  // Frames come out as soon as the next one starts (not only at the end).
+  var early = TSDemuxer()
+  let half = early.feed(segment.prefix(segment.count / 2))
+  check(half.count > 40, "frames out while it's still arriving: \(half.count)")
+  // The decoder's form: parameter sets out of the first frame, the rest length-prefixed.
+  if let first = video.first {
+    let units = AnnexB.units(first.data)
+    let sets = H264.parameterSets(units)
+    check(sets != nil && H264.type(sets!.sps) == 7 && H264.type(sets!.pps) == 8, "SPS/PPS found")
+    let sample = H264.sample(units)
+    let firstLength = sample.prefix(4).reduce(0) { $0 << 8 | Int($1) }
+    check(firstLength > 0 && firstLength + 4 <= sample.count, "length-prefixed sample")
+    check(!units.filter { H264.type($0) == 5 }.isEmpty, "IDR slice present")
+  }
+
+  // One timeline across segments: a jump (a discontinuity) carries on right after the last frame.
+  var timeline = StreamTimeline()
+  timeline.beginSegment(firstPTS: 1_000_000, discontinuity: false)
+  var t = Int64(1_000_000)
+  for _ in 0..<60 {
+    _ = timeline.map(t, isVideo: true)
+    t += 3000
+  }
+  let lastBefore = timeline.lastTime ?? 0
+  timeline.beginSegment(firstPTS: 50_000, discontinuity: true)
+  let afterJump = timeline.map(50_000, isVideo: true)
+  check(afterJump == lastBefore + 3000, "carries on after a discontinuity: \(afterJump) vs \(lastBefore)")
+  // An unmarked jump of minutes is treated the same way.
+  timeline.beginSegment(firstPTS: 90_000_000, discontinuity: false)
+  check(timeline.map(90_000_000, isVideo: true) == afterJump + 3000, "unmarked jump")
+  // Following on normally changes nothing.
+  timeline.beginSegment(firstPTS: 90_003_000, discontinuity: false)
+  check(timeline.map(90_003_000, isVideo: true) == afterJump + 6000, "no jump, no change")
+
+  // Which segments to fetch.
+  func playlist(_ first: Int, count: Int, prefetch: Int, discontinuityAt: Int? = nil) -> String {
+    var lines = ["#EXTM3U", "#EXT-X-TARGETDURATION:5", "#EXT-X-MEDIA-SEQUENCE:\(first)"]
+    for i in 0..<count {
+      if first + i == discontinuityAt { lines.append("#EXT-X-DISCONTINUITY") }
+      lines.append("#EXT-X-PROGRAM-DATE-TIME:2026-11-03T00:00:\(String(format: "%02d", (2 * (first + i)) % 60)).000Z")
+      lines.append("#EXTINF:2.000,live")
+      lines.append("https://cdn/s\(first + i).ts")
+    }
+    for p in 0..<prefetch { lines.append("#EXT-X-TWITCH-PREFETCH:https://cdn/s\(first + count + p).ts") }
+    return lines.joined(separator: "\n")
+  }
+  var planner = LiveSegmentPlanner(startBack: 1)
+  let start = planner.plan(playlist(100, count: 10, prefetch: 2))
+  check(start.map(\.sequence) == [108, 109, 110, 111], "starts near the edge: \(start.map(\.sequence))")
+  check(start.map(\.live) == [false, false, true, true], "prefetch marked live")
+  check(start[2].programDate != nil, "prefetch dated")
+  let next = planner.plan(playlist(101, count: 10, prefetch: 2))
+  check(next.map(\.sequence) == [112], "only the new one: \(next.map(\.sequence))")
+  check(planner.plan(playlist(101, count: 10, prefetch: 2)).isEmpty, "nothing twice")
+  let marked = planner.plan(playlist(103, count: 10, prefetch: 2, discontinuityAt: 113))
+  check(marked.first?.sequence == 113 && marked.first?.discontinuity == false, "a fetched prefetch isn't fetched again")
+  check(marked.map(\.sequence) == [113, 114], "on from there \(marked.map(\.sequence))")
+  // Far behind (the playlist moved on past it): carry on from its start.
+  let behind = planner.plan(playlist(200, count: 10, prefetch: 2))
+  check(behind.first?.sequence == 200, "jumps to the playlist's start when far behind")
+}
+
+testTSDemux()
 testDeviceLogin()
 testCatchUpSimulation()
 testRestrictedVOD()

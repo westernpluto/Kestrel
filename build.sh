@@ -10,7 +10,7 @@ BUILD_NUMBER="${BUILD_NUMBER:-$(date +%Y%m%d%H%M)}"
 MIN_IOS=16.0
 OUT=build
 BUNDLE="$OUT/Payload/$APP.app"
-SOURCES=(Sources/Core/*.swift Sources/Twitch/*.swift Sources/App/*.swift)
+SOURCES=(Sources/Core/*.swift Sources/Twitch/*.swift Sources/Player/*.swift Sources/App/*.swift)
 
 xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1 || { echo "Xcode with the iOS SDK is needed (macOS)" >&2; exit 1; }
 SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
