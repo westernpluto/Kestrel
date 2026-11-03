@@ -40,6 +40,9 @@ final class KestrelController {
     config.backupStreams = AppSettings.shared.backupStreams
     config.allowLowQualityBackup = AppSettings.shared.allowLowQualityBackup
     config.adFreeProxies = model?.adFreeProxies ?? AppSettings.shared.adFreeProxyHosts
+    // Straight from Twitch (a quick start, and 1440p where Twitch offers it here), with the
+    // ad-free servers' copy only during a stitched ad. A server picked by hand is used throughout.
+    if case .automatic = AppSettings.shared.adBlocking { config.adFreeServersForAdsOnly = true }
     config.checkAccountFirst = TwitchAuth.shared.session != nil
     config.nearbyServers = AppSettings.shared.nearbyServers
     let session = LowLatencySession(

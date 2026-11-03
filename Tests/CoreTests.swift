@@ -1551,6 +1551,35 @@ func testAdFreeProxy() {
     let regular = twitch.tokenRequests.filter { $0 != "proxy" }.count
     check(twitch.tokenRequests.filter { $0 == "proxy" }.count == 1 && regular <= 2, "no regular token needed: \(twitch.tokenRequests)")
   }
+  // Ad-free servers for ads only: the stream starts straight from Twitch (no server asked), and
+  // when an ad is stitched in, the server's copy is the one switched to.
+  runAsync {
+    let twitch = FakeTwitch()
+    twitch.mainAds = 21..<30
+    twitch.backupAds = ["site": 0..<100, "popout": 0..<100, "mobile_web": 0..<100, "embed": 0..<100, "autoplay": 0..<100]
+    let http = ProxyFake(twitch)
+    let log = ActivityLog()
+    var config = LowLatencyConfig()
+    config.adFreeProxies = ["proxy.test"]
+    config.adFreeServersForAdsOnly = true
+    let session = LowLatencySession(login: "streamer", config: config, http: http, tokens: twitch, log: log)
+    _ = try! await session.start()
+    let route = await session.route
+    check(route == .twitch && !http.requested.contains("proxy.test"), "started straight from Twitch: \(route) \(http.requested)")
+    var sawCopy = false
+    var adSegments = 0
+    for _ in 0..<8 {
+      let media = await session.mediaPlaylist(0)
+      adSegments += media.body.components(separatedBy: "/ad-").count - 1
+      let main = twitch.mainToken ?? "?"
+      if media.body.components(separatedBy: "\n").contains(where: { $0.hasPrefix("https://edge.test/") && !$0.hasPrefix("https://edge.test/\(main)-") }) {
+        sawCopy = true
+      }
+      twitch.advance()
+    }
+    check(sawCopy, "the ad-free server's copy during the ad: \(log.messages)")
+    check(log.messages.contains { $0.contains("Switched to ad-free copy (server:proxy.test") }, "\(log.messages)")
+  }
   // A server that doesn't answer at all doesn't hold the stream up for its whole timeout: the
   // next one is asked under a second later, and the first playlist back wins.
   runAsync {

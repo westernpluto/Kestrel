@@ -27,6 +27,10 @@ struct LowLatencyConfig: Sendable {
   var checkAccountFirst = false
   /// Through an ad-free server: try the playlists on Twitch's server near the viewer.
   var nearbyServers = true
+  /// Play straight from Twitch (its renditions for this viewer, 1440p included, and a quick
+  /// start) and use the ad-free servers only for a copy of the stream during a stitched ad
+  /// (asked first among the copies). Off: the stream comes through an ad-free server throughout.
+  var adFreeServersForAdsOnly = false
 }
 
 struct LowLatencyUpdate: Sendable {
@@ -101,7 +105,7 @@ actor LowLatencySession: PlaylistSource {
   /// Fetches the master playlist. Returns Twitch's renditions (landscape and audio only).
   func start() async throws -> [HLSVariant] {
     let fetched = try await MasterPlaylistFetch.fetch(
-      login: login, codecs: config.codecs, lowLatency: true, proxies: config.adFreeProxies,
+      login: login, codecs: config.codecs, lowLatency: true, proxies: config.adFreeServersForAdsOnly ? [] : config.adFreeProxies,
       checkAccountFirst: config.checkAccountFirst, playerType: config.mainPlayerType, http: http, tokens: tokens, log: log)
     masterFetchedAt = Date()
     route = fetched.route
@@ -359,6 +363,11 @@ actor LowLatencySession: PlaylistSource {
 
   private func playerTypes() -> [String] {
     var types = config.backupPlayerTypes
+    if config.adFreeServersForAdsOnly {
+      // The ad-free servers' copies first (in a country without these ads), then Twitch's other
+      // player types.
+      types = config.adFreeProxies.prefix(2).map { Self.proxyPrefix + $0 } + types
+    }
     if let pinned = pinnedType, let i = types.firstIndex(of: pinned) {
       types.remove(at: i)
       types.insert(pinned, at: 0)
@@ -464,11 +473,26 @@ actor LowLatencySession: PlaylistSource {
     }
   }
 
+  static let proxyPrefix = "server:"
+
   private nonisolated func probe(type: String, target: HLSVariant, cached: StreamSession.BackupMaster?) async
     -> (type: String, master: StreamSession.BackupMaster?, clean: Bool, failure: String?)
   {
     var master = cached
     if let cached, Date().timeIntervalSince(cached.fetchedAt) >= config.backupTokenLifetime { master = nil }
+    if master == nil, type.hasPrefix(Self.proxyPrefix) {
+      // An ad-free server's copy of the stream.
+      let host = String(type.dropFirst(Self.proxyPrefix.count))
+      guard let url = AdFreeProxy.masterURL(host: host, login: login, codecs: config.codecs, lowLatency: true) else {
+        return (type, nil, false, "bad address")
+      }
+      var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 4)
+      request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
+      guard let (data, response) = try? await http.data(for: request), response.statusCode == 200,
+        let text = String(data: data, encoding: .utf8), HLS.looksLikePlaylist(data), text.contains("#EXT-X-STREAM-INF")
+      else { return (type, nil, false, "no answer") }
+      master = StreamSession.BackupMaster(type: type, master: HLSMaster.parse(text, base: response.url ?? url), fetchedAt: Date())
+    }
     if master == nil {
       do {
         let token = try await tokens.streamToken(login: login, playerType: type, platform: type == "autoplay" ? "android" : "web")
