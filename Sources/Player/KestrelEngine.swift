@@ -50,6 +50,8 @@ final class KestrelEngine: NSObject {
   }
   private var retiringSince = Date.distantPast
   private var caughtUpAt = Date.distantPast
+  /// Since when the new screen layer has had a frame on screen (see `retireOldLayer`).
+  private var drawingSince: Date?
   /// Told when the screen's layers change (the view puts the new one on top of the retiring one).
   /// Without it, the layer is caught up in place (flushed: black until it has a picture again).
   var onScreenLayers: (() -> Void)?
@@ -222,6 +224,11 @@ final class KestrelEngine: NSObject {
       })
     lifecycleTokens.append(
       center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.enteringForeground() }
+      })
+    lifecycleTokens.append(
+      center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        // Decoding is allowed again from here: catch up now if it couldn't before.
         MainActor.assumeIsolated { self?.enteringForeground() }
       })
     displayLayer.videoGravity = .resizeAspect
@@ -674,6 +681,7 @@ final class KestrelEngine: NSObject {
       displayLayer.flush()
     }
     caughtUpAt = Date()
+    drawingSince = nil
     let layer = displayLayer
     let showing = now
     for earlier in group {
@@ -701,9 +709,16 @@ final class KestrelEngine: NSObject {
     guard let old = retiringLayer else { return }
     // Drawing steadily: "rendering" comes before the first picture is up, and taking the old one
     // away then showed black for a few frames.
-    let drawing = displayLayer.status == .rendering && !displayLayer.requiresFlushToResumeDecoding && !inBackground
-    let settled = Date().timeIntervalSince(caughtUpAt) > 0.6 && Date().timeIntervalSince(retiringSince) > 0.6
-    guard force || (drawing && settled) else { return }
+    // "Rendering" isn't enough: the new layer said so while the app was still coming back and not
+    // yet allowed to decode, and taking the old picture away then showed black for a few frames.
+    // It goes once the new layer has a frame on screen, and has kept drawing for a moment.
+    var drawing = displayLayer.status == .rendering && !displayLayer.requiresFlushToResumeDecoding && !inBackground
+    if drawing, #available(iOS 17.4, tvOS 17.4, *) { drawing = displayLayer.sampleBufferRenderer.displayedPixelBuffer() != nil }
+    if !drawing { drawingSince = nil } else if drawingSince == nil { drawingSince = Date() }
+    let settled = drawingSince.map { Date().timeIntervalSince($0) > 0.4 } ?? false
+      && Date().timeIntervalSince(caughtUpAt) > 0.6 && Date().timeIntervalSince(retiringSince) > 0.6
+    guard force || settled else { return }
+    drawingSince = nil
     retiringLayer = nil
     coverLayer = nil
     old.flushAndRemoveImage()
