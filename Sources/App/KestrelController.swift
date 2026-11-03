@@ -280,26 +280,38 @@ struct KestrelVideoView: UIViewRepresentable {
   /// The screen's layer on top, the Picture in Picture copy right behind it (see
   /// `KestrelEngine.makeMirror`).
   final class LayerView: UIView {
-    private(set) var videoLayer: AVSampleBufferDisplayLayer?
-    private(set) var mirrorLayer: AVSampleBufferDisplayLayer?
+    private var shown: [AVSampleBufferDisplayLayer] = []
 
-    func show(_ video: AVSampleBufferDisplayLayer, mirror: AVSampleBufferDisplayLayer?) {
-      guard video !== videoLayer || mirror !== mirrorLayer else { return }
-      videoLayer?.removeFromSuperlayer()
-      mirrorLayer?.removeFromSuperlayer()
-      videoLayer = video
-      mirrorLayer = mirror
-      if let mirror { layer.addSublayer(mirror) }
-      layer.addSublayer(video)
-      setNeedsLayout()
+    /// Bottom to top: the Picture in Picture copy, a retiring screen layer, the screen's layer.
+    func show(_ video: AVSampleBufferDisplayLayer, retiring: AVSampleBufferDisplayLayer?, mirror: AVSampleBufferDisplayLayer?) {
+      let wanted = [mirror, retiring, video].compactMap { $0 }
+      guard wanted.map(ObjectIdentifier.init) != shown.map(ObjectIdentifier.init) else { return }
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      for layer in shown where !wanted.contains(where: { $0 === layer }) { layer.removeFromSuperlayer() }
+      // Only new ones are put in (each above the one before it); the others are left where they
+      // are: taking the Picture in Picture copy out and back could upset a window that's open.
+      var below: CALayer?
+      for layer in wanted {
+        if layer.superlayer !== self.layer {
+          layer.frame = bounds
+          if let below {
+            self.layer.insertSublayer(layer, above: below)
+          } else {
+            self.layer.insertSublayer(layer, at: 0)
+          }
+        }
+        below = layer
+      }
+      CATransaction.commit()
+      shown = wanted
     }
 
     override func layoutSubviews() {
       super.layoutSubviews()
       CATransaction.begin()
       CATransaction.setDisableActions(true)
-      mirrorLayer?.frame = bounds
-      videoLayer?.frame = bounds
+      for layer in shown { layer.frame = bounds }
       CATransaction.commit()
     }
   }
@@ -312,9 +324,14 @@ struct KestrelVideoView: UIViewRepresentable {
   }
 
   func updateUIView(_ view: LayerView, context: Context) {
-    view.show(engine.displayLayer, mirror: engine.mirrorLayer)
+    let engine = self.engine
+    view.show(engine.displayLayer, retiring: engine.retiringLayer, mirror: engine.mirrorLayer)
+    engine.onScreenLayers = { [weak view, weak engine] in
+      guard let view, let engine else { return }
+      view.show(engine.displayLayer, retiring: engine.retiringLayer, mirror: engine.mirrorLayer)
+    }
     let gravity: AVLayerVideoGravity = fill ? .resizeAspectFill : .resizeAspect
-    for layer in [engine.displayLayer, engine.mirrorLayer].compactMap({ $0 }) where layer.videoGravity != gravity {
+    for layer in [engine.displayLayer, engine.retiringLayer, engine.mirrorLayer].compactMap({ $0 }) where layer.videoGravity != gravity {
       layer.videoGravity = gravity
     }
   }

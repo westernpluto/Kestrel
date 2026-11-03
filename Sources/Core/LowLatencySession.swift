@@ -62,6 +62,8 @@ actor LowLatencySession: PlaylistSource {
   /// Whether that's Twitch's server near the viewer, used instead of the ad-free server's.
   var servingNearby: Bool { farVariants != nil }
   private var lastServed: [Int: String] = [:]
+  /// The segment addresses in the last playlist served for each rendition.
+  private var servedURIs: [Int: Set<String>] = [:]
 
   private var inBreak = false
   /// This break's ad-free copy is already being served.
@@ -266,7 +268,13 @@ actor LowLatencySession: PlaylistSource {
     // noting the rest of the break covered clean video ("Skipping an ad…" over the stream).
     let firstPoll = !inBreak
     if firstPoll { beginBreak() }
-    if !replacedInBreak { ads.update(with: main.playlist) }
+    if !replacedInBreak {
+      // Only ad segments the player was already handed (in the last playlist it got, a prefetch
+      // most likely) need hiding. At the start of a stream the player had none of the ad, and
+      // covering the whole break's times put "Skipping an ad" over the clean copy for seconds.
+      let handed = servedURIs[index] ?? []
+      ads.cover(main.playlist.segments.filter { $0.isAd && handed.contains($0.uri) })
+    }
     if config.backupStreams {
       if active == nil {
         startSearchIfNeeded(target: target)
@@ -300,6 +308,7 @@ actor LowLatencySession: PlaylistSource {
 
   private func serve(_ index: Int, _ body: String) -> (status: Int, body: String) {
     lastServed[index] = body
+    servedURIs[index] = Set(HLSMediaPlaylist.parse(body, base: nil).segments.map(\.uri))
     return (200, body)
   }
 

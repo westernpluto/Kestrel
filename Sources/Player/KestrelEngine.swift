@@ -30,7 +30,14 @@ final class KestrelEngine: NSObject {
     case failed(String)
   }
 
-  let displayLayer = AVSampleBufferDisplayLayer()
+  /// The picture on screen (replaced by a fresh one when the app comes back: see `catchUpScreen`).
+  private(set) var displayLayer = AVSampleBufferDisplayLayer()
+  /// The one it replaced, left showing underneath until the new one has a picture.
+  private(set) var retiringLayer: AVSampleBufferDisplayLayer?
+  private var retiringSince = Date.distantPast
+  /// Told when the screen's layers change (the view puts the new one on top of the retiring one).
+  /// Without it, the layer is caught up in place (flushed: black until it has a picture again).
+  var onScreenLayers: (() -> Void)?
   let audioRenderer = AVSampleBufferAudioRenderer()
   let synchronizer = AVSampleBufferRenderSynchronizer()
 
@@ -210,6 +217,7 @@ final class KestrelEngine: NSObject {
     loads = []
     synchronizer.setRate(0, time: synchronizer.currentTime())
     displayLayer.flushAndRemoveImage()
+    retireOldLayer(force: true)
     mirrorLayer?.flushAndRemoveImage()
     group = []
     audioRenderer.flush()
@@ -557,15 +565,42 @@ final class KestrelEngine: NSObject {
   /// keyframe (decoded out of sight up to now): false if there's no keyframe to start from.
   @discardableResult
   private func catchUpScreen() -> Bool {
-    let layer = displayLayer
-    layer.flush()
     screenBehind = false
-    guard group.first?.keyframe == true else { return false }
+    guard group.first?.keyframe == true else {
+      displayLayer.flush()
+      return false
+    }
+    if onScreenLayers != nil, retiringLayer == nil {
+      // A fresh layer on top of the old one: empty, it's see-through, so the old picture stays
+      // until the new one has the frame playing now (flushing the old one went black for a moment).
+      let old = displayLayer
+      let fresh = AVSampleBufferDisplayLayer()
+      fresh.videoGravity = old.videoGravity
+      synchronizer.addRenderer(fresh)
+      displayLayer = fresh
+      retiringLayer = old
+      retiringSince = Date()
+      onScreenLayers?()
+    } else {
+      displayLayer.flush()
+    }
+    let layer = displayLayer
     let showing = Int64(synchronizer.currentTime().convertScale(Self.clock, method: .default).value)
     for earlier in group {
       if let sample = earlier.sample(hidden: earlier.pts < showing - frameLength) { layer.enqueue(sample) }
     }
     return true
+  }
+
+  /// The old layer goes once the new one is drawing.
+  private func retireOldLayer(force: Bool = false) {
+    guard let old = retiringLayer else { return }
+    let drawing = displayLayer.status == .rendering && !displayLayer.requiresFlushToResumeDecoding && !inBackground
+    guard force || (drawing && Date().timeIntervalSince(retiringSince) > 0.4) else { return }
+    retiringLayer = nil
+    synchronizer.removeRenderer(old, at: synchronizer.currentTime(), completionHandler: nil)
+    old.flushAndRemoveImage()
+    onScreenLayers?()
   }
 
   /// The app is coming back (Picture in Picture's window is on its way back): the screen's layer
@@ -738,6 +773,7 @@ final class KestrelEngine: NSObject {
 
   private func tick() {
     guard running else { return }
+    retireOldLayer()
     // A segment whose frames are all in can hand over to the next before its download closes.
     pump()
     guard clockRunning else { return }

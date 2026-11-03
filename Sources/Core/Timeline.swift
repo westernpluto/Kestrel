@@ -254,6 +254,14 @@ struct AdTimeline {
 
   var isActive: Bool { openStart != nil }
 
+  /// Hides these ad segments (the ones the player got before it switched to an ad-free copy).
+  mutating func cover(_ segments: [HLSSegment]) {
+    for segment in segments {
+      guard let start = segment.pdt, let end = segment.end else { continue }
+      insert(start...end)
+    }
+  }
+
   /// The player switched to an ad-free copy: only what it already got from the ad needs hiding.
   mutating func closeOpenBreak() {
     guard let start = openStart else { return }

@@ -881,6 +881,23 @@ func testLowLatencySession() {
     check(box.last?.ads.covers(fake.pdt(24).addingTimeInterval(1)) == false, "clean copy not covered")
   }
 
+  // A stream that opens on an ad, with an ad-free copy: the player never got any of the ad, so
+  // nothing is covered (it put "Skipping an ad" over the clean copy for a couple of seconds).
+  runAsync {
+    let fake = FakeTwitch()
+    fake.mainAds = 0..<60
+    fake.backupAds = ["site": 0..<100, "popout": 0..<100, "mobile_web": 0..<0, "embed": 0..<100]
+    let box = UpdateBox()
+    let session = LowLatencySession(login: "streamer", config: LowLatencyConfig(), http: fake, tokens: fake, log: ActivityLog()) { box.add($0) }
+    _ = try! await session.start()
+    for _ in 0..<3 {
+      _ = await session.mediaPlaylist(0)
+      fake.advance()
+    }
+    let covered = (fake.liveIndex - 8...fake.liveIndex + 2).filter { box.last?.ads.covers(fake.pdt($0).addingTimeInterval(0.5)) == true }
+    check(covered.isEmpty, "opening ad, clean copy: nothing covered (\(covered))")
+  }
+
   // No ad-free copy: the ad goes through without prefetch, and the app is told to hide it.
   runAsync {
     let fake = FakeTwitch()
