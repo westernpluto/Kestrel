@@ -1722,6 +1722,7 @@ func testCatchUpSimulation() {
   check(stallRate < 1.0, "shaky stream: \(stallRate) stalls per 10 min")
   check(changeRate < 6, "shaky stream: \(changeRate) speed changes per 10 min")
   check(latency < 3.6, "shaky stream: \(latency) s from live on average")
+  print("SHAKY stalls/10min", stallRate, "spells/10min", changeRate, "latency", latency)
 
   // A dropout on the connection (3 s with nothing arriving, ridden out on a big buffer): learned as
   // no more than an outage's worth, not three seconds in hand for the next ten minutes.

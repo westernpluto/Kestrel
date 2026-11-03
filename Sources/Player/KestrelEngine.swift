@@ -96,6 +96,8 @@ final class KestrelEngine: NSObject {
   private var mirrorWaiting = true
   private var firstVideoTime: Int64?
   private var lastVideoTime: Int64?
+  /// The newest sound in hand (nil while the stream has shown none).
+  private var newestAudio: Int64?
   private var lastDecodeTime: Int64?
   /// Frame times put on an even rhythm (see FrameGrid).
   private var grid = FrameGrid()
@@ -263,6 +265,7 @@ final class KestrelEngine: NSObject {
     waitingForKeyframe = true
     firstVideoTime = nil
     lastVideoTime = nil
+    newestAudio = nil
     clockRunning = false
     stalledSince = nil
     anchor = nil
@@ -313,9 +316,20 @@ final class KestrelEngine: NSObject {
 
   /// Seconds of video in hand ahead of what's showing.
   var bufferAhead: Double? {
-    guard let last = lastVideoTime else { return nil }
-    let ahead = clockRunning ? Double(last + frameLength - now) : Double(last + frameLength - (firstVideoTime ?? last))
+    guard let playable = newestPlayable else { return nil }
+    let ahead = clockRunning ? Double(playable - now) : Double(playable - (firstVideoTime ?? playable))
     return max(0, ahead / Double(Self.clock))
+  }
+
+  /// The end of what can play: picture and sound both in hand. In fragmented MP4 a chunk's sound
+  /// can come in well after its picture; counting the picture alone, playback ran into sound that
+  /// hadn't arrived (silence, then a stall), and started too close to it.
+  private var newestPlayable: Int64? {
+    guard let last = lastVideoTime else { return nil }
+    let video = last + frameLength
+    // (Sound that's stopped coming altogether, seconds behind, isn't waited for.)
+    guard let audio = newestAudio, video - audio < 4 * Int64(Self.clock) else { return video }
+    return min(video, audio)
   }
 
   /// Seconds behind live: now, less when the frame showing was captured.
@@ -413,6 +427,7 @@ final class KestrelEngine: NSObject {
     heldAudio = []
     firstVideoTime = nil
     lastVideoTime = nil
+    newestAudio = nil
     ActivityLog.shared.add("Kestrel player: starting from the segment being made (it already had enough video)")
   }
 
@@ -454,6 +469,8 @@ final class KestrelEngine: NSObject {
       }
     case .audio(let audio):
       let time = timeline.map(audio.pts, isVideo: false)
+      let length = Int64(1024 * 90_000 / max(audio.config.sampleRate, 8000))
+      if newestAudio.map({ time + length > $0 }) ?? true { newestAudio = time + length }
       if clockRunning {
         enqueueAudio(audio, time: time)
       } else {
@@ -780,8 +797,13 @@ final class KestrelEngine: NSObject {
     }
     guard let format = audioFormat, let sample = Self.audioSample(frame.data, format: format, pts: time) else { return }
     if !refill {
-      // What the stats show about the sound: arriving after its time, or not following on.
-      if clockRunning, time < now { lateAudio += 1 }
+      // What the stats show about the sound: arriving after its time, or not following on. Sound
+      // past its time is left out: handed over late, the renderer dropped what it had queued.
+      if clockRunning, time + 1920 < now {
+        lateAudio += 1
+        lastAudioTime = time
+        return
+      }
       if let last = lastAudioTime {
         let step = Int64(1024 * 90_000 / max(frame.config.sampleRate, 8000))
         let off = time - last - step
@@ -812,7 +834,7 @@ final class KestrelEngine: NSObject {
   /// Starts the clock once there's video: just behind the newest frame in hand (the stream's
   /// margin), so it opens close to live instead of at the start of the first segment.
   private func startIfReady() {
-    guard !clockRunning, !paused, let first = heldVideo.first?.pts, let last = lastVideoTime else { return }
+    guard !clockRunning, !paused, let first = heldVideo.first?.pts, let last = newestPlayable else { return }
     let margin = Int64(max(catchUp.targetBuffer, 0.5) * Double(Self.clock))
     // Only once what's being unpacked is the segment still being made (everything before it is
     // in): starting earlier put the start seconds back, with all of that to catch up.

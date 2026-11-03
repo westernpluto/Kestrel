@@ -45,6 +45,8 @@ struct LiveCatchUp: Sendable {
   private(set) var targetBuffer: Double
   /// The playback rate to use now.
   private(set) var rate: Float = 1
+  /// When the speed last changed.
+  private var changedAt = Date.distantPast
   /// No steering before this (just started, stalled or switched quality).
   private var holdUntil: Date
   /// Hiccups lately: when, and how far delivery fell behind (seconds of video).
@@ -97,6 +99,12 @@ struct LiveCatchUp: Sendable {
   /// reading's wobble). Speeding up waits for a clearer surplus than slowing down waits for a
   /// shortfall: a little extra in hand costs a fraction of a second, a speed change is noticed.
   static let deadband = 0.25
+  /// Slower when this far under the margin (later than this stalled more often in the shaky-stream
+  /// simulation, which is worse than the speed change).
+  static let slowDownBand = 0.25
+  /// After a change of speed, this long at 1x before the next one starts (finishing one, or
+  /// running nearly dry, needn't wait).
+  static let restAfterChange: TimeInterval = 10
   static let speedUpBand = 0.4
   static let settle = 0.05
   /// The least change made (it eases in, but doesn't crawl over the last bit).
@@ -216,7 +224,7 @@ struct LiveCatchUp: Sendable {
     if buffer < Self.nearlyDry, !wellBehind {
       // About to run dry: slower at once.
       next = Double(Self.rates.slow)
-    } else if excess < -(rate < 1 ? Self.settle : Self.deadband), !wellBehind {
+    } else if excess < -(rate < 1 ? Self.settle : Self.slowDownBand), !wellBehind {
       // Less in hand than needed: slower in proportion, building it back up.
       next = max(Double(Self.rates.slow), 1 + min(-Self.minStep, excess * Self.gain))
     } else if excess > (rate > 1 ? Self.settle : starting ? Self.deadband : Self.speedUpBand),
@@ -250,6 +258,15 @@ struct LiveCatchUp: Sendable {
       next = min(next, Double(maxRate))
     } else if next < 1 {
       next = Double(Self.rates.slow)
+    }
+    if Float(next) != rate {
+      let finishing = rate != 1 && next == 1
+      let dry = buffer < Self.nearlyDry
+      if rate == 1, !finishing, !dry, !starting, now.timeIntervalSince(changedAt) < Self.restAfterChange {
+        next = 1
+      } else {
+        changedAt = now
+      }
     }
     rate = Float(next)
     last = (buffer, now, rate, position)
