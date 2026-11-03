@@ -366,19 +366,32 @@ enum ADTS {
 /// same way.
 struct StreamTimeline {
   private var offset: Int64 = 0
-  /// The latest time handed out (on the timeline) and its frame's length.
+  /// The latest time handed out (on the timeline).
   private(set) var lastTime: Int64?
-  private var frameLength: Int64 = 3000
+  /// Each track's latest time and frame length: a segment's start is checked against the same
+  /// track's end (a stream's audio can sit a couple of hundred ms off its video at a segment's
+  /// start, so comparing one with the other saw a jump at every segment and shifted it: a gap in
+  /// the sound each time).
+  private var lastVideo: Int64?
+  private var previousVideo: Int64?
+  private var videoSteps: [Int64] = []
+  private var lastAudio: Int64?
+  private var audioStep: Int64 = 1920
   /// The first segment's first time: the timeline starts there.
   private(set) var origin: Int64?
   /// How far off a segment's start may be and still count as following on (60 ms: under four
-  /// frames at 60 fps; a segment's first audio can start up to a frame or so off its video).
+  /// frames at 60 fps).
   static let seamTolerance: Int64 = 5400
 
   init() {}
 
-  /// A segment begins; `discontinuity` when the playlist marks one (or it doesn't follow on).
-  mutating func beginSegment(firstPTS: Int64, discontinuity: Bool) {
+  /// A video frame's length: the smallest step between frames lately (in decode order, frames
+  /// with B-frames jump about, but neighbours in time are always a frame apart somewhere).
+  private var videoStep: Int64 { videoSteps.min() ?? 3000 }
+
+  /// A segment begins with a frame stamped `firstPTS` (video or audio); `discontinuity` when the
+  /// playlist marks one.
+  mutating func beginSegment(firstPTS: Int64, isVideo: Bool = true, discontinuity: Bool) {
     guard let last = lastTime else {
       origin = firstPTS
       return
@@ -389,7 +402,14 @@ struct StreamTimeline {
     // swapped in for an ad are encoded separately, and their times can be a tenth of a second
     // apart: the jump at each swap played as silence and a held picture (or overlapping sound),
     // a stutter in both. Within a stream, segments follow on to the frame.
-    let expected = last + frameLength
+    let expected: Int64
+    if isVideo, let lastVideo {
+      expected = lastVideo + videoStep
+    } else if !isVideo, let lastAudio {
+      expected = lastAudio + audioStep
+    } else {
+      expected = last + videoStep
+    }
     if discontinuity || abs(mapped - expected) > Self.seamTolerance {
       offset = expected - firstPTS
     }
@@ -403,7 +423,20 @@ struct StreamTimeline {
       offset += 1 << 33
       time += 1 << 33
     }
-    if isVideo, let last = lastTime, time > last, time - last < 9000 { frameLength = time - last }
+    if isVideo {
+      if let previous = previousVideo {
+        let step = abs(time - previous)
+        if step > 0, step < 9000 {
+          videoSteps.append(step)
+          if videoSteps.count > 60 { videoSteps.removeFirst(videoSteps.count - 60) }
+        }
+      }
+      previousVideo = time
+      if lastVideo.map({ time > $0 }) ?? true { lastVideo = time }
+    } else {
+      if let previous = lastAudio, time > previous, time - previous < 9000 { audioStep = time - previous }
+      if lastAudio.map({ time > $0 }) ?? true { lastAudio = time }
+    }
     if lastTime.map({ time > $0 }) ?? true { lastTime = time }
     return time
   }

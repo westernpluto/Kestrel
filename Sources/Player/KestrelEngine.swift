@@ -410,7 +410,9 @@ final class KestrelEngine: NSObject {
   private func enqueue(_ frame: DemuxedFrame, from load: SegmentLoad) {
     if !load.timed {
       load.timed = true
-      timeline.beginSegment(firstPTS: frame.pts, discontinuity: load.planned.discontinuity)
+      let isVideo: Bool
+      if case .video = frame { isVideo = true } else { isVideo = false }
+      timeline.beginSegment(firstPTS: frame.pts, isVideo: isVideo, discontinuity: load.planned.discontinuity)
       if load.planned.discontinuity { waitingForKeyframe = true }
     }
     switch frame {

@@ -1902,6 +1902,37 @@ func testTSDemux() {
   timeline.beginSegment(firstPTS: 90_012_000 + 1860, discontinuity: false)
   check(timeline.map(90_012_000 + 1860, isVideo: false) == afterJump + 15000 + 1860, "audio starting a frame off: left as is")
 
+  // A stream whose audio starts a quarter of a second ahead of its video in every segment (the
+  // segment's first frame is audio): segments follow on, nothing is shifted. Comparing the audio
+  // with the video's end shifted every segment, a 240 ms gap in the sound each time.
+  do {
+    var line = StreamTimeline()
+    var audioTimes: [Int64] = []
+    var videoTimes: [Int64] = []
+    var audioPTS: Int64 = 1_000_000 - 22_500
+    for segment in 0..<4 {
+      let videoStart = Int64(1_000_000 + segment * 180_000)
+      line.beginSegment(firstPTS: audioPTS, isVideo: false, discontinuity: false)
+      // Interleaved as muxed: audio up to the segment's end, video frames (with B-frame order).
+      var a = audioPTS
+      for k in 0..<120 {
+        let order = [0, 3, 1, 2]
+        let v = videoStart + Int64((k / 4) * 4 + order[k % 4]) * 1500
+        videoTimes.append(line.map(v, isVideo: true))
+        while a < videoStart + Int64(k + 1) * 1500 - 22_500 {
+          audioTimes.append(line.map(a, isVideo: false))
+          a += 1920
+        }
+      }
+      audioPTS = a
+    }
+    let audioSteps = Set(zip(audioTimes, audioTimes.dropFirst()).map { $1 - $0 })
+    let videoSorted = videoTimes.sorted()
+    let videoSteps = Set(zip(videoSorted, videoSorted.dropFirst()).map { $1 - $0 })
+    check(audioSteps == [1920], "audio leading video: continuous sound \(audioSteps)")
+    check(videoSteps == [1500], "audio leading video: video untouched \(videoSteps)")
+  }
+
   // Which segments to fetch.
   func playlist(_ first: Int, count: Int, prefetch: Int, discontinuityAt: Int? = nil) -> String {
     var lines = ["#EXTM3U", "#EXT-X-TARGETDURATION:5", "#EXT-X-MEDIA-SEQUENCE:\(first)"]
