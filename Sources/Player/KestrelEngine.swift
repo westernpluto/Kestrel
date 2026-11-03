@@ -188,9 +188,9 @@ final class KestrelEngine: NSObject {
     super.init()
     let center = NotificationCenter.default
     lifecycleTokens.append(
-      center.addObserver(forName: AVSampleBufferAudioRenderer.wasFlushedAutomaticallyNotification, object: audioRenderer, queue: .main) {
+      center.addObserver(forName: .AVSampleBufferAudioRendererWasFlushedAutomatically, object: audioRenderer, queue: .main) {
         [weak self] note in
-        let value = note.userInfo?[AVSampleBufferAudioRenderer.flushTimeKey] as? NSValue
+        let value = note.userInfo?[AVSampleBufferAudioRendererFlushTimeKey] as? NSValue
         let time = value?.timeValue ?? .invalid
         MainActor.assumeIsolated { self?.audioFlushedAutomatically(at: time) }
       })
