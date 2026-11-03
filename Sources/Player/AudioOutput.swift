@@ -83,8 +83,13 @@ final class AudioOutput {
       return compressed
     }
     guard error == nil, output.frameLength > 0 else { return }
-    // The decoder's output, matched to the stream time of the oldest frame it still had.
-    let outPTS = pendingInput.removeFirst()
+    // The decoder's output, matched to the stream time of the oldest frame it still had, and as
+    // many frames used up as came out (it sometimes gives two at once: counted as one, the times
+    // fell behind by a frame each time, the sound read as off the picture and was re-synced every
+    // couple of seconds, a gap each time).
+    guard let outPTS = pendingInput.first else { return }
+    let used = max(1, Int((Double(output.frameLength) / 1024).rounded()))
+    pendingInput.removeFirst(min(used, pendingInput.count))
     if pendingInput.count > 4 { pendingInput.removeFirst(pendingInput.count - 4) }
     schedule(output, pts: outPTS)
   }

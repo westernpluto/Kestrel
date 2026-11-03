@@ -94,6 +94,11 @@ final class KestrelEngine: NSObject {
   /// Times the sound was put back on the picture (see `syncClock`).
   private(set) var audioResyncs = 0
   private var lastAudioResync = Date.distantPast
+  private var lastHeard: Int64?
+  private var playingSince: Date?
+  private var timestampsChecked = false
+  private var timestampSkew = 0.0
+  private var lastHeardMoved = Date()
   private(set) var lateAudio = 0
   private(set) var audioGaps = 0
   private(set) var largestAudioGap = 0.0
@@ -331,10 +336,30 @@ final class KestrelEngine: NSObject {
 
   /// Seconds behind live: now, less when the frame showing was captured.
   var latency: Double? {
+    guard let raw = rawLatency else { return nil }
+    return max(0, raw - timestampSkew)
+  }
+
+  /// From the stream's own timestamps (Twitch's program date-time), which some channels have well
+  /// off (one read 33 s behind with 2.5 s in hand): see `timestampSkew`.
+  var rawLatency: Double? {
     guard clockRunning, let anchor else { return nil }
     let shown = anchor.date.addingTimeInterval(Double(now - anchor.time) / Double(Self.clock))
     let value = Date().timeIntervalSince(shown)
     return value.isFinite && value > -1 ? max(0, value) : nil
+  }
+
+  /// How far the stream's timestamps are off, when they're clearly off: checked once a few
+  /// seconds in, against what's in hand (the player is never much further behind live than that
+  /// plus a second or two on the way).
+  private func checkTimestamps(ahead: Double) {
+    guard !timestampsChecked, let raw = rawLatency, let since = playingSince, Date().timeIntervalSince(since) > 3 else { return }
+    timestampsChecked = true
+    let expected = ahead + 2
+    if raw > expected + 4 {
+      timestampSkew = raw - expected
+      ActivityLog.shared.add(String(format: "Kestrel player: this stream's timestamps are about %.0f s off; latency shown corrected", timestampSkew))
+    }
   }
 
   var rate: Float { speed }
@@ -833,17 +858,28 @@ final class KestrelEngine: NSObject {
   /// sound, a restart of it) moves it straight there.
   private func syncClock() {
     guard clockRunning, speed > 0, audio.isPlaying, let heard = audio.position else { return }
+    // Sound that stops moving while it should be playing is stuck (it ran dry, or the system held it).
+    if heard != lastHeard {
+      lastHeard = heard
+      lastHeardMoved = Date()
+    }
+    let stuck = Date().timeIntervalSince(lastHeardMoved) > 0.6
     let drift = Double(heard - now) / Double(Self.clock)
-    if abs(drift) <= 0.08 {
+    if !stuck, abs(drift) <= 0.08 {
       let trim = max(-0.02, min(0.02, drift * 0.5))
       CMTimebaseSetRate(videoClock, rate: Float64(speed) * (1 + trim))
       return
     }
-    // Off by more than that: the sound got stuck, ran dry or started late. The picture leads then
-    // and the sound is put back on it (pulling the picture back to stuck sound kept a stream from
-    // ever starting: it fell further behind and started over, again and again).
+    if !stuck, abs(drift) <= 1 {
+      // A jump in the sound's times: the picture moves to it (a gap in the sound is worse).
+      CMTimebaseSetTime(videoClock, time: CMTime(value: heard, timescale: Self.clock))
+      CMTimebaseSetRate(videoClock, rate: Float64(speed))
+      return
+    }
+    // Stuck, or far off: the picture leads and the sound is put back on it.
     CMTimebaseSetRate(videoClock, rate: Float64(speed))
     guard Date().timeIntervalSince(lastAudioResync) > 2 else { return }
+    lastHeardMoved = Date()
     lastAudioResync = Date()
     audioResyncs += 1
     ActivityLog.shared.add(String(format: "Kestrel player: the sound was %.2f s off the picture; put back on it", drift))
@@ -876,6 +912,7 @@ final class KestrelEngine: NSObject {
       String(format: "Kestrel player: started %.2f s behind the newest frame (%@, %d frames decoded ahead of it)", startedBehind ?? 0, container, videoFramesHidden))
     CMTimebaseSetTime(videoClock, time: CMTime(value: start, timescale: Self.clock))
     clockRunning = true
+    playingSince = Date()
     setSpeed(1)
     catchUp.restart()
     state = .playing
@@ -921,8 +958,12 @@ final class KestrelEngine: NSObject {
       }
       return
     }
+    checkTimestamps(ahead: ahead)
     let latency = self.latency
-    if let latency, latency > 20 {
+    // Far behind (a long dropout, the background): start over at live. Judged by what's in hand
+    // (judged by the stream's timestamps, a channel with them half a minute off started over
+    // every quarter second and never got going).
+    if ahead > 15 {
       restart()
       return
     }

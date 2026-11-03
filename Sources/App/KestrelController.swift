@@ -125,7 +125,8 @@ final class KestrelController {
   func tick() {
     guard let model, let engine else { return }
     model.setLatency(engine.latency)
-    let latency = engine.latency
+    // (Ad times are on the stream's own clock: uncorrected.)
+    let latency = engine.rawLatency
     // Only when no ad-free copy was found does the player get ad video: hidden and muted then.
     let inAd = latency.map { adTimeline.covers(Date().addingTimeInterval(-$0)) } ?? adTimeline.isActive
     if inAd != model.coveringAd { model.coveringAd = inAd }
