@@ -371,6 +371,9 @@ struct StreamTimeline {
   private var frameLength: Int64 = 3000
   /// The first segment's first time: the timeline starts there.
   private(set) var origin: Int64?
+  /// How far off a segment's start may be and still count as following on (60 ms: under four
+  /// frames at 60 fps; a segment's first audio can start up to a frame or so off its video).
+  static let seamTolerance: Int64 = 5400
 
   init() {}
 
@@ -381,9 +384,14 @@ struct StreamTimeline {
       return
     }
     let mapped = firstPTS + offset
-    // A jump of more than a few seconds either way is a discontinuity even when unmarked.
-    if discontinuity || abs(mapped - last) > 5 * 90_000 {
-      offset = last + frameLength - firstPTS
+    // A segment that doesn't carry on where the last one ended (by more than a few frames, either
+    // way) is joined on seamlessly, marked or not. Twitch's main stream and the ad-free copy
+    // swapped in for an ad are encoded separately, and their times can be a tenth of a second
+    // apart: the jump at each swap played as silence and a held picture (or overlapping sound),
+    // a stutter in both. Within a stream, segments follow on to the frame.
+    let expected = last + frameLength
+    if discontinuity || abs(mapped - expected) > Self.seamTolerance {
+      offset = expected - firstPTS
     }
   }
 

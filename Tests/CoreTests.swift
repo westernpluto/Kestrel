@@ -1892,6 +1892,15 @@ func testTSDemux() {
   // Following on normally changes nothing.
   timeline.beginSegment(firstPTS: 90_003_000, discontinuity: false)
   check(timeline.map(90_003_000, isVideo: true) == afterJump + 6000, "no jump, no change")
+  // Swapped to the ad-free copy, its times a tenth of a second ahead (and later back, a tenth
+  // behind): joined on seamlessly, no gap or overlap (that played as a stutter in sound and video).
+  timeline.beginSegment(firstPTS: 90_006_000 + 9000, discontinuity: false)
+  check(timeline.map(90_006_000 + 9000, isVideo: true) == afterJump + 9000, "small jump ahead joined on")
+  timeline.beginSegment(firstPTS: 90_009_000, discontinuity: false)
+  check(timeline.map(90_009_000, isVideo: true) == afterJump + 12000, "small jump back joined on")
+  // Real Twitch segments: the next one's first audio is a frame or so off the video's end.
+  timeline.beginSegment(firstPTS: 90_012_000 + 1860, discontinuity: false)
+  check(timeline.map(90_012_000 + 1860, isVideo: false) == afterJump + 15000 + 1860, "audio starting a frame off: left as is")
 
   // Which segments to fetch.
   func playlist(_ first: Int, count: Int, prefetch: Int, discontinuityAt: Int? = nil) -> String {

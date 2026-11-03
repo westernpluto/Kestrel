@@ -35,6 +35,9 @@ final class KestrelEngine: NSObject {
   /// The one it replaced, left showing underneath until the new one has a picture.
   private(set) var retiringLayer: AVSampleBufferDisplayLayer?
   private var retiringSince = Date.distantPast
+  private var caughtUpAt = Date.distantPast
+  /// Screen layers on the synchronizer besides the current one (taken off when the stream stops).
+  private var attachedLayers: [AVSampleBufferDisplayLayer] = []
   /// Told when the screen's layers change (the view puts the new one on top of the retiring one).
   /// Without it, the layer is caught up in place (flushed: black until it has a picture again).
   var onScreenLayers: (() -> Void)?
@@ -576,7 +579,18 @@ final class KestrelEngine: NSObject {
       let old = displayLayer
       let fresh = AVSampleBufferDisplayLayer()
       fresh.videoGravity = old.videoGravity
-      synchronizer.addRenderer(fresh)
+      // It follows the playback clock without joining it: adding a renderer to the running
+      // synchronizer cut the sound for a tenth of a second.
+      var follower: CMTimebase?
+      CMTimebaseCreateWithSourceTimebase(allocator: kCFAllocatorDefault, sourceTimebase: synchronizer.timebase, timebaseOut: &follower)
+      if let follower {
+        CMTimebaseSetTime(follower, time: synchronizer.currentTime())
+        CMTimebaseSetRate(follower, rate: 1)
+        fresh.controlTimebase = follower
+      } else {
+        synchronizer.addRenderer(fresh)
+        attachedLayers.append(fresh)
+      }
       displayLayer = fresh
       retiringLayer = old
       retiringSince = Date()
@@ -584,6 +598,7 @@ final class KestrelEngine: NSObject {
     } else {
       displayLayer.flush()
     }
+    caughtUpAt = Date()
     let layer = displayLayer
     let showing = Int64(synchronizer.currentTime().convertScale(Self.clock, method: .default).value)
     for earlier in group {
@@ -595,10 +610,14 @@ final class KestrelEngine: NSObject {
   /// The old layer goes once the new one is drawing.
   private func retireOldLayer(force: Bool = false) {
     guard let old = retiringLayer else { return }
+    // Drawing steadily: "rendering" comes before the first picture is up, and taking the old one
+    // away then showed black for a few frames.
     let drawing = displayLayer.status == .rendering && !displayLayer.requiresFlushToResumeDecoding && !inBackground
-    guard force || (drawing && Date().timeIntervalSince(retiringSince) > 0.4) else { return }
+    let settled = Date().timeIntervalSince(caughtUpAt) > 0.6 && Date().timeIntervalSince(retiringSince) > 0.6
+    guard force || (drawing && settled) else { return }
     retiringLayer = nil
-    synchronizer.removeRenderer(old, at: synchronizer.currentTime(), completionHandler: nil)
+    // (Left on the synchronizer until the stream stops: taking it off mid-play is another change
+    // to the running clock.)
     old.flushAndRemoveImage()
     onScreenLayers?()
   }
