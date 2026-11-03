@@ -35,6 +35,9 @@ final class KestrelEngine: NSObject {
   private(set) var displayLayer = AVSampleBufferDisplayLayer()
   /// The one it replaced, left showing underneath until the new one has a picture.
   private(set) var retiringLayer: AVSampleBufferDisplayLayer?
+  /// Back from Picture in Picture: the frame the window was showing, held over the old layer
+  /// until the new one draws (the old one's picture is often gone after the background: black).
+  private(set) var coverLayer: CALayer?
   private var retiringSince = Date.distantPast
   private var caughtUpAt = Date.distantPast
   /// Told when the screen's layers change (the view puts the new one on top of the retiring one).
@@ -653,6 +656,7 @@ final class KestrelEngine: NSObject {
       displayLayer = fresh
       retiringLayer = old
       retiringSince = Date()
+      coverLayer = makeCover(gravity: old.videoGravity)
       onScreenLayers?()
     } else {
       displayLayer.flush()
@@ -666,6 +670,20 @@ final class KestrelEngine: NSObject {
     return true
   }
 
+  /// A still of the frame the Picture in Picture copy is showing (it played on in the window).
+  private func makeCover(gravity: AVLayerVideoGravity) -> CALayer? {
+    guard #available(iOS 17.4, tvOS 17.4, *), let mirrorLayer, let buffer = mirrorLayer.sampleBufferRenderer.displayedPixelBuffer()
+    else { return nil }
+    var image: CGImage?
+    VTCreateCGImageFromCVPixelBuffer(buffer, options: nil, imageOut: &image)
+    guard let image else { return nil }
+    let cover = CALayer()
+    cover.contents = image
+    cover.contentsGravity = gravity == .resizeAspectFill ? .resizeAspectFill : .resizeAspect
+    cover.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()]
+    return cover
+  }
+
   /// The old layer goes once the new one is drawing.
   private func retireOldLayer(force: Bool = false) {
     guard let old = retiringLayer else { return }
@@ -675,6 +693,7 @@ final class KestrelEngine: NSObject {
     let settled = Date().timeIntervalSince(caughtUpAt) > 0.6 && Date().timeIntervalSince(retiringSince) > 0.6
     guard force || (drawing && settled) else { return }
     retiringLayer = nil
+    coverLayer = nil
     old.flushAndRemoveImage()
     onScreenLayers?()
   }

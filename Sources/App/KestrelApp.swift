@@ -247,6 +247,10 @@ struct MiniPlayerSpacer: View {
   var body: some View {
     Color.clear
       .frame(height: app.playing != nil && app.playerMinimized ? PlayerLayout.miniInset : 1)
+      // At once, not with the player's spring: the lists animated along with it, and UIKit takes
+      // no touches on a view while it animates, so for a second or two after the player shrank
+      // nothing behind it could be tapped.
+      .transaction { $0.animation = nil }
       .listRowInsets(EdgeInsets())
       .listRowSeparator(.hidden)
       .listRowBackground(Color.clear)

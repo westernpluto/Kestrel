@@ -291,11 +291,12 @@ struct KestrelVideoView: UIViewRepresentable {
   /// The screen's layer on top, the Picture in Picture copy right behind it (see
   /// `KestrelEngine.makeMirror`).
   final class LayerView: UIView {
-    private var shown: [AVSampleBufferDisplayLayer] = []
+    private var shown: [CALayer] = []
 
-    /// Bottom to top: the Picture in Picture copy, a retiring screen layer, the screen's layer.
-    func show(_ video: AVSampleBufferDisplayLayer, retiring: AVSampleBufferDisplayLayer?, mirror: AVSampleBufferDisplayLayer?) {
-      let wanted = [mirror, retiring, video].compactMap { $0 }
+    /// Bottom to top: the Picture in Picture copy, a retiring screen layer, a still of the last
+    /// frame (back from Picture in Picture), the screen's layer.
+    func show(_ video: AVSampleBufferDisplayLayer, retiring: AVSampleBufferDisplayLayer?, cover: CALayer? = nil, mirror: AVSampleBufferDisplayLayer?) {
+      let wanted: [CALayer] = [mirror, retiring, cover, video].compactMap { $0 }
       guard wanted.map(ObjectIdentifier.init) != shown.map(ObjectIdentifier.init) else { return }
       CATransaction.begin()
       CATransaction.setDisableActions(true)
@@ -336,10 +337,10 @@ struct KestrelVideoView: UIViewRepresentable {
 
   func updateUIView(_ view: LayerView, context: Context) {
     let engine = self.engine
-    view.show(engine.displayLayer, retiring: engine.retiringLayer, mirror: engine.mirrorLayer)
+    view.show(engine.displayLayer, retiring: engine.retiringLayer, cover: engine.coverLayer, mirror: engine.mirrorLayer)
     engine.onScreenLayers = { [weak view, weak engine] in
       guard let view, let engine else { return }
-      view.show(engine.displayLayer, retiring: engine.retiringLayer, mirror: engine.mirrorLayer)
+      view.show(engine.displayLayer, retiring: engine.retiringLayer, cover: engine.coverLayer, mirror: engine.mirrorLayer)
     }
     let gravity: AVLayerVideoGravity = fill ? .resizeAspectFill : .resizeAspect
     for layer in [engine.displayLayer, engine.retiringLayer, engine.mirrorLayer].compactMap({ $0 }) where layer.videoGravity != gravity {
