@@ -451,7 +451,7 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
       engine.screenHiddenForPictureInPicture = false
       engine.screenNote("window asks for the picture")
       let started = Date()
-      func check() {
+      @MainActor func check() {
         if engine.screenDrawing || Date().timeIntervalSince(started) > 0.6 {
           engine.screenNote(engine.screenDrawing ? "picture ready: window handed back" : "picture not ready in time: window handed back")
           completionHandler(true)
