@@ -34,8 +34,9 @@ final class KestrelController {
 
   private func load() async {
     var config = LowLatencyConfig()
-    // H.264 and HEVC (MPEG-TS or fragmented MP4, both unpacked here); not AV1 yet.
-    config.codecs = "h265,h264"
+    // H.264, HEVC and AV1 (AV1 in fragmented MP4), as the device decodes them: Twitch only lists
+    // its 1440p renditions when the request says HEVC or AV1, and many are AV1.
+    config.codecs = AppSettings.shared.codecs
     config.backupStreams = AppSettings.shared.backupStreams
     config.allowLowQualityBackup = AppSettings.shared.allowLowQualityBackup
     config.adFreeProxies = model?.adFreeProxies ?? AppSettings.shared.adFreeProxyHosts
@@ -240,7 +241,7 @@ final class KestrelController {
     lines.append(
       StatLine(
         label: "Sound",
-        value: "\(engine.audioAutoFlushes) system restarts, \(engine.lateAudio) late, \(engine.audioGaps) gaps, "
+        value: "\(engine.audioAutoFlushes) system restarts, \(engine.audioResyncs) re-synced, \(engine.lateAudio) late, \(engine.audioGaps) gaps, "
           + String(format: "%.2f s queued", engine.audio.queuedAhead)
           + (engine.audioGaps > 0 ? String(format: " (largest %.0f ms)", engine.largestAudioGap) : "")))
     lines.append(

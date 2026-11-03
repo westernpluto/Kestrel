@@ -91,6 +91,9 @@ final class KestrelEngine: NSObject {
   private var audioHistory: [(AudioFrame, Int64)] = []
   private var lastAudioTime: Int64?
   private(set) var audioAutoFlushes = 0
+  /// Times the sound was put back on the picture (see `syncClock`).
+  private(set) var audioResyncs = 0
+  private var lastAudioResync = Date.distantPast
   private(set) var lateAudio = 0
   private(set) var audioGaps = 0
   private(set) var largestAudioGap = 0.0
@@ -483,9 +486,18 @@ final class KestrelEngine: NSObject {
       if lastVideoTime.map({ time > $0 }) ?? true { lastVideoTime = time }
     }
     if waitingForKeyframe, !frame.isKeyframe { return }
-    let units = AnnexB.units(frame.data)
+    let units = frame.codec == .av1 ? [] : AnnexB.units(frame.data)
     let payload: Data
     switch frame.codec {
+    case .av1:
+      if let config = frame.av1 {
+        let key = config.record + Data([UInt8(config.width >> 8), UInt8(config.width & 0xFF), UInt8(config.height >> 8), UInt8(config.height & 0xFF)])
+        if key != parameterSets || videoFormat == nil {
+          videoFormat = Self.av1Format(config)
+          parameterSets = key
+        }
+      }
+      payload = frame.data
     case .h264:
       if frame.isKeyframe, let sets = H264.parameterSets(units) {
         let key = sets.sps + sets.pps
@@ -822,13 +834,23 @@ final class KestrelEngine: NSObject {
   private func syncClock() {
     guard clockRunning, speed > 0, audio.isPlaying, let heard = audio.position else { return }
     let drift = Double(heard - now) / Double(Self.clock)
-    if abs(drift) > 0.08 {
-      CMTimebaseSetTime(videoClock, time: CMTime(value: heard, timescale: Self.clock))
-      CMTimebaseSetRate(videoClock, rate: Float64(speed))
-    } else {
+    if abs(drift) <= 0.08 {
       let trim = max(-0.02, min(0.02, drift * 0.5))
       CMTimebaseSetRate(videoClock, rate: Float64(speed) * (1 + trim))
+      return
     }
+    // Off by more than that: the sound got stuck, ran dry or started late. The picture leads then
+    // and the sound is put back on it (pulling the picture back to stuck sound kept a stream from
+    // ever starting: it fell further behind and started over, again and again).
+    CMTimebaseSetRate(videoClock, rate: Float64(speed))
+    guard Date().timeIntervalSince(lastAudioResync) > 2 else { return }
+    lastAudioResync = Date()
+    audioResyncs += 1
+    ActivityLog.shared.add(String(format: "Kestrel player: the sound was %.2f s off the picture; put back on it", drift))
+    audio.flush()
+    let from = now
+    for (frame, time) in audioHistory where time >= from { enqueueAudio(frame, time: time, refill: true) }
+    audio.play()
   }
 
   /// Starts the clock once there's video: just behind the newest frame in hand (the stream's
@@ -940,6 +962,18 @@ final class KestrelEngine: NSObject {
           nalUnitHeaderLength: 4, formatDescriptionOut: &format)
       }
     }
+    return status == noErr ? format : nil
+  }
+
+  /// AV1: the av1C record goes in as a sample description atom, as in an MP4 file.
+  static func av1Format(_ config: AV1Config) -> CMVideoFormatDescription? {
+    var format: CMVideoFormatDescription?
+    let extensions: [CFString: Any] = [
+      kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: ["av1C": config.record] as CFDictionary
+    ]
+    let status = CMVideoFormatDescriptionCreate(
+      allocator: kCFAllocatorDefault, codecType: CMVideoCodecType(0x6176_3031), width: Int32(config.width),
+      height: Int32(config.height), extensions: extensions as CFDictionary, formatDescriptionOut: &format)
     return status == noErr ? format : nil
   }
 

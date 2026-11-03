@@ -12,13 +12,24 @@ import Foundation
 
 /// One video frame (access unit) in Annex B form (start codes before each NAL unit).
 struct VideoFrame: Equatable, Sendable {
-  enum Codec: Equatable, Sendable { case h264, hevc }
+  enum Codec: Equatable, Sendable { case h264, hevc, av1 }
   var codec: Codec
   /// Presentation and decode time, 90 kHz.
   var pts: Int64
   var dts: Int64
   var data: Data
   var isKeyframe: Bool
+  /// AV1 (from fragmented MP4 only): the stream's av1C configuration and picture size, for the
+  /// decoder's format. Its data is the sample as stored (OBUs), not Annex B.
+  var av1: AV1Config? = nil
+}
+
+/// What an AV1 decoder needs from the init segment.
+struct AV1Config: Equatable, Sendable {
+  /// The av1C box's contents (without its 8-byte header).
+  var record: Data
+  var width: Int
+  var height: Int
 }
 
 /// One AAC frame (raw, its ADTS header taken off), with the stream's format.

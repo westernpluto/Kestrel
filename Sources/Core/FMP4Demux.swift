@@ -15,6 +15,7 @@ struct FMP4Init: Equatable, Sendable {
   enum Kind: Equatable, Sendable {
     case h264(sps: [Data], pps: [Data], lengthSize: Int)
     case hevc(parameterSets: [Data], lengthSize: Int)
+    case av1(AV1Config)
     case aac(ADTS.Config)
     case other
   }
@@ -89,6 +90,13 @@ struct FMP4Init: Equatable, Sendable {
     case "hvc1", "hev1":
       guard let hvcC = MP4.boxes(d, entry.body + 78, entry.end).first(where: { $0.type == "hvcC" }) else { return .other }
       return parseHVCC(d, hvcC.body, hvcC.end)
+    case "av01":
+      guard let av1C = MP4.boxes(d, entry.body + 78, entry.end).first(where: { $0.type == "av1C" }), av1C.end > av1C.body
+      else { return .other }
+      // The visual sample entry's width and height (16 bits each, 24 bytes in).
+      let width = Int(d[entry.body + 24]) << 8 | Int(d[entry.body + 25])
+      let height = Int(d[entry.body + 26]) << 8 | Int(d[entry.body + 27])
+      return .av1(AV1Config(record: d.subdata(in: av1C.body..<av1C.end), width: width, height: height))
     case "mp4a":
       // An audio sample entry's fields take 28 bytes before its boxes.
       guard let esds = MP4.boxes(d, entry.body + 28, entry.end).first(where: { $0.type == "esds" }),
@@ -335,6 +343,9 @@ struct FMP4Demuxer {
         if keyframe, !units.contains(where: { HEVC.type($0) == 32 }) { units = sets + units }
         for unit in units { annexB.append(contentsOf: [0, 0, 0, 1]); annexB.append(unit) }
         out.append(.video(VideoFrame(codec: .hevc, pts: pts, dts: dts, data: annexB, isKeyframe: keyframe)))
+      case .av1(let config):
+        // As stored (OBUs with sizes): what the decoder takes. The keyframe flag comes from trun.
+        out.append(.video(VideoFrame(codec: .av1, pts: pts, dts: dts, data: bytes, isKeyframe: sample.sync, av1: config)))
       case .aac(let config):
         out.append(.audio(AudioFrame(pts: pts, data: bytes, config: config)))
       case .other:

@@ -360,6 +360,32 @@ func testCatchUpHoldsOneSpeed() {
   check(buffer < 1.3, "caught up: \(buffer) s in hand")
 }
 
+func testAV1Init() {
+  // An init segment with one AV1 track (2560x1440): its av1C record and size are read.
+  func box(_ type: String, _ payload: Data) -> Data {
+    var size = UInt32(8 + payload.count).bigEndian
+    return Data(bytes: &size, count: 4) + Data(type.utf8) + payload
+  }
+  func u32(_ v: UInt32) -> Data { var b = v.bigEndian; return Data(bytes: &b, count: 4) }
+  let record = Data([0x81, 0x0D, 0x0C, 0x00])
+  var visual = Data(count: 24) + Data([0x0A, 0x00, 0x05, 0xA0])  // 2560 x 1440
+  visual += Data(count: 50)
+  let entry = box("av01", visual + box("av1C", record))
+  let stsd = box("stsd", Data(count: 4) + u32(1) + entry)
+  let stbl = box("stbl", stsd)
+  let minf = box("minf", stbl)
+  let mdhd = box("mdhd", Data(count: 12) + u32(90_000) + Data(count: 8))
+  let mdia = box("mdia", mdhd + minf)
+  let tkhd = box("tkhd", Data(count: 12) + u32(1) + Data(count: 68))
+  let moov = box("moov", box("trak", tkhd + mdia))
+  let parsed = FMP4Init.parse(box("ftyp", Data("iso6".utf8)) + moov)
+  if case .av1(let config) = parsed?.tracks[1]?.kind {
+    check(config.record == record && config.width == 2560 && config.height == 1440, "av1C and size: \(config)")
+  } else {
+    check(false, "AV1 track not found: \(String(describing: parsed))")
+  }
+}
+
 func testFrameGrid() {
   // 60 fps stamped in whole milliseconds (16, 17, 17 ms): put on the exact 1/60 s grid.
   var grid = FrameGrid()
@@ -2065,6 +2091,7 @@ testMultiviewLayout()
 testStreamArrival()
 testMediaParsing()
 testFrameGrid()
+testAV1Init()
 testCatchUpHoldsOneSpeed()
 testCatchUpHoversWithoutFlipping()
 testAdTimeline()
