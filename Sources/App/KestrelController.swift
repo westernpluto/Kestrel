@@ -172,7 +172,10 @@ final class KestrelController {
     controller.delegate = delegate
     pipObservation = controller.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
       let active = pip.isPictureInPictureActive
-      Task { @MainActor in self?.pictureInPictureActive = active }
+      Task { @MainActor in
+        self?.pictureInPictureActive = active
+        self?.engine?.screenNote(active ? "window up" : "window gone")
+      }
     }
     pip = controller
     pipDelegate = delegate

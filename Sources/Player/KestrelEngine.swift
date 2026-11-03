@@ -42,6 +42,7 @@ final class KestrelEngine: NSObject {
   /// copy; the system's "playing in Picture in Picture" shows in the app).
   var screenHiddenForPictureInPicture = false {
     didSet {
+      if oldValue != screenHiddenForPictureInPicture { screenNote(screenHiddenForPictureInPicture ? "window opening: screen hidden" : "window heading back: screen shown") }
       CATransaction.begin()
       CATransaction.setDisableActions(true)
       for layer in [displayLayer, retiringLayer, coverLayer].compactMap({ $0 }) { layer.isHidden = screenHiddenForPictureInPicture }
@@ -689,6 +690,7 @@ final class KestrelEngine: NSObject {
         coverLayer?.isHidden = screenHiddenForPictureInPicture
       }
       onScreenLayers?()
+      screenNote("caught up on a fresh layer")
     } else {
       displayLayer.flush()
     }
@@ -728,6 +730,7 @@ final class KestrelEngine: NSObject {
     let settled = drawingSince.map { Date().timeIntervalSince($0) > 0.4 } ?? false
       && Date().timeIntervalSince(caughtUpAt) > 0.6 && Date().timeIntervalSince(retiringSince) > 0.6
     guard force || settled else { return }
+    if !force { screenNote("old picture taken away") }
     drawingSince = nil
     retiringLayer = nil
     coverLayer = nil
@@ -737,7 +740,18 @@ final class KestrelEngine: NSObject {
 
   /// The app is back and active (decoding allowed again): the screen catches up at once, onto a
   /// fresh layer, the picture that was up staying underneath until it draws.
+  /// A line in the Activity log about the screen's layers around Picture in Picture, timed to the
+  /// millisecond (to find the moment the picture goes black on the way back).
+  func screenNote(_ text: String) {
+    let ms = Int(Date().timeIntervalSince1970 * 1000) % 100_000
+    var showing = "?"
+    if #available(iOS 17.4, tvOS 17.4, *) { showing = displayLayer.sampleBufferRenderer.displayedPixelBuffer() != nil ? "frame" : "empty" }
+    ActivityLog.shared.add(
+      "PiP screen \(ms): \(text) [screen \(showing)\(displayLayer.isHidden ? " hidden" : ""), old \(retiringLayer == nil ? "none" : "kept"), cover \(coverLayer == nil ? "none" : "up"), app \(UIApplication.shared.applicationState.rawValue)]")
+  }
+
   private func enteringForeground() {
+    screenNote("app back")
     inBackground = false
     // Decoding comes back with the app being active: catching up before that only reset the screen.
     guard UIApplication.shared.applicationState == .active else { return }
