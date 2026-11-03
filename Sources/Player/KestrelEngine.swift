@@ -569,8 +569,10 @@ final class KestrelEngine: NSObject {
     if decodeInLayer {
       // The picture on screen (left alone in the background: it can't decode there, and is
       // brought back up to the frame showing when the app returns).
-      if inBackground {
-        // (Past the keyframe check above: the copy goes on from here.)
+      if inBackground || (UIApplication.shared.applicationState != .active && displayLayer.requiresFlushToResumeDecoding) {
+        // (Past the keyframe check above: the copy goes on from here.) Not while the app is still
+        // coming back and can't decode yet either: catching up then reset the screen with every
+        // frame; it catches up once the app is active (see `enteringForeground`).
         waitingForKeyframe = false
         screenBehind = true
       } else if !feedScreen(entry, hidden: hidden) {
@@ -663,19 +665,29 @@ final class KestrelEngine: NSObject {
       displayLayer.flush()
       return false
     }
-    if onScreenLayers != nil, retiringLayer == nil {
-      // A fresh layer on top of the old one: empty, it's see-through, so the old picture stays
-      // until the new one has the frame playing now (flushing the old one went black for a moment).
-      let old = displayLayer
+    if onScreenLayers != nil {
+      // A fresh layer on top: empty, it's see-through, so whatever picture is up stays until the
+      // new one has the frame playing now. A layer on screen is never flushed (that went black
+      // for a moment): the one showing a picture stays underneath, an empty one is let go.
+      let current = displayLayer
+      var currentShows = current.status != .failed
+      if #available(iOS 17.4, tvOS 17.4, *) { currentShows = currentShows && current.sampleBufferRenderer.displayedPixelBuffer() != nil }
+      if retiringLayer == nil || currentShows {
+        if let previous = retiringLayer { previous.flushAndRemoveImage() }
+        retiringLayer = current
+      } else {
+        current.flushAndRemoveImage()
+      }
+      retiringSince = Date()
       let fresh = AVSampleBufferDisplayLayer()
-      fresh.videoGravity = old.videoGravity
+      fresh.videoGravity = current.videoGravity
       fresh.controlTimebase = videoClock
       fresh.isHidden = screenHiddenForPictureInPicture
       displayLayer = fresh
-      retiringLayer = old
-      retiringSince = Date()
-      coverLayer = makeCover(gravity: old.videoGravity)
-      coverLayer?.isHidden = screenHiddenForPictureInPicture
+      if coverLayer == nil {
+        coverLayer = makeCover(gravity: current.videoGravity)
+        coverLayer?.isHidden = screenHiddenForPictureInPicture
+      }
       onScreenLayers?()
     } else {
       displayLayer.flush()
@@ -707,8 +719,6 @@ final class KestrelEngine: NSObject {
   /// The old layer goes once the new one is drawing.
   private func retireOldLayer(force: Bool = false) {
     guard let old = retiringLayer else { return }
-    // Drawing steadily: "rendering" comes before the first picture is up, and taking the old one
-    // away then showed black for a few frames.
     // "Rendering" isn't enough: the new layer said so while the app was still coming back and not
     // yet allowed to decode, and taking the old picture away then showed black for a few frames.
     // It goes once the new layer has a frame on screen, and has kept drawing for a moment.
@@ -725,11 +735,12 @@ final class KestrelEngine: NSObject {
     onScreenLayers?()
   }
 
-  /// The app is coming back (Picture in Picture's window is on its way back): the screen's layer
-  /// catches up now, during that animation, instead of at the next frame; by the time the window
-  /// goes, the picture underneath is the one playing (it showed the frame from before for a moment).
+  /// The app is back and active (decoding allowed again): the screen catches up at once, onto a
+  /// fresh layer, the picture that was up staying underneath until it draws.
   private func enteringForeground() {
     inBackground = false
+    // Decoding comes back with the app being active: catching up before that only reset the screen.
+    guard UIApplication.shared.applicationState == .active else { return }
     guard running, decodeInLayer, screenBehind || displayLayer.requiresFlushToResumeDecoding else { return }
     if !catchUpScreen() { waitingForKeyframe = true }
   }
