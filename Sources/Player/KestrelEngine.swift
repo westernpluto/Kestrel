@@ -56,6 +56,16 @@ final class KestrelEngine: NSObject {
   /// Told when the screen's layers change (the view puts the new one on top of the retiring one).
   /// Without it, the layer is caught up in place (flushed: black until it has a picture again).
   var onScreenLayers: (() -> Void)?
+  /// Picture in Picture's window is up (the old picture isn't taken away before it's gone).
+  var windowUp = false
+  /// The screen's layer has a frame on screen and is caught up (nothing hidden).
+  var screenDrawing: Bool {
+    guard !screenBehind, !inBackground, !displayLayer.isHidden, displayLayer.status == .rendering,
+      !displayLayer.requiresFlushToResumeDecoding
+    else { return false }
+    if #available(iOS 17.4, tvOS 17.4, *) { return displayLayer.sampleBufferRenderer.displayedPixelBuffer() != nil }
+    return true
+  }
   /// Puts the Picture in Picture copy's view over the picture's spot again (set by the view).
   var placeMirror: (() -> Void)?
   /// The sound, decoded here and played through AVAudioEngine; it's also the clock (see `syncClock`).
@@ -739,7 +749,7 @@ final class KestrelEngine: NSObject {
     if !drawing { drawingSince = nil } else if drawingSince == nil { drawingSince = Date() }
     let settled = drawingSince.map { Date().timeIntervalSince($0) > 0.4 } ?? false
       && Date().timeIntervalSince(caughtUpAt) > 0.6 && Date().timeIntervalSince(retiringSince) > 0.6
-    guard force || settled else { return }
+    guard force || (settled && !windowUp) else { return }
     if !force { screenNote("old picture taken away") }
     drawingSince = nil
     retiringLayer = nil

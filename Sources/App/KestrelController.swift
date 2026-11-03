@@ -177,6 +177,7 @@ final class KestrelController {
       Task { @MainActor in
         self?.pictureInPictureActive = active
         self?.engine?.screenNote(active ? "window up" : "window gone")
+        self?.engine?.windowUp = active
       }
     }
     pip = controller
@@ -433,6 +434,33 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
     _ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error
   ) {
     MainActor.assumeIsolated { controller?.engine?.screenHiddenForPictureInPicture = false }
+  }
+
+  // The window stays up until the app's own picture is drawing (at most a moment): left to
+  // itself, the system handed over on its own time, and the picture area was black for a few
+  // frames in between.
+  func pictureInPictureController(
+    _ pictureInPictureController: AVPictureInPictureController,
+    restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
+  ) {
+    MainActor.assumeIsolated {
+      guard let engine = controller?.engine else {
+        completionHandler(true)
+        return
+      }
+      engine.screenHiddenForPictureInPicture = false
+      engine.screenNote("window asks for the picture")
+      let started = Date()
+      func check() {
+        if engine.screenDrawing || Date().timeIntervalSince(started) > 0.6 {
+          engine.screenNote(engine.screenDrawing ? "picture ready: window handed back" : "picture not ready in time: window handed back")
+          completionHandler(true)
+        } else {
+          DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) { MainActor.assumeIsolated { check() } }
+        }
+      }
+      check()
+    }
   }
 
   private weak var controller: KestrelController?
