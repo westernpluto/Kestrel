@@ -178,6 +178,13 @@ final class KestrelController {
         self?.pictureInPictureActive = active
         self?.engine?.screenNote(active ? "window up" : "window gone")
         self?.engine?.windowUp = active
+        if !active {
+          // Back in sight a little later (it has to be for the next Picture in Picture).
+          let engine = self?.engine
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak engine] in
+            MainActor.assumeIsolated { engine?.setMirrorHidden(false) }
+          }
+        }
       }
     }
     pip = controller
@@ -421,6 +428,7 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
   // playing at once looked like a second video), and is back as the window heads home.
   func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
     MainActor.assumeIsolated {
+      controller?.engine?.setMirrorHidden(false)
       controller?.engine?.placeMirror?()
       controller?.engine?.screenHiddenForPictureInPicture = true
     }
@@ -449,6 +457,10 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
         return
       }
       engine.screenHiddenForPictureInPicture = false
+      // The copy out of sight for the handover: the system shows it in front for a moment as it
+      // gives it back, and empty from the window it's black (three black frames over the picture,
+      // with every layer of the picture in place).
+      engine.setMirrorHidden(true)
       engine.screenNote("window asks for the picture")
       let started = Date()
       @MainActor func check() {

@@ -66,6 +66,16 @@ final class KestrelEngine: NSObject {
     if #available(iOS 17.4, tvOS 17.4, *) { return displayLayer.sampleBufferRenderer.displayedPixelBuffer() != nil }
     return true
   }
+  /// Hides or shows the Picture in Picture copy (out of sight while the window is handed back).
+  func setMirrorHidden(_ hidden: Bool) {
+    guard let mirrorLayer, mirrorLayer.isHidden != hidden else { return }
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    mirrorLayer.isHidden = hidden
+    CATransaction.commit()
+    screenNote(hidden ? "copy hidden" : "copy shown")
+  }
+
   /// Puts the Picture in Picture copy's view over the picture's spot again (set by the view).
   var placeMirror: (() -> Void)?
   /// The sound, decoded here and played through AVAudioEngine; it's also the clock (see `syncClock`).
