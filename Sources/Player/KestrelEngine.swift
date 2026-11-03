@@ -189,6 +189,10 @@ final class KestrelEngine: NSObject {
         MainActor.assumeIsolated { self?.enteringForeground() }
       })
     displayLayer.videoGravity = .resizeAspect
+    // Sound at 1.04x while catching up: stretched smoothly. Left to the default (made for brief
+    // fast-forwards), it sped up by dropping bits of sound: a ~100 ms gap every second or two for
+    // as long as it caught up, heard as stutter.
+    audioRenderer.audioTimePitchAlgorithm = .spectral
     synchronizer.addRenderer(displayLayer)
     synchronizer.addRenderer(audioRenderer)
     // Speed changes take effect at once: the engine only plays when it has the video in hand, and

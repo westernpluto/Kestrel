@@ -481,6 +481,7 @@ final class PlayerModel: ObservableObject {
       return
     }
     let item = AVPlayerItem(url: url)
+    item.audioTimePitchAlgorithm = .spectral
     if tileMaxHeight != nil { item.preferredMaximumResolution = Self.resolution(forHeight: tileMaxHeight) }
     pendingStart = seconds
     itemObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
@@ -1253,6 +1254,7 @@ final class PlayerModel: ObservableObject {
       let url = StreamProxy.shared.mediaURL(for: rewindSource, index: rewindQuality)
     else { return }
     let item = AVPlayerItem(url: url)
+    item.audioTimePitchAlgorithm = .spectral
     rewindItemObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
       let status = item.status
       let message = item.error?.localizedDescription
@@ -1298,6 +1300,7 @@ final class PlayerModel: ObservableObject {
     rewindPendingSeek = seconds
     rewindEndSince = nil
     let item = AVPlayerItem(url: url)
+    item.audioTimePitchAlgorithm = .spectral
     rewindItemObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
       let status = item.status
       let message = item.error?.localizedDescription
