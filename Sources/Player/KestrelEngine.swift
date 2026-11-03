@@ -81,6 +81,18 @@ final class KestrelEngine: NSObject {
   private var startedLoading = Date()
   private(set) var stalls = 0
   private(set) var segmentsLoaded = 0
+  /// Fragmented MP4 initialization segments, by address (and the ones being fetched).
+  private var inits: [String: FMP4Init] = [:]
+  private var fetchingInits: Set<String> = []
+  // For the stats (what to look at when a stream won't play).
+  private(set) var container = "–"
+  private(set) var videoFramesQueued = 0
+  private(set) var videoFramesHidden = 0
+  private(set) var audioFramesQueued = 0
+  private(set) var decoderFailures = 0
+  private(set) var lastDecoderError: String?
+  /// Where it started, behind the newest frame it had (seconds).
+  private(set) var startedBehind: Double?
   private var muted = false
 
   static let clock: Int32 = 90_000
@@ -293,14 +305,26 @@ final class KestrelEngine: NSObject {
       let sample = Self.videoSample(
         H264.sample(units), format: format, pts: time, dts: dts, duration: frameLength, keyframe: frame.isKeyframe, hidden: hidden)
     else { return }
-    if displayLayer.status == .failed {
-      // The decoder gave up (a corrupt frame): flush and carry on from the next keyframe.
+    if displayLayer.status == .failed || displayLayer.requiresFlushToResumeDecoding {
+      // The decoder gave up (a corrupt frame, or the app was in the background): flush and carry
+      // on from the next keyframe.
+      if displayLayer.status == .failed {
+        decoderFailures += 1
+        let error = displayLayer.error as NSError?
+        let text = error.map { "\($0.domain) \($0.code): \($0.localizedDescription)" } ?? "unknown"
+        if text != lastDecoderError || decoderFailures % 20 == 1 {
+          ActivityLog.shared.add("Kestrel player: the video decoder failed (\(text)); starting again from the next keyframe")
+        }
+        lastDecoderError = text
+      }
       displayLayer.flush()
       waitingForKeyframe = true
       if !frame.isKeyframe { return }
     }
     waitingForKeyframe = false
     displayLayer.enqueue(sample)
+    videoFramesQueued += 1
+    if hidden { videoFramesHidden += 1 }
     if firstVideoTime == nil { firstVideoTime = time }
     if lastVideoTime.map({ time > $0 }) ?? true { lastVideoTime = time }
   }
@@ -312,6 +336,7 @@ final class KestrelEngine: NSObject {
     }
     guard let format = audioFormat, let sample = Self.audioSample(frame.data, format: format, pts: time) else { return }
     audioRenderer.enqueue(sample)
+    audioFramesQueued += 1
   }
 
   /// Starts the clock once there's video: just behind the newest frame in hand (the stream's
@@ -332,6 +357,9 @@ final class KestrelEngine: NSObject {
     for held in heldAudio where held.pts >= start { enqueueAudio(held.frame, time: held.pts) }
     heldVideo = []
     heldAudio = []
+    startedBehind = Double(last - start) / Double(Self.clock)
+    ActivityLog.shared.add(
+      String(format: "Kestrel player: started %.2f s behind the newest frame (%@, %d frames decoded ahead of it)", startedBehind ?? 0, container, videoFramesHidden))
     synchronizer.setRate(1, time: CMTime(value: start, timescale: Self.clock))
     clockRunning = true
     catchUp.restart()
@@ -474,12 +502,80 @@ final class KestrelEngine: NSObject {
 
 // MARK: - Downloads
 
+extension KestrelEngine {
+  /// Unpacks a segment's bytes with the demuxer its first bytes call for: MPEG-TS, or fragmented
+  /// MP4 once its init segment is in (bytes before that wait).
+  fileprivate func feed(_ load: SegmentLoad, _ data: Data) {
+    if load.demuxer != nil {
+      load.frames += load.demuxer!.feed(data)
+      return
+    }
+    load.raw.append(data)
+    guard !load.raw.isEmpty else { return }
+    if SegmentDemuxer.isTransportStream(load.raw) {
+      load.demuxer = .ts(TSDemuxer())
+      container = "MPEG-TS"
+    } else if let uri = load.planned.mapURI {
+      guard let initSegment = inits[uri] else {
+        fetchInit(uri)
+        return
+      }
+      load.demuxer = .mp4(FMP4Demuxer(initSegment: initSegment))
+      container = "fragmented MP4"
+    } else {
+      // Neither: nothing to do with it.
+      load.task?.cancel()
+      load.failed = true
+      load.finished = true
+      return
+    }
+    let pending = load.raw
+    load.raw = Data()
+    load.frames += load.demuxer!.feed(pending)
+  }
+
+  private func fetchInit(_ uri: String) {
+    guard !fetchingInits.contains(uri), let url = URL(string: uri) else { return }
+    fetchingInits.insert(uri)
+    Task { [weak self] in
+      var request = URLRequest(url: url)
+      request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
+      let fetched = try? await URLSession.shared.data(for: request)
+      guard let self else { return }
+      self.fetchingInits.remove(uri)
+      let parsed = fetched.flatMap { FMP4Init.parse($0.0) }
+      if let parsed { self.inits[uri] = parsed } else {
+        ActivityLog.shared.add("Kestrel player: couldn't read the stream's init segment")
+      }
+      for load in self.loads where load.demuxer == nil && load.planned.mapURI == uri {
+        if parsed == nil {
+          load.task?.cancel()
+          load.failed = true
+          load.finished = true
+          continue
+        }
+        self.feed(load, Data())
+        if load.downloaded {
+          load.frames += load.demuxer?.flush() ?? []
+          load.finished = true
+        }
+      }
+      self.pump()
+    }
+  }
+}
+
 /// One segment being downloaded and unpacked.
 @MainActor
 final class SegmentLoad {
   let planned: LiveSegmentPlanner.Planned
   var task: URLSessionDataTask?
-  var demuxer = TSDemuxer()
+  /// Chosen from the first bytes (see KestrelEngine.feed).
+  var demuxer: SegmentDemuxer?
+  /// Bytes that came before the demuxer could be made (waiting for an init segment).
+  var raw = Data()
+  /// Downloaded completely (it may still wait for its init segment).
+  var downloaded = false
   /// Unpacked, not yet handed to the renderers.
   var frames: [DemuxedFrame] = []
   var received = 0
@@ -499,7 +595,7 @@ extension KestrelEngine: URLSessionDataDelegate {
     MainActor.assumeIsolated {
       guard let load = loads.first(where: { $0.task === dataTask }) else { return }
       load.received += data.count
-      load.frames += load.demuxer.feed(data)
+      feed(load, data)
       pump()
     }
   }
@@ -513,8 +609,12 @@ extension KestrelEngine: URLSessionDataDelegate {
         if (error as? URLError)?.code != .cancelled {
           ActivityLog.shared.add("Kestrel player: segment \(load.planned.sequence) failed (\(error?.localizedDescription ?? "HTTP \(status)"))")
         }
+      } else if load.demuxer == nil, !load.raw.isEmpty {
+        // Downloaded, but its init segment isn't in yet: finished when it is.
+        load.downloaded = true
+        return
       } else {
-        load.frames += load.demuxer.flush()
+        load.frames += load.demuxer?.flush() ?? []
       }
       load.finished = true
       pump()

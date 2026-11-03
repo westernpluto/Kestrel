@@ -169,7 +169,23 @@ final class KestrelController {
         value: rate > 1.001 ? String(format: "%.2f× (catching up)", rate) : rate < 0.999 && rate > 0 ? String(format: "%.2f× (building margin)", rate) : "1.00×"))
     lines.append(StatLine(label: "Margin", value: String(format: "%.1f s", engine.catchUp.targetBuffer)))
     lines.append(StatLine(label: "Stalls", value: "\(engine.stalls)"))
-    lines.append(StatLine(label: "Segments", value: "\(engine.segmentsLoaded)"))
+    lines.append(StatLine(label: "Segments", value: "\(engine.segmentsLoaded) (\(engine.container))"))
+    // What to look at when a stream won't show: frames handed to the decoder (and how many only
+    // decoded ahead of the start), its state, its last error.
+    lines.append(
+      StatLine(
+        label: "Frames",
+        value: "video \(engine.videoFramesQueued) (\(engine.videoFramesHidden) ahead), audio \(engine.audioFramesQueued)"))
+    let decoder: String
+    switch engine.displayLayer.status {
+    case .rendering: decoder = "rendering"
+    case .failed: decoder = "failed"
+    default: decoder = "waiting"
+    }
+    lines.append(
+      StatLine(label: "Decoder", value: engine.decoderFailures > 0 ? "\(decoder), \(engine.decoderFailures) failures" : decoder))
+    if let error = engine.lastDecoderError { lines.append(StatLine(label: "Decoder error", value: error)) }
+    if let behind = engine.startedBehind { lines.append(StatLine(label: "Started", value: String(format: "%.2f s behind newest", behind))) }
     lines.append(StatLine(label: "Ads", value: AppSettings.shared.adBlockingSummary))
     return lines
   }

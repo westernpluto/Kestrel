@@ -1793,6 +1793,63 @@ func testTSDemux() {
   check(behind.first?.sequence == 200, "jumps to the playlist's start when far behind")
 }
 
+func testFMP4Demux() {
+  let dir = URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent()
+  guard let initData = try? Data(contentsOf: dir.appendingPathComponent("twitch_fmp4_init.mp4")),
+    let segment = try? Data(contentsOf: dir.appendingPathComponent("twitch_fmp4_segment.m4s"))
+  else {
+    check(false, "fMP4 fixtures missing")
+    return
+  }
+  guard let initSegment = FMP4Init.parse(initData) else {
+    check(false, "init segment didn't parse")
+    return
+  }
+  let kinds = initSegment.tracks.values.map(\.kind)
+  let video = kinds.compactMap { kind -> (Int, Int)? in if case .h264(let sps, let pps, _) = kind { return (sps.count, pps.count) } else { return nil } }
+  check(video.first.map { $0.0 >= 1 && $0.1 >= 1 } ?? false, "avcC parameter sets \(kinds)")
+  let audio = kinds.compactMap { kind -> ADTS.Config? in if case .aac(let c) = kind { return c } else { return nil } }
+  check(audio.first.map { $0.objectType == 2 && [44100, 48000].contains($0.sampleRate) && $0.channels == 2 } ?? false, "esds config \(audio)")
+  // A real segment: whole, then in awkward pieces.
+  var whole = FMP4Demuxer(initSegment: initSegment)
+  let all = whole.feed(segment)
+  let frames = all.compactMap { if case .video(let f) = $0 { return f } else { return nil } }
+  let sounds = all.compactMap { if case .audio(let f) = $0 { return f } else { return nil } }
+  check(frames.count >= 10, "fMP4 video frames \(frames.count)")
+  check(sounds.count >= 10, "fMP4 audio frames \(sounds.count)")
+  check(frames.first?.isKeyframe == true, "fMP4 starts on a keyframe")
+  if let first = frames.first {
+    let units = AnnexB.units(first.data)
+    check(H264.parameterSets(units) != nil, "parameter sets put in front of the keyframe")
+    check(units.contains { H264.type($0) == 5 }, "IDR slice in the keyframe")
+  }
+  check(zip(frames, frames.dropFirst()).allSatisfy { $1.dts > $0.dts }, "fMP4 decode times increase")
+  let steps = Set(zip(frames, frames.dropFirst()).map { $1.dts - $0.dts })
+  check(steps.allSatisfy { (1400...3100).contains($0) }, "fMP4 frame steps on 90 kHz \(steps)")
+  check(frames.allSatisfy { $0.pts >= $0.dts }, "shown no earlier than decoded")
+  if let v = frames.first, let a = sounds.first { check(abs(v.pts - a.pts) < 90_000, "audio and video on one clock \(v.pts) \(a.pts)") }
+  var pieces = FMP4Demuxer(initSegment: initSegment)
+  var chunked: [DemuxedFrame] = []
+  var offset = 0
+  var size = 3
+  while offset < segment.count {
+    let end = min(segment.count, offset + size)
+    chunked += pieces.feed(segment.subdata(in: offset..<end))
+    offset = end
+    size = (size * 13 + 7) % 9001 + 1
+  }
+  check(chunked == all, "chunked fMP4 gives the same frames (\(chunked.count) vs \(all.count))")
+  // The right demuxer from the first bytes.
+  check(!SegmentDemuxer.isTransportStream(segment) && SegmentDemuxer.isTransportStream(Data([0x47, 0, 0])), "format sniffing")
+  // Timescale conversion without overflow.
+  check(FMP4Demuxer.to90k(48_000 * 3, 48_000) == 270_000 && FMP4Demuxer.to90k(1 << 50, 1000) == (1 << 50) * 90, "to 90 kHz")
+  // The planner keeps the init segment with each segment.
+  var planner = LiveSegmentPlanner(startBack: 0)
+  let planned = planner.plan("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:5\n#EXT-X-MAP:URI=\"https://cdn/init.mp4\"\n#EXTINF:2.000,\nhttps://cdn/a.m4s\n#EXT-X-TWITCH-PREFETCH:https://cdn/b.m4s\n")
+  check(planned.map(\.mapURI) == ["https://cdn/init.mp4", "https://cdn/init.mp4"], "init segment carried: \(planned.map(\.mapURI))")
+}
+
+testFMP4Demux()
 testTSDemux()
 testDeviceLogin()
 testCatchUpSimulation()

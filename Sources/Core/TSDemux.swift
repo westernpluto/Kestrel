@@ -384,6 +384,8 @@ struct LiveSegmentPlanner {
     var live: Bool
     var discontinuity: Bool
     var programDate: Date?
+    /// The fragmented MP4 initialization segment (#EXT-X-MAP) in force, if the stream has one.
+    var mapURI: String? = nil
   }
 
   /// How many complete segments before the newest to start from.
@@ -401,9 +403,12 @@ struct LiveSegmentPlanner {
     var pendingDiscontinuity = false
     var pendingDate: Date?
     var prefetch: [String] = []
+    var map: String?
     for raw in HLS.lines(text) {
       let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-      if line.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") {
+      if line.hasPrefix("#EXT-X-MAP:") {
+        map = HLS.attributes(Substring(line))["URI"]
+      } else if line.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") {
         mediaSequence = Int(line.dropFirst("#EXT-X-MEDIA-SEQUENCE:".count)) ?? 0
       } else if line.hasPrefix("#EXT-X-DISCONTINUITY"), !line.hasPrefix("#EXT-X-DISCONTINUITY-SEQUENCE") {
         pendingDiscontinuity = true
@@ -415,7 +420,7 @@ struct LiveSegmentPlanner {
         segments.append(
           Planned(
             sequence: mediaSequence + segments.count, uri: line, live: false, discontinuity: pendingDiscontinuity,
-            programDate: pendingDate))
+            programDate: pendingDate, mapURI: map))
         pendingDiscontinuity = false
         pendingDate = nil
       }
@@ -426,7 +431,7 @@ struct LiveSegmentPlanner {
       segments.append(
         Planned(
           sequence: mediaSequence + segments.count, uri: uri, live: true, discontinuity: false,
-          programDate: lastDate.map { $0.addingTimeInterval(2 * Double(index + 1)) }))
+          programDate: lastDate.map { $0.addingTimeInterval(2 * Double(index + 1)) }, mapURI: map))
     }
     guard !segments.isEmpty else { return [] }
     let completeCount = segments.count - prefetch.count
