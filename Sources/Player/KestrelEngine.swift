@@ -780,7 +780,18 @@ final class KestrelEngine: NSObject {
     if let mirrorLayer { return mirrorLayer }
     let layer = AVSampleBufferDisplayLayer()
     layer.videoGravity = displayLayer.videoGravity
-    layer.controlTimebase = videoClock
+    // A clock of its own that follows the picture's: the system works the Picture in Picture
+    // layer's clock while it takes the layer into the window and hands it back, and on the shared
+    // clock that moved the screen's picture too (a few black frames after the window landed).
+    var follower: CMTimebase?
+    CMTimebaseCreateWithSourceTimebase(allocator: kCFAllocatorDefault, sourceTimebase: videoClock, timebaseOut: &follower)
+    if let follower {
+      CMTimebaseSetTime(follower, time: CMTimebaseGetTime(videoClock))
+      CMTimebaseSetRate(follower, rate: 1)
+      layer.controlTimebase = follower
+    } else {
+      layer.controlTimebase = videoClock
+    }
     mirrorLayer = layer
     mirrorWaiting = true
     return layer
