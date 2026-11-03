@@ -301,38 +301,65 @@ struct KestrelVideoView: UIViewRepresentable {
   /// The screen's layer on top, the Picture in Picture copy right behind it (see
   /// `KestrelEngine.makeMirror`).
   final class LayerView: UIView {
+    /// The Picture in Picture copy lives in a view of its own, behind the picture: while it hands
+    /// the window back, the system hides the copy's container for a moment, and when the screen's
+    /// picture shared it, the picture went black for a few frames too (only for single streams:
+    /// multi-view's window works another way).
+    private let mirrorHost = UIView()
+    /// The screen's layers, bottom to top: a retiring layer, a still of the last frame (back from
+    /// Picture in Picture), the screen's layer.
+    private let screenHost = UIView()
     private var shown: [CALayer] = []
+    private weak var mirror: CALayer?
 
-    /// Bottom to top: the Picture in Picture copy, a retiring screen layer, a still of the last
-    /// frame (back from Picture in Picture), the screen's layer.
-    func show(_ video: AVSampleBufferDisplayLayer, retiring: AVSampleBufferDisplayLayer?, cover: CALayer? = nil, mirror: AVSampleBufferDisplayLayer?) {
-      let wanted: [CALayer] = [mirror, retiring, cover, video].compactMap { $0 }
-      guard wanted.map(ObjectIdentifier.init) != shown.map(ObjectIdentifier.init) else { return }
+    override init(frame: CGRect) {
+      super.init(frame: frame)
+      for host in [mirrorHost, screenHost] {
+        host.isUserInteractionEnabled = false
+        host.backgroundColor = .clear
+        addSubview(host)
+      }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func show(_ video: AVSampleBufferDisplayLayer, retiring: AVSampleBufferDisplayLayer?, cover: CALayer? = nil, mirror newMirror: AVSampleBufferDisplayLayer?) {
       CATransaction.begin()
       CATransaction.setDisableActions(true)
-      for layer in shown where !wanted.contains(where: { $0 === layer }) { layer.removeFromSuperlayer() }
-      // Only new ones are put in (each above the one before it); the others are left where they
-      // are: taking the Picture in Picture copy out and back could upset a window that's open.
-      var below: CALayer?
-      for layer in wanted {
-        if layer.superlayer !== self.layer {
-          layer.frame = bounds
-          if let below {
-            self.layer.insertSublayer(layer, above: below)
-          } else {
-            self.layer.insertSublayer(layer, at: 0)
+      // The copy goes in once (taking it out and back could upset a window that's open).
+      if let newMirror, newMirror.superlayer !== mirrorHost.layer {
+        newMirror.frame = mirrorHost.bounds
+        mirrorHost.layer.addSublayer(newMirror)
+        mirror = newMirror
+      }
+      let wanted: [CALayer] = [retiring, cover, video].compactMap { $0 }
+      if wanted.map(ObjectIdentifier.init) != shown.map(ObjectIdentifier.init) {
+        for layer in shown where !wanted.contains(where: { $0 === layer }) { layer.removeFromSuperlayer() }
+        // Only new ones are put in, each above the one before it.
+        var below: CALayer?
+        for layer in wanted {
+          if layer.superlayer !== screenHost.layer {
+            layer.frame = screenHost.bounds
+            if let below {
+              screenHost.layer.insertSublayer(layer, above: below)
+            } else {
+              screenHost.layer.insertSublayer(layer, at: 0)
+            }
           }
+          below = layer
         }
-        below = layer
+        shown = wanted
       }
       CATransaction.commit()
-      shown = wanted
     }
 
     override func layoutSubviews() {
       super.layoutSubviews()
       CATransaction.begin()
       CATransaction.setDisableActions(true)
+      mirrorHost.frame = bounds
+      screenHost.frame = bounds
+      mirror?.frame = bounds
       for layer in shown { layer.frame = bounds }
       CATransaction.commit()
     }
