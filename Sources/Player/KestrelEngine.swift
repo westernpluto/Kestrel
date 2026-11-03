@@ -8,9 +8,10 @@
 //   playlist (from the ad-free session)  →  LiveSegmentPlanner: which segments, in order
 //   each segment streamed over HTTP       →  TSDemuxer: video and audio frames, as bytes arrive
 //   frames                                →  sample buffers on one timeline (StreamTimeline)
-//   AVSampleBufferDisplayLayer + AVSampleBufferAudioRenderer, on an AVSampleBufferRenderSynchronizer
+//   pictures: AVSampleBufferDisplayLayer, on a clock kept on the sound
+//   sound: decoded here, through AVAudioEngine with a time-pitch unit (AudioOutput)
 //
-// and steers the synchronizer's rate with the same LiveCatchUp as the low-latency player, so it
+// and steers the speed with the same LiveCatchUp as the low-latency player, so it
 // stays close to live and rides out hiccups the same way. It starts already near the live edge:
 // the frames before its starting point are decoded but not shown. It runs on iPhone and Apple TV.
 
@@ -36,13 +37,15 @@ final class KestrelEngine: NSObject {
   private(set) var retiringLayer: AVSampleBufferDisplayLayer?
   private var retiringSince = Date.distantPast
   private var caughtUpAt = Date.distantPast
-  /// Screen layers on the synchronizer besides the current one (taken off when the stream stops).
-  private var attachedLayers: [AVSampleBufferDisplayLayer] = []
   /// Told when the screen's layers change (the view puts the new one on top of the retiring one).
   /// Without it, the layer is caught up in place (flushed: black until it has a picture again).
   var onScreenLayers: (() -> Void)?
-  let audioRenderer = AVSampleBufferAudioRenderer()
-  let synchronizer = AVSampleBufferRenderSynchronizer()
+  /// The sound, decoded here and played through AVAudioEngine; it's also the clock (see `syncClock`).
+  let audio = AudioOutput()
+  /// The picture's clock: on the host clock, kept on the sound's (every screen layer runs on it).
+  let videoClock: CMTimebase
+  /// The speed playing at (0 when held).
+  private(set) var speed: Float = 0
 
   /// The rendition playing (an index into the session's renditions).
   private(set) var rendition: Int
@@ -106,7 +109,7 @@ final class KestrelEngine: NSObject {
   /// ones before it are decoded but not shown).
   private var heldVideo: [(frame: VideoFrame, pts: Int64, dts: Int64)] = []
   private var heldAudio: [(frame: AudioFrame, pts: Int64)] = []
-  /// Playing (the synchronizer's clock runs).
+  /// Playing (the clock runs).
   private(set) var clockRunning = false
   private var stalledSince: Date?
   /// A frame time on the timeline and when it was captured (from the playlist's dates).
@@ -169,7 +172,7 @@ final class KestrelEngine: NSObject {
   }
 
   static let clock: Int32 = 90_000
-  /// Rate limits for the synchronizer (it plays audio pitch-corrected within these).
+  /// The fastest it plays (the sound pitch-corrected).
   static let maxRate: Float = 1.2
 
   /// - Parameters:
@@ -187,15 +190,11 @@ final class KestrelEngine: NSObject {
     // Video arrives over HTTP in bursts, so the buffer reading dips a few tenths between them:
     // those aren't hiccups to keep a margin for (counted, they raised it to over a second).
     catchUp = LiveCatchUp(targetBuffer: startMargin, noise: 0.35)
+    var timebase: CMTimebase?
+    CMTimebaseCreateWithSourceClock(allocator: kCFAllocatorDefault, sourceClock: CMClockGetHostTimeClock(), timebaseOut: &timebase)
+    videoClock = timebase!
     super.init()
     let center = NotificationCenter.default
-    lifecycleTokens.append(
-      center.addObserver(forName: .AVSampleBufferAudioRendererWasFlushedAutomatically, object: audioRenderer, queue: .main) {
-        [weak self] note in
-        let value = note.userInfo?[AVSampleBufferAudioRendererFlushTimeKey] as? NSValue
-        let time = value?.timeValue ?? .invalid
-        MainActor.assumeIsolated { self?.audioFlushedAutomatically(at: time) }
-      })
     lifecycleTokens.append(
       center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
         MainActor.assumeIsolated { self?.inBackground = true }
@@ -205,15 +204,10 @@ final class KestrelEngine: NSObject {
         MainActor.assumeIsolated { self?.enteringForeground() }
       })
     displayLayer.videoGravity = .resizeAspect
-    // Sound at 1.04x while catching up: stretched smoothly. Left to the default (made for brief
-    // fast-forwards), it sped up by dropping bits of sound: a ~100 ms gap every second or two for
-    // as long as it caught up, heard as stutter.
-    audioRenderer.audioTimePitchAlgorithm = .spectral
-    synchronizer.addRenderer(displayLayer)
-    synchronizer.addRenderer(audioRenderer)
-    // Speed changes take effect at once: the engine only plays when it has the video in hand, and
-    // waiting for the renderers on each small change held the picture for a few frames.
-    synchronizer.delaysRateChangeUntilHasSufficientMediaData = false
+    displayLayer.controlTimebase = videoClock
+    CMTimebaseSetRate(videoClock, rate: 0)
+    // The system stopped the sound and it started again: what's still to come goes back in.
+    audio.onReset = { [weak self] in self?.refillAudio() }
   }
 
   // MARK: Lifecycle
@@ -238,12 +232,12 @@ final class KestrelEngine: NSObject {
     ticker = nil
     for load in loads { load.task?.cancel() }
     loads = []
-    synchronizer.setRate(0, time: synchronizer.currentTime())
+    setSpeed(0)
     displayLayer.flushAndRemoveImage()
     retireOldLayer(force: true)
     mirrorLayer?.flushAndRemoveImage()
     group = []
-    audioRenderer.flush()
+    audio.flush()
     audioHistory = []
     lastAudioTime = nil
     closeDecoder()
@@ -302,17 +296,17 @@ final class KestrelEngine: NSObject {
 
   func setMuted(_ mute: Bool) {
     muted = mute
-    audioRenderer.isMuted = mute
+    audio.setMuted(mute)
   }
 
   func setVolume(_ volume: Float) {
-    audioRenderer.volume = volume
+    audio.setVolume(volume)
   }
 
   // MARK: Readings
 
   /// Where playback is, on the timeline (90 kHz).
-  private var now: Int64 { Int64(synchronizer.currentTime().convertScale(Self.clock, method: .default).value) }
+  private var now: Int64 { Int64(CMTimebaseGetTime(videoClock).convertScale(Self.clock, method: .default).value) }
 
   /// Seconds of video in hand ahead of what's showing.
   var bufferAhead: Double? {
@@ -340,7 +334,7 @@ final class KestrelEngine: NSObject {
     return value.isFinite && value > -1 ? max(0, value) : nil
   }
 
-  var rate: Float { synchronizer.rate }
+  var rate: Float { speed }
 
   // MARK: Playlist
 
@@ -618,18 +612,7 @@ final class KestrelEngine: NSObject {
       let old = displayLayer
       let fresh = AVSampleBufferDisplayLayer()
       fresh.videoGravity = old.videoGravity
-      // It follows the playback clock without joining it: adding a renderer to the running
-      // synchronizer cut the sound for a tenth of a second.
-      var follower: CMTimebase?
-      CMTimebaseCreateWithSourceTimebase(allocator: kCFAllocatorDefault, sourceTimebase: synchronizer.timebase, timebaseOut: &follower)
-      if let follower {
-        CMTimebaseSetTime(follower, time: synchronizer.currentTime())
-        CMTimebaseSetRate(follower, rate: 1)
-        fresh.controlTimebase = follower
-      } else {
-        synchronizer.addRenderer(fresh)
-        attachedLayers.append(fresh)
-      }
+      fresh.controlTimebase = videoClock
       displayLayer = fresh
       retiringLayer = old
       retiringSince = Date()
@@ -639,7 +622,7 @@ final class KestrelEngine: NSObject {
     }
     caughtUpAt = Date()
     let layer = displayLayer
-    let showing = Int64(synchronizer.currentTime().convertScale(Self.clock, method: .default).value)
+    let showing = now
     for earlier in group {
       if let sample = earlier.sample(hidden: earlier.pts < showing - frameLength) { layer.enqueue(sample) }
     }
@@ -655,8 +638,6 @@ final class KestrelEngine: NSObject {
     let settled = Date().timeIntervalSince(caughtUpAt) > 0.6 && Date().timeIntervalSince(retiringSince) > 0.6
     guard force || (drawing && settled) else { return }
     retiringLayer = nil
-    // (Left on the synchronizer until the stream stops: taking it off mid-play is another change
-    // to the running clock.)
     old.flushAndRemoveImage()
     onScreenLayers?()
   }
@@ -691,7 +672,7 @@ final class KestrelEngine: NSObject {
     if let mirrorLayer { return mirrorLayer }
     let layer = AVSampleBufferDisplayLayer()
     layer.videoGravity = displayLayer.videoGravity
-    synchronizer.addRenderer(layer)
+    layer.controlTimebase = videoClock
     mirrorLayer = layer
     mirrorWaiting = true
     return layer
@@ -791,14 +772,9 @@ final class KestrelEngine: NSObject {
   }
 
   private func enqueueAudio(_ frame: AudioFrame, time: Int64, refill: Bool = false) {
-    if frame.config != audioConfig || audioFormat == nil {
-      audioFormat = Self.aacFormat(frame.config)
-      audioConfig = frame.config
-    }
-    guard let format = audioFormat, let sample = Self.audioSample(frame.data, format: format, pts: time) else { return }
     if !refill {
       // What the stats show about the sound: arriving after its time, or not following on. Sound
-      // past its time is left out: handed over late, the renderer dropped what it had queued.
+      // past its time is left out (it would only push the sound behind the picture).
       if clockRunning, time + 1920 < now {
         lateAudio += 1
         lastAudioTime = time
@@ -816,19 +792,43 @@ final class KestrelEngine: NSObject {
       audioHistory.append((frame, time))
       if audioHistory.count > 250 { audioHistory.removeFirst(audioHistory.count - 250) }
     }
-    audioRenderer.enqueue(sample)
+    audio.enqueue(frame, pts: time)
     audioFramesQueued += 1
   }
 
-  /// The audio renderer dropped what it had queued by itself (sound that reached it too late,
-  /// a route change): silence until new sound came. What's kept from the flush time on goes back
-  /// in at once, as Apple advises.
-  private func audioFlushedAutomatically(at flushTime: CMTime) {
+  /// The system stopped the sound and it was started again: what's kept from now on goes back in.
+  private func refillAudio() {
     audioAutoFlushes += 1
-    let from = flushTime.isValid ? Int64(flushTime.convertScale(Self.clock, method: .default).value) : now
-    ActivityLog.shared.add(
-      String(format: "Kestrel player: the sound was flushed by the system at %.2f s; refilled", Double(from) / Double(Self.clock)))
+    let from = now
     for (frame, time) in audioHistory where time >= from { enqueueAudio(frame, time: time, refill: true) }
+  }
+
+  /// The speed for the picture's clock and the sound together (0 holds both where they are).
+  private func setSpeed(_ rate: Float) {
+    speed = rate
+    CMTimebaseSetRate(videoClock, rate: Float64(rate))
+    if rate == 0 {
+      audio.pause()
+    } else {
+      audio.setSpeed(rate)
+      if clockRunning, !audio.isPlaying { audio.play() }
+    }
+  }
+
+  /// Keeps the picture on the sound: the sound is what's heard, and its device's clock runs a
+  /// little apart from the host clock the picture runs on. Small differences are taken up by
+  /// running the picture's clock a touch faster or slower (unseen); a big one (a gap in the
+  /// sound, a restart of it) moves it straight there.
+  private func syncClock() {
+    guard clockRunning, speed > 0, audio.isPlaying, let heard = audio.position else { return }
+    let drift = Double(heard - now) / Double(Self.clock)
+    if abs(drift) > 0.08 {
+      CMTimebaseSetTime(videoClock, time: CMTime(value: heard, timescale: Self.clock))
+      CMTimebaseSetRate(videoClock, rate: Float64(speed))
+    } else {
+      let trim = max(-0.02, min(0.02, drift * 0.5))
+      CMTimebaseSetRate(videoClock, rate: Float64(speed) * (1 + trim))
+    }
   }
 
   /// Starts the clock once there's video: just behind the newest frame in hand (the stream's
@@ -852,8 +852,9 @@ final class KestrelEngine: NSObject {
     startedBehind = Double(last - start) / Double(Self.clock)
     ActivityLog.shared.add(
       String(format: "Kestrel player: started %.2f s behind the newest frame (%@, %d frames decoded ahead of it)", startedBehind ?? 0, container, videoFramesHidden))
-    synchronizer.setRate(1, time: CMTime(value: start, timescale: Self.clock))
+    CMTimebaseSetTime(videoClock, time: CMTime(value: start, timescale: Self.clock))
     clockRunning = true
+    setSpeed(1)
     catchUp.restart()
     state = .playing
   }
@@ -871,7 +872,7 @@ final class KestrelEngine: NSObject {
       // Ran dry: hold the clock until there's the margin again.
       stalledSince = Date()
       stalls += 1
-      synchronizer.rate = 0
+      setSpeed(0)
       catchUp.stalled()
       state = .stalled
       // Twice in a few minutes while the video kept arriving: the connection can't carry this
@@ -890,7 +891,7 @@ final class KestrelEngine: NSObject {
       let resumeAt = max(0.4, min(catchUp.targetBuffer, 1.5))
       if ahead >= resumeAt {
         stalledSince = nil
-        synchronizer.rate = 1
+        setSpeed(1)
         state = .playing
       } else if Date().timeIntervalSince(since) > 12 {
         // Nothing for a long while: start over at live.
@@ -906,7 +907,8 @@ final class KestrelEngine: NSObject {
     let rate = catchUp.update(
       buffer: ahead, latency: latency ?? ahead + 1, playing: true, position: Double(now) / Double(Self.clock),
       maxRate: Self.maxRate)
-    if synchronizer.rate != rate { synchronizer.rate = rate }
+    if speed != rate { setSpeed(rate) }
+    syncClock()
   }
 
   // MARK: Sample buffers

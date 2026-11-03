@@ -240,7 +240,8 @@ final class KestrelController {
     lines.append(
       StatLine(
         label: "Sound",
-        value: "\(engine.audioAutoFlushes) system flushes, \(engine.lateAudio) late, \(engine.audioGaps) gaps"
+        value: "\(engine.audioAutoFlushes) system restarts, \(engine.lateAudio) late, \(engine.audioGaps) gaps, "
+          + String(format: "%.2f s queued", engine.audio.queuedAhead)
           + (engine.audioGaps > 0 ? String(format: " (largest %.0f ms)", engine.largestAudioGap) : "")))
     lines.append(
       StatLine(
