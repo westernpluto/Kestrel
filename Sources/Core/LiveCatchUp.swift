@@ -232,8 +232,25 @@ struct LiveCatchUp: Sendable {
       let top = Double(min(far ? Self.rates.fast : starting ? Self.startRate : Self.rates.medium, maxRate))
       next = min(top, 1 + max(starting ? Self.minStep * 1.5 : Self.minStep, excess * (starting ? Self.startGain : Self.gain)))
     }
-    // In hundredths: the player isn't told about every wobble.
-    next = (next * 100).rounded() / 100
+    // A few fixed speeds, held: each change of speed made the sound cut out for a moment (the
+    // audio is re-stretched for the new speed), and easing off a hundredth at a time changed it
+    // every couple of seconds while catching up. Now a catch-up is one speed until it's done
+    // (faster only when far behind), and slowing down one speed too.
+    if next > 1 {
+      let fast = Double(min(Self.rates.fast, maxRate))
+      let far = next >= 1.15
+      if rate > 1 {
+        // Already catching up: the same speed until it's done (up to the fast one if it's fallen
+        // far behind meanwhile).
+        next = far && Double(rate) < fast ? fast : Double(rate)
+      } else {
+        next = far ? fast : Double(min(starting ? Self.startRate : Self.rates.gentle, maxRate))
+      }
+      // (Never over what's allowed now.)
+      next = min(next, Double(maxRate))
+    } else if next < 1 {
+      next = Double(Self.rates.slow)
+    }
     rate = Float(next)
     last = (buffer, now, rate, position)
     return rate

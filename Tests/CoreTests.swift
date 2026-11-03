@@ -340,6 +340,26 @@ func testCatchUpHoversWithoutFlipping() {
   check(changes <= 12, "hovering at the line: \(changes) speed changes in a minute")
 }
 
+func testCatchUpHoldsOneSpeed() {
+  // Catching up from 1.5 s over the margin: one speed until it's done, then normal. Easing off a
+  // hundredth at a time changed the speed every couple of seconds, and each change cut the sound.
+  var catchUp = LiveCatchUp(targetBuffer: 0.6, now: Date(timeIntervalSince1970: 0))
+  var buffer = 2.1
+  var rates: [Float] = []
+  var position = 0.0
+  for i in 0..<240 {
+    let now = Date(timeIntervalSince1970: 30 + Double(i) * 0.25)
+    let rate = catchUp.update(buffer: buffer, latency: buffer + 0.4, playing: true, position: position, now: now)
+    rates.append(rate)
+    buffer -= Double(rate - 1) * 0.25
+    position += Double(rate) * 0.25
+  }
+  let changes = zip(rates, rates.dropFirst()).filter { $0 != $1 }.count
+  check(changes <= 2 && Set(rates).isSubset(of: [1, LiveCatchUp.rates.gentle, LiveCatchUp.startRate, LiveCatchUp.rates.fast]),
+    "one catch-up, one speed: \(changes) changes, speeds \(Set(rates).sorted())")
+  check(buffer < 1.3, "caught up: \(buffer) s in hand")
+}
+
 func testFrameGrid() {
   // 60 fps stamped in whole milliseconds (16, 17, 17 ms): put on the exact 1/60 s grid.
   var grid = FrameGrid()
@@ -2044,6 +2064,7 @@ testMultiviewLayout()
 testStreamArrival()
 testMediaParsing()
 testFrameGrid()
+testCatchUpHoldsOneSpeed()
 testCatchUpHoversWithoutFlipping()
 testAdTimeline()
 testTimelineAndRender()
