@@ -388,6 +388,14 @@ final class KestrelEngine: NSObject {
   }
 
   private func enqueueVideo(_ frame: VideoFrame, pts time: Int64, dts: Int64, hidden: Bool) {
+    // Every frame that arrived counts toward what's in hand, decodable or not: a frame skipped
+    // while the picture waits for a keyframe (after the background, a decoder hiccup) isn't the
+    // stream running dry. Counted as that, it stalled playback and taught the margin a "hiccup"
+    // (2.3 s seen after coming back from Picture in Picture).
+    defer {
+      if firstVideoTime == nil { firstVideoTime = time }
+      if lastVideoTime.map({ time > $0 }) ?? true { lastVideoTime = time }
+    }
     if waitingForKeyframe, !frame.isKeyframe { return }
     let units = AnnexB.units(frame.data)
     let payload: Data
@@ -440,8 +448,6 @@ final class KestrelEngine: NSObject {
     if group.count < 600 { group.append(entry) }
     videoFramesQueued += 1
     if hidden { videoFramesHidden += 1 }
-    if firstVideoTime == nil { firstVideoTime = time }
-    if lastVideoTime.map({ time > $0 }) ?? true { lastVideoTime = time }
   }
 
   /// A frame as handed to the decoder, kept to hand it again.
@@ -461,7 +467,13 @@ final class KestrelEngine: NSObject {
   /// The screen's layer: false when the frame can't go (it's waiting for a keyframe).
   private func feedScreen(_ entry: GroupFrame, hidden: Bool) -> Bool {
     let layer = displayLayer
-    if layer.status == .failed {
+    // Interrupted (AVFoundationErrorDomain -11847: the app went to the background mid-decode)
+    // isn't a frame it couldn't decode: brought back up to date like any return from the
+    // background, and not counted toward giving up on the layer.
+    if layer.status == .failed, (layer.error as NSError?)?.code == AVError.operationInterrupted.rawValue {
+      screenBehind = true
+    }
+    if layer.status == .failed, !screenBehind {
       // A frame it couldn't decode.
       decoderFailures += 1
       let error = layer.error as NSError?
