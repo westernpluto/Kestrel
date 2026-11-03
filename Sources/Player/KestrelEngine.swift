@@ -41,7 +41,9 @@ final class KestrelEngine: NSObject {
 
   /// A rendition's media playlist, or nil when it couldn't be had.
   private let playlist: @Sendable (Int) async -> String?
-  private var planner = LiveSegmentPlanner(startBack: 1)
+  /// From the newest complete segment (it starts with a keyframe): the frames from there up to
+  /// the starting point are decoded without being shown (see `startIfReady`).
+  private var planner = LiveSegmentPlanner(startBack: 0)
   private var timeline = StreamTimeline()
   private(set) var catchUp: LiveCatchUp
   private var loads: [SegmentLoad] = []
@@ -64,7 +66,12 @@ final class KestrelEngine: NSObject {
   private var waitingForKeyframe = true
   private var firstVideoTime: Int64?
   private var lastVideoTime: Int64?
+  private var lastDecodeTime: Int64?
   private var frameLength: Int64 = 3000
+  /// Before the clock starts: the frames so far, held until where to start is known (then the
+  /// ones before it are decoded but not shown).
+  private var heldVideo: [(frame: VideoFrame, pts: Int64, dts: Int64)] = []
+  private var heldAudio: [(frame: AudioFrame, pts: Int64)] = []
   /// Playing (the synchronizer's clock runs).
   private(set) var clockRunning = false
   private var stalledSince: Date?
@@ -120,8 +127,11 @@ final class KestrelEngine: NSObject {
   /// Starts over at the live edge (after a pause, a long dropout, a failure).
   func restart() {
     stop()
-    planner = LiveSegmentPlanner(startBack: 1)
+    planner = LiveSegmentPlanner(startBack: 0)
     timeline = StreamTimeline()
+    heldVideo = []
+    heldAudio = []
+    lastDecodeTime = nil
     videoFormat = nil
     parameterSets = nil
     audioFormat = nil
@@ -241,17 +251,31 @@ final class KestrelEngine: NSObject {
     switch frame {
     case .video(let video):
       let time = timeline.map(video.pts, isVideo: true)
+      // The decode time moves with it (streams with B-frames decode in another order than they
+      // show: each frame has both times, and the decoder needs the decode one).
+      let decodeTime = video.dts + (time - video.pts)
       if !load.dated, let date = load.planned.programDate {
         load.dated = true
         anchor = (time, date)
       }
-      enqueueVideo(video, time: time)
+      if clockRunning {
+        enqueueVideo(video, pts: time, dts: decodeTime, hidden: false)
+      } else if video.codec == .h264, video.isKeyframe || !heldVideo.isEmpty {
+        heldVideo.append((video, time, decodeTime))
+        if firstVideoTime == nil { firstVideoTime = time }
+        if lastVideoTime.map({ time > $0 }) ?? true { lastVideoTime = time }
+      }
     case .audio(let audio):
-      enqueueAudio(audio, time: timeline.map(audio.pts, isVideo: false))
+      let time = timeline.map(audio.pts, isVideo: false)
+      if clockRunning {
+        enqueueAudio(audio, time: time)
+      } else {
+        heldAudio.append((audio, time))
+      }
     }
   }
 
-  private func enqueueVideo(_ frame: VideoFrame, time: Int64) {
+  private func enqueueVideo(_ frame: VideoFrame, pts time: Int64, dts: Int64, hidden: Bool) {
     guard frame.codec == .h264 else { return }
     if waitingForKeyframe, !frame.isKeyframe { return }
     let units = AnnexB.units(frame.data)
@@ -263,8 +287,11 @@ final class KestrelEngine: NSObject {
       }
     }
     guard let format = videoFormat else { return }
-    if let last = lastVideoTime, time > last, time - last < 9000 { frameLength = time - last }
-    guard let sample = Self.videoSample(H264.sample(units), format: format, pts: time, duration: frameLength, keyframe: frame.isKeyframe)
+    if let last = lastDecodeTime, dts > last, dts - last < 9000 { frameLength = dts - last }
+    lastDecodeTime = dts
+    guard
+      let sample = Self.videoSample(
+        H264.sample(units), format: format, pts: time, dts: dts, duration: frameLength, keyframe: frame.isKeyframe, hidden: hidden)
     else { return }
     if displayLayer.status == .failed {
       // The decoder gave up (a corrupt frame): flush and carry on from the next keyframe.
@@ -290,12 +317,21 @@ final class KestrelEngine: NSObject {
   /// Starts the clock once there's video: just behind the newest frame in hand (the stream's
   /// margin), so it opens close to live instead of at the start of the first segment.
   private func startIfReady() {
-    guard !clockRunning, !paused, let first = firstVideoTime, let last = lastVideoTime else { return }
+    guard !clockRunning, !paused, let first = heldVideo.first?.pts, let last = lastVideoTime else { return }
     let margin = Int64(max(catchUp.targetBuffer, 0.5) * Double(Self.clock))
-    let liveArriving = loads.contains { $0.planned.live && $0.received > 0 }
+    // Only once what's being unpacked is the segment still being made (everything before it is
+    // in): starting earlier put the start seconds back, with all of that to catch up.
+    let atLive = loads.first?.planned.live ?? true
     let waited = Date().timeIntervalSince(startedLoading)
-    guard last - first >= margin, liveArriving || waited > 4 || loads.isEmpty else { return }
+    guard atLive || waited > 6, last - first >= Int64(0.3 * Double(Self.clock)) else { return }
     let start = max(first, last - margin)
+    // From the last keyframe at or before the start; frames before the start are decoded (later
+    // ones need them) but not shown, so it opens on a clean picture at the start.
+    let keyframe = heldVideo.lastIndex { $0.frame.isKeyframe && $0.pts <= start } ?? 0
+    for held in heldVideo[keyframe...] { enqueueVideo(held.frame, pts: held.pts, dts: held.dts, hidden: held.pts < start) }
+    for held in heldAudio where held.pts >= start { enqueueAudio(held.frame, time: held.pts) }
+    heldVideo = []
+    heldAudio = []
     synchronizer.setRate(1, time: CMTime(value: start, timescale: Self.clock))
     clockRunning = true
     catchUp.restart()
@@ -371,13 +407,13 @@ final class KestrelEngine: NSObject {
     return status == noErr ? format : nil
   }
 
-  static func videoSample(_ data: Data, format: CMVideoFormatDescription, pts: Int64, duration: Int64, keyframe: Bool)
-    -> CMSampleBuffer?
-  {
+  static func videoSample(
+    _ data: Data, format: CMVideoFormatDescription, pts: Int64, dts: Int64, duration: Int64, keyframe: Bool, hidden: Bool
+  ) -> CMSampleBuffer? {
     guard !data.isEmpty, let block = block(data) else { return nil }
     var timing = CMSampleTimingInfo(
       duration: CMTime(value: duration, timescale: clock), presentationTimeStamp: CMTime(value: pts, timescale: clock),
-      decodeTimeStamp: CMTime(value: pts, timescale: clock))
+      decodeTimeStamp: CMTime(value: dts, timescale: clock))
     var size = data.count
     var sample: CMSampleBuffer?
     guard
@@ -386,11 +422,12 @@ final class KestrelEngine: NSObject {
         sampleTimingArray: &timing, sampleSizeEntryCount: 1, sampleSizeArray: &size, sampleBufferOut: &sample) == noErr,
       let sample
     else { return nil }
-    if !keyframe, let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
+    if !keyframe || hidden, let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
       CFArrayGetCount(attachments) > 0
     {
       let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: NSMutableDictionary.self)
-      dictionary[kCMSampleAttachmentKey_NotSync as String] = true
+      if !keyframe { dictionary[kCMSampleAttachmentKey_NotSync as String] = true }
+      if hidden { dictionary[kCMSampleAttachmentKey_DoNotDisplay as String] = true }
     }
     return sample
   }

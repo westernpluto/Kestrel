@@ -1728,6 +1728,24 @@ func testTSDemux() {
     check(!units.filter { H264.type($0) == 5 }.isEmpty, "IDR slice present")
   }
 
+  // A source rendition with B-frames (High profile): frames come in decode order, each with a
+  // decode time of its own that the decoder needs (giving it the presentation time instead
+  // decoded them out of order: a frozen, green-smeared picture).
+  if let bframes = try? Data(contentsOf: dir.appendingPathComponent("twitch_1080p_bframes.ts")) {
+    var demuxer = TSDemuxer()
+    let frames = (demuxer.feed(bframes) + demuxer.flush()).compactMap { if case .video(let f) = $0 { return f } else { return nil } }
+    check(frames.count >= 10, "1080p frames \(frames.count)")
+    check(frames.first?.isKeyframe == true, "1080p starts on a keyframe")
+    check(frames.contains { $0.dts != $0.pts }, "decode times differ from presentation times")
+    let decodeOrder = zip(frames, frames.dropFirst()).allSatisfy { $1.dts > $0.dts }
+    check(decodeOrder, "decode times always increase: \(frames.prefix(8).map { ($0.pts, $0.dts) })")
+    let presentationOrder = zip(frames, frames.dropFirst()).allSatisfy { $1.pts > $0.pts }
+    check(!presentationOrder, "presentation times don't (B-frames)")
+    check(frames.allSatisfy { $0.pts >= $0.dts }, "never shown before decoded")
+  } else {
+    check(false, "1080p fixture missing")
+  }
+
   // One timeline across segments: a jump (a discontinuity) carries on right after the last frame.
   var timeline = StreamTimeline()
   timeline.beginSegment(firstPTS: 1_000_000, discontinuity: false)
