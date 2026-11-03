@@ -1345,7 +1345,12 @@ struct PlayerScreen: View {
     OrientationLock.playerVisible(false)
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
       // Let other apps' audio carry on (fails harmlessly if something else is still playing).
-      if !app.playsMedia { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+      // (Off the main thread: it waits for the sound to stop, and froze taps for a second or two.)
+      if !app.playsMedia {
+        DispatchQueue.global(qos: .userInitiated).async {
+          try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
+      }
     }
     withAnimation(.easeIn(duration: 0.2)) { closing = true }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {

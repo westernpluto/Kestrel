@@ -445,9 +445,12 @@ struct MultiviewScreen: View {
           }
 
         // Where the all-streams Picture in Picture window grows from and goes back to.
+        // Just over the pictures (the box around them, the window's shape): over the whole area,
+        // the window flew back into a different shape and jumped at the end.
+        let anchor = StreamPictures.box(rects).flatMap { $0.isNull ? nil : $0 } ?? CGRect(origin: .zero, size: areas.grid.size)
         PictureInPictureAnchor(model: model)
-          .frame(width: areas.grid.width, height: areas.grid.height)
-          .offset(x: areas.grid.minX, y: areas.grid.minY)
+          .frame(width: anchor.width, height: anchor.height)
+          .offset(x: areas.grid.minX + anchor.minX, y: areas.grid.minY + anchor.minY)
           .allowsHitTesting(false)
 
         if model.tiles.isEmpty {
@@ -1155,5 +1158,24 @@ struct PictureInPictureAnchor: UIViewRepresentable {
       super.didMoveToWindow()
       onWindow?(window == nil ? nil : self)
     }
+  }
+}
+
+/// Where the streams' pictures are within their places: 16:9, fitted and centred.
+enum StreamPictures {
+  static func picture(in place: CGRect) -> CGRect {
+    let aspect: CGFloat = 16 / 9
+    if place.width / max(place.height, 1) > aspect {
+      let width = place.height * aspect
+      return CGRect(x: place.midX - width / 2, y: place.minY, width: width, height: place.height)
+    }
+    let height = place.width / aspect
+    return CGRect(x: place.minX, y: place.midY - height / 2, width: place.width, height: height)
+  }
+
+  /// The box around all the pictures (nil for none).
+  static func box(_ places: [CGRect]) -> CGRect? {
+    guard !places.isEmpty else { return nil }
+    return places.map(picture(in:)).reduce(CGRect.null) { $0.union($1) }
   }
 }

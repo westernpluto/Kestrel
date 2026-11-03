@@ -740,12 +740,7 @@
     private static func label(_ quality: IVSQuality) -> String {
       if quality.width == 0 { return "Audio only" }
       let fps = quality.framerate > 31 ? String(Int(quality.framerate.rounded())) : ""
-      let base = "\(min(quality.width, quality.height))p\(fps)"
-      switch HLS.codecFamily(quality.codecs) {
-      case "hevc": return base + " HEVC"
-      case "av1": return base + " AV1"
-      default: return base
-      }
+      return "\(min(quality.width, quality.height))p\(fps)"
     }
 
     // MARK: Ticking (PlayerModel's timer)

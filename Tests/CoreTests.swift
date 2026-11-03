@@ -254,7 +254,7 @@ func testMasterParsing() {
     let master = HLSMaster.parse(text, base: URL(string: "https://usher.ttvnw.net/api/v2/channel/hls/x.m3u8"))
     check(master.variants.count == 12, "v2 variants \(master.variants.count)")
     let video = master.videoVariants
-    check(video.count == 6 && video.first?.label == "1440p60 HEVC" && video.last?.label == "160p", "landscape \(video.map(\.label))")
+    check(video.count == 6 && video.first?.label == "1440p60" && video.last?.label == "160p", "landscape \(video.map(\.label))")
     check(!video.contains { $0.isPortrait }, "portrait filtered")
     check(master.audioVariant?.label == "Audio only", "audio")
     check(video[0].uri == "https://usher.ttvnw.net/1440p60.m3u8", "uri \(video[0].uri)")
@@ -288,7 +288,8 @@ func testMasterParsing() {
     #EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,CODECS="hvc1.1.6.L123.90,mp4a.40.2",FRAME-RATE=60.000
     hevc.m3u8
     """, base: URL(string: "https://a/"))
-  check(mixed.videoVariants.map(\.label) == ["1080p60 HEVC", "1080p60 AV1", "1080p60"], "codec order \(mixed.videoVariants.map(\.label))")
+  check(mixed.videoVariants.map(\.codecFamily) == ["hevc", "av1", "avc"], "codec order \(mixed.videoVariants.map(\.codecFamily))")
+  check(Set(mixed.videoVariants.map(\.label)) == ["1080p60"], "named without the codec")
   let m = HLSMaster.parse(v1, base: URL(string: "https://a/b/master.m3u8"))
   check(m.videoVariants.count == 1 && m.videoVariants[0].name == "1080p60 (source)", "v1 names")
   check(m.audioVariant?.uri == "https://a/b/audio.m3u8", "v1 relative audio")
@@ -1670,7 +1671,7 @@ func testRestrictedVOD() {
   cdn.files[base + "/audio_only/index-dvr.m3u8"] = Data(ts.utf8)
   runAsync {
     let variants = await RestrictedVOD.variants(videoID: "2290000000", info: info, http: cdn)
-    check(variants.map(\.label) == ["1080p60", "720p60 HEVC", "360p", "Audio only"], "cdn variants \(variants.map(\.label))")
+    check(variants.map(\.label) == ["1080p60", "720p60", "360p", "Audio only"], "cdn variants \(variants.map(\.label))")
     check(variants.first?.name == "1080p (source)", "source name \(variants.first?.name ?? "")")
     check(variants[1].codecs.hasPrefix("hev1"), "hevc from init segment")
     check(variants.last?.isAudioOnly == true, "audio last")

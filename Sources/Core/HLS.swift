@@ -192,16 +192,12 @@ struct HLSVariant: Equatable {
   var codecFamily: String { HLS.codecFamily(codecs) }
   var resolution: String? { width > 0 ? "\(width)x\(height)" : nil }
 
-  /// "1080p60", "720p", "1440p60 HEVC", "Audio only"
+  /// "1440p60", "1080p60", "720p", "Audio only" (the codec isn't part of the name).
   var label: String {
     if isAudioOnly { return "Audio only" }
     let lines = min(width, height)
     let fps = frameRate > 31 ? String(Int(frameRate.rounded())) : ""
-    switch codecFamily {
-    case "hevc": return "\(lines)p\(fps) HEVC"
-    case "av1": return "\(lines)p\(fps) AV1"
-    default: return "\(lines)p\(fps)"
-    }
+    return "\(lines)p\(fps)"
   }
 
   /// Among variants with the same resolution and frame rate, the newer codecs look better at the

@@ -38,6 +38,16 @@ final class KestrelEngine: NSObject {
   /// Back from Picture in Picture: the frame the window was showing, held over the old layer
   /// until the new one draws (the old one's picture is often gone after the background: black).
   private(set) var coverLayer: CALayer?
+  /// The screen's picture hidden while Picture in Picture's window is up (the window shows the
+  /// copy; the system's "playing in Picture in Picture" shows in the app).
+  var screenHiddenForPictureInPicture = false {
+    didSet {
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      for layer in [displayLayer, retiringLayer, coverLayer].compactMap({ $0 }) { layer.isHidden = screenHiddenForPictureInPicture }
+      CATransaction.commit()
+    }
+  }
   private var retiringSince = Date.distantPast
   private var caughtUpAt = Date.distantPast
   /// Told when the screen's layers change (the view puts the new one on top of the retiring one).
@@ -653,10 +663,12 @@ final class KestrelEngine: NSObject {
       let fresh = AVSampleBufferDisplayLayer()
       fresh.videoGravity = old.videoGravity
       fresh.controlTimebase = videoClock
+      fresh.isHidden = screenHiddenForPictureInPicture
       displayLayer = fresh
       retiringLayer = old
       retiringSince = Date()
       coverLayer = makeCover(gravity: old.videoGravity)
+      coverLayer?.isHidden = screenHiddenForPictureInPicture
       onScreenLayers?()
     } else {
       displayLayer.flush()

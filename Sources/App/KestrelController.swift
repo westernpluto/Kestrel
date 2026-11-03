@@ -55,9 +55,12 @@ final class KestrelController {
       guard !stopped else { return }
       self.session = session
       variants = found
+      // Best first; one per name (the same size in two codecs: the better one).
+      var named = Set<String>()
       videoIndices = found.indices.filter { !found[$0].isAudioOnly }.sorted {
-        (found[$0].height, found[$0].frameRate, found[$0].bandwidth) > (found[$1].height, found[$1].frameRate, found[$1].bandwidth)
-      }
+        (found[$0].height, found[$0].frameRate, found[$0].codecRank, found[$0].bandwidth)
+          > (found[$1].height, found[$1].frameRate, found[$1].codecRank, found[$1].bandwidth)
+      }.filter { named.insert(found[$0].label).inserted }
       guard let best = videoIndices.first else {
         model?.phase = .failed("No playable qualities were found.")
         return
@@ -120,6 +123,9 @@ final class KestrelController {
     loadTask?.cancel()
     if let engine { ChannelMargins.remember(engine.catchUp.targetBuffer, for: login, network: NetworkWatch.shared.memoryKey) }
     engine?.stop()
+    // The sound engine too: left running, it held the audio session (switching that off then
+    // waited for it).
+    engine?.audio.shutDown()
     engine = nil
     session = nil
   }
@@ -163,6 +169,7 @@ final class KestrelController {
     let controller = AVPictureInPictureController(
       contentSource: .init(sampleBufferDisplayLayer: engine.makeMirror(), playbackDelegate: delegate))
     controller.canStartPictureInPictureAutomaticallyFromInline = true
+    controller.delegate = delegate
     pipObservation = controller.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
       let active = pip.isPictureInPictureActive
       Task { @MainActor in self?.pictureInPictureActive = active }
@@ -351,7 +358,23 @@ struct KestrelVideoView: UIViewRepresentable {
 
 /// The Picture in Picture window's controls for the Kestrel player (a live stream: play and pause,
 /// no seeking).
-final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPlaybackDelegate {
+final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPlaybackDelegate, AVPictureInPictureControllerDelegate {
+  // The picture in the app steps aside while the window is up (the window plays the copy; both
+  // playing at once looked like a second video), and is back as the window heads home.
+  func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    MainActor.assumeIsolated { controller?.engine?.screenHiddenForPictureInPicture = true }
+  }
+
+  func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    MainActor.assumeIsolated { controller?.engine?.screenHiddenForPictureInPicture = false }
+  }
+
+  func pictureInPictureController(
+    _ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error
+  ) {
+    MainActor.assumeIsolated { controller?.engine?.screenHiddenForPictureInPicture = false }
+  }
+
   private weak var controller: KestrelController?
 
   init(controller: KestrelController) {

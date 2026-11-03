@@ -358,7 +358,9 @@ final class PlayerModel: ObservableObject {
       route = await session.route
       self.session = session
       _ = try StreamProxy.shared.register(session)
-      qualities = info.variants.enumerated().map { Quality(id: $0.offset, label: $0.element.label) }
+      var named = Set<String>()
+      // One per name (the same size in two codecs: the first, the better one).
+      qualities = info.variants.enumerated().filter { named.insert($0.element.label).inserted }.map { Quality(id: $0.offset, label: $0.element.label) }
         + [Quality(id: nil, label: "Auto")]
       // Always the highest quality: the player is given only that one rendition, so it can't drop
       // to a lower one on its own. (Picking another in the menu applies to this stream only.) A
@@ -413,7 +415,9 @@ final class PlayerModel: ObservableObject {
       let source = VODPlaylists(variants: vodVariants, http: URLSessionHTTPClient(timeout: 10))
       _ = try StreamProxy.shared.register(source)
       vodSource = source
-      qualities = vodVariants.enumerated().map { Quality(id: $0.offset, label: $0.element.label) }
+      var named = Set<String>()
+      // One per name (the same size in two codecs: the first, the better one).
+      qualities = vodVariants.enumerated().filter { named.insert($0.element.label).inserted }.map { Quality(id: $0.offset, label: $0.element.label) }
       selectedQuality = 0
       // VODs start at the beginning (a VOD that's still recording would otherwise start at its
       // end), or where you left off.

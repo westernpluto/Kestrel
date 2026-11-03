@@ -166,7 +166,7 @@
       // Just the pictures: each stream's 16:9 picture within its place, and the window the shape
       // of the box around them (the whole picture area, with the room around the pictures, put
       // black bars above and below them in the window).
-      let pictures = rects.mapValues(Self.picture16x9)
+      let pictures = rects.mapValues(StreamPictures.picture(in:))
       let box = pictures.values.reduce(CGRect.null) { $0.union($1) }
       guard box.width > 0, box.height > 0 else { return }
       shares = pictures.mapValues {
@@ -178,16 +178,6 @@
       setNeedsLayout()
     }
 
-    /// A 16:9 picture fitted (centred) in this place.
-    private static func picture16x9(_ place: CGRect) -> CGRect {
-      let aspect: CGFloat = 16 / 9
-      if place.width / max(place.height, 1) > aspect {
-        let width = place.height * aspect
-        return CGRect(x: place.midX - width / 2, y: place.minY, width: width, height: place.height)
-      }
-      let height = place.width / aspect
-      return CGRect(x: place.minX, y: place.midY - height / 2, width: place.width, height: height)
-    }
 
     /// A window of the same shape as the picture area (iOS takes the shape, not the size).
     static func contentSize(matching size: CGSize) -> CGSize {
