@@ -1742,6 +1742,15 @@ func testTSDemux() {
     let presentationOrder = zip(frames, frames.dropFirst()).allSatisfy { $1.pts > $0.pts }
     check(!presentationOrder, "presentation times don't (B-frames)")
     check(frames.allSatisfy { $0.pts >= $0.dts }, "never shown before decoded")
+    // Twitch's encoders don't line PES packets up with frames: a PES can begin with the end of
+    // the previous frame. Every frame must start at its own start code, with nothing of the one
+    // before (cut at the PES, frames lost their last bytes and the decoder rejected them).
+    let startsClean = frames.allSatisfy { f in
+      let b = [UInt8](f.data.prefix(4))
+      return b.count == 4 && b[0] == 0 && b[1] == 0 && (b[2] == 1 || (b[2] == 0 && b[3] == 1))
+    }
+    check(startsClean, "every frame begins at a start code")
+    check(frames.allSatisfy { AnnexB.units($0.data).first.map { H264.type($0) == 9 } ?? false }, "every frame begins with its delimiter")
   } else {
     check(false, "1080p fixture missing")
   }

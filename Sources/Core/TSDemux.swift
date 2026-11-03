@@ -52,6 +52,11 @@ struct TSDemuxer {
   private var streams: [Int: Kind] = [:]
   /// The PES packet being put together on each elementary stream.
   private var pending: [Int: Data] = [:]
+  /// The last video frame on each stream, held until the next PES: Twitch's encoders don't always
+  /// line PES packets up with frames, and the first bytes of a PES (before its first start code)
+  /// can be the end of the previous frame. Cut at the PES instead, frames lost their last bytes
+  /// (the decoder rejected nearly all of them: a black picture on High-profile sources).
+  private var heldFrames: [Int: VideoFrame] = [:]
 
   init() {}
 
@@ -81,11 +86,14 @@ struct TSDemuxer {
   mutating func flush() -> [DemuxedFrame] {
     var out: [DemuxedFrame] = []
     for (pid, data) in pending.sorted(by: { $0.key < $1.key }) where !data.isEmpty {
-      if let kind = streams[pid] { pes(data, kind: kind, into: &out) }
+      if let kind = streams[pid] { pes(data, kind: kind, pid: pid, into: &out) }
     }
+    for (_, frame) in heldFrames.sorted(by: { $0.key < $1.key }) { out.append(.video(frame)) }
+    heldFrames = [:]
     pending = [:]
     leftover = Data()
-    return out.sorted { $0.pts < $1.pts }
+    // (In decode order: sorting by presentation time put B-frames out of order.)
+    return out
   }
 
   private mutating func packet(_ p: Data.SubSequence, into out: inout [DemuxedFrame]) {
@@ -110,7 +118,7 @@ struct TSDemuxer {
     }
     guard let kind = streams[pid] else { return }
     if unitStart {
-      if let previous = pending[pid], !previous.isEmpty { pes(previous, kind: kind, into: &out) }
+      if let previous = pending[pid], !previous.isEmpty { pes(previous, kind: kind, pid: pid, into: &out) }
       pending[pid] = Data(payload)
     } else if pending[pid] != nil {
       pending[pid]!.append(contentsOf: payload)
@@ -164,13 +172,26 @@ struct TSDemuxer {
     if !found.isEmpty { streams = found }
   }
 
+  /// Where the first Annex B start code (00 00 01, or 00 00 00 01) begins.
+  private static func firstStartCode(_ body: Data.SubSequence) -> Int? {
+    var i = body.startIndex
+    while i + 2 < body.endIndex {
+      if body[i] == 0, body[i + 1] == 0 {
+        if body[i + 2] == 1 { return i }
+        if body[i + 2] == 0, i + 3 < body.endIndex, body[i + 3] == 1 { return i }
+      }
+      i += 1
+    }
+    return nil
+  }
+
   /// A 33-bit PES timestamp.
   private static func timestamp(_ d: Data, _ i: Int) -> Int64 {
     Int64(d[i] >> 1 & 0x07) << 30 | Int64(d[i + 1]) << 22 | Int64(d[i + 2] >> 1) << 15 | Int64(d[i + 3]) << 7
       | Int64(d[i + 4] >> 1)
   }
 
-  private func pes(_ raw: Data, kind: Kind, into out: inout [DemuxedFrame]) {
+  private mutating func pes(_ raw: Data, kind: Kind, pid: Int, into out: inout [DemuxedFrame]) {
     let d = Data(raw)  // zero-based
     guard d.count >= 9, d[0] == 0, d[1] == 0, d[2] == 1 else { return }
     let flags = d[7]
@@ -185,10 +206,19 @@ struct TSDemuxer {
     guard bodyStart < end else { return }
     let body = d[bodyStart..<end]
     switch kind {
-    case .h264:
-      out.append(.video(VideoFrame(codec: .h264, pts: pts, dts: dts, data: Data(body), isKeyframe: H264.isKeyframe(body))))
-    case .hevc:
-      out.append(.video(VideoFrame(codec: .hevc, pts: pts, dts: dts, data: Data(body), isKeyframe: HEVC.isKeyframe(body))))
+    case .h264, .hevc:
+      // Bytes before the first start code finish the previous frame; it goes out now.
+      let start = Self.firstStartCode(body) ?? body.endIndex
+      if var previous = heldFrames[pid] {
+        previous.data.append(contentsOf: body[body.startIndex..<start])
+        out.append(.video(previous))
+        heldFrames[pid] = nil
+      }
+      guard start < body.endIndex else { return }
+      let data = Data(body[start...])
+      let codec: VideoFrame.Codec = kind == .h264 ? .h264 : .hevc
+      let key = kind == .h264 ? H264.isKeyframe(data[...]) : HEVC.isKeyframe(data[...])
+      heldFrames[pid] = VideoFrame(codec: codec, pts: pts, dts: dts, data: data, isKeyframe: key)
     case .aac:
       var time = pts
       for frame in ADTS.frames(in: body) {
