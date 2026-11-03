@@ -327,6 +327,7 @@ final class KestrelEngine: NSObject {
   /// Hands over the frames that can go now: all of the first segment's so far, then the next
   /// segment's once the first is complete (a later segment's frames wait their turn).
   private func pump() {
+    if !clockRunning { skipToLiveSegment() }
     while let first = loads.first {
       if !first.frames.isEmpty {
         let frames = first.frames
@@ -357,6 +358,31 @@ final class KestrelEngine: NSObject {
       }
     }
     startIfReady()
+  }
+
+  /// Before the start: once the segment being made already holds the margin's worth of video (from
+  /// its keyframe), start from it and drop the complete segment before it. That one was only
+  /// there for a start just as a new segment began, and waiting for all of it (two seconds of
+  /// video, often from a server in Europe through the ad-free route) held up every start.
+  private func skipToLiveSegment() {
+    guard let liveIndex = loads.firstIndex(where: { $0.planned.live }), liveIndex > 0 else { return }
+    var firstKey: Int64?
+    var newest: Int64?
+    for frame in loads[liveIndex].frames {
+      guard case .video(let video) = frame else { continue }
+      if firstKey == nil, video.isKeyframe { firstKey = video.pts }
+      if firstKey != nil { newest = max(newest ?? video.pts, video.pts) }
+    }
+    guard let firstKey, let newest else { return }
+    let margin = max(catchUp.targetBuffer, 0.5)
+    guard Double(newest - firstKey) / Double(Self.clock) >= margin + 0.1 else { return }
+    for load in loads[..<liveIndex] { load.task?.cancel() }
+    loads.removeFirst(liveIndex)
+    heldVideo = []
+    heldAudio = []
+    firstVideoTime = nil
+    lastVideoTime = nil
+    ActivityLog.shared.add("Kestrel player: starting from the segment being made (it already had enough video)")
   }
 
   /// The front segment has gone quiet for a moment and the next one's frames are coming in (so

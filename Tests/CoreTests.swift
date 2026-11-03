@@ -972,6 +972,11 @@ final class ProxyFake: HTTPClient, @unchecked Sendable {
     let url = request.url!
     requested.append(url.host ?? "")
     if url.host == "down.test" { throw URLError(.timedOut) }
+    if url.host == "hang.test" {
+      // Never answers (until its timeout).
+      try await Task.sleep(nanoseconds: 6_000_000_000)
+      throw URLError(.timedOut)
+    }
     if url.host == "proxy.test" {
       check(url.path == "/live/streamer" && url.query?.contains("allow_source=true") == true, "proxy URL \(url)")
       // The proxy answers with an ad-free session's master playlist.
@@ -1482,6 +1487,20 @@ func testAdFreeProxy() {
     // and isn't what plays.
     let regular = twitch.tokenRequests.filter { $0 != "proxy" }.count
     check(twitch.tokenRequests.filter { $0 == "proxy" }.count == 1 && regular <= 2, "no regular token needed: \(twitch.tokenRequests)")
+  }
+  // A server that doesn't answer at all doesn't hold the stream up for its whole timeout: the
+  // next one is asked under a second later, and the first playlist back wins.
+  runAsync {
+    let twitch = FakeTwitch()
+    let http = ProxyFake(twitch)
+    var config = LowLatencyConfig()
+    config.adFreeProxies = ["hang.test", "proxy.test"]
+    let session = LowLatencySession(login: "streamer", config: config, http: http, tokens: twitch, log: ActivityLog())
+    let started = Date()
+    _ = try! await session.start()
+    let took = Date().timeIntervalSince(started)
+    let route = await session.route
+    check(route == .adFreeServer("proxy.test") && took < 2.5, "next server raced in: \(route) after \(took) s")
   }
   // Through an ad-free server, an announced break doesn't cost low latency (nothing can be
   // stitched in, so the newest segment isn't held back).

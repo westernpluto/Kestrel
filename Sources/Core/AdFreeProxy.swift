@@ -58,33 +58,61 @@ struct AdFreeProxy: Hashable, Sendable {
   /// Tries the hosts in order; returns the first master playlist one of them delivers.
   static func fetchMaster(
     login: String, codecs: String, lowLatency: Bool, hosts: [String], http: HTTPClient, log: ActivityLog,
-    timeout: TimeInterval = 6
+    timeout: TimeInterval = 6, stagger: TimeInterval = 0.8
   ) async -> (text: String, url: URL, host: String)? {
-    for host in hosts.prefix(4) {
-      guard let url = masterURL(host: host, login: login, codecs: codecs, lowLatency: lowLatency) else { continue }
-      var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
-      request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
-      do {
-        let (data, response) = try await http.data(for: request)
-        if response.statusCode == 200, HLS.looksLikePlaylist(data), let text = String(data: data, encoding: .utf8),
-          text.contains("#EXT-X-STREAM-INF")
-        {
+    // A staggered race: the first host (the one that worked last time) is asked at once, each next
+    // one if nothing has come back after another `stagger` seconds, and the first playlist wins.
+    // Asked one after another, a server that didn't answer cost its whole timeout (6 s) before the
+    // next was tried: the stream took that much longer to open.
+    let candidates = Array(hosts.prefix(4))
+    guard !candidates.isEmpty else { return nil }
+    enum Outcome: Sendable {
+      case playlist(String, URL, String)
+      case offline(String)
+      case failed
+    }
+    return await withTaskGroup(of: Outcome.self) { group -> (text: String, url: URL, host: String)? in
+      for (index, host) in candidates.enumerated() {
+        group.addTask {
+          if index > 0 { try? await Task.sleep(nanoseconds: UInt64(Double(index) * stagger * 1e9)) }
+          if Task.isCancelled { return .failed }
+          guard let url = masterURL(host: host, login: login, codecs: codecs, lowLatency: lowLatency) else { return .failed }
+          var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
+          request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
+          do {
+            let (data, response) = try await http.data(for: request)
+            if response.statusCode == 200, HLS.looksLikePlaylist(data), let text = String(data: data, encoding: .utf8),
+              text.contains("#EXT-X-STREAM-INF")
+            {
+              return .playlist(text, response.url ?? url, host)
+            }
+            if response.statusCode == 404 { return .offline(host) }
+            if !Task.isCancelled { log.add("Ad-free proxy \(host) answered HTTP \(response.statusCode), trying the next") }
+          } catch {
+            if !Task.isCancelled { log.add("Ad-free proxy \(host) didn't answer (\(error.localizedDescription)), trying the next") }
+          }
+          return .failed
+        }
+      }
+      for await outcome in group {
+        switch outcome {
+        case .playlist(let text, let url, let host):
+          group.cancelAll()
           let country = userCountry(text).map { ", Twitch sees \($0)" } ?? ""
           log.add("Ad-free proxy \(host) delivered the stream\(country)")
           lastWorkingHost = host
-          return (text, response.url ?? url, host)
-        }
-        if response.statusCode == 404 {
-          // The channel is offline (or doesn't exist): no point asking the others.
+          return (text, url, host)
+        case .offline(let host):
+          // The channel is offline (or doesn't exist): no point waiting for the others.
+          group.cancelAll()
           log.add("Ad-free proxy \(host): channel not live")
           return nil
+        case .failed:
+          continue
         }
-        log.add("Ad-free proxy \(host) answered HTTP \(response.statusCode), trying the next")
-      } catch {
-        log.add("Ad-free proxy \(host) didn't answer (\(error.localizedDescription)), trying the next")
       }
+      return nil
     }
-    return nil
   }
 
   /// Remembered across streams so the next one starts with the server that worked.
