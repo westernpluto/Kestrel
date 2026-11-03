@@ -17,6 +17,7 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import VideoToolbox
 
 @MainActor
 final class KestrelEngine: NSObject {
@@ -93,6 +94,18 @@ final class KestrelEngine: NSObject {
   private(set) var lastDecoderError: String?
   /// Where it started, behind the newest frame it had (seconds).
   private(set) var startedBehind: Double?
+  /// Video is decoded here (VideoToolbox) and the display layer is handed finished pictures, in
+  /// the order they're shown. Handing it compressed frames left the picture black on streams with
+  /// B-frames (High profile sources), with the layer reporting all was well; decoding ourselves
+  /// puts frames in display order and tells us about every frame.
+  private var decoder: VTDecompressionSession?
+  private var decoderFormat: CMVideoFormatDescription?
+  /// Decoded pictures earlier than this aren't shown (they're decoded so later ones can be).
+  private var showFrom: Int64 = .min
+  private(set) var framesDecoded = 0
+  private(set) var framesShown = 0
+  private(set) var decodeErrors = 0
+  private(set) var lastDecodeStatus: OSStatus = noErr
   private var muted = false
 
   static let clock: Int32 = 90_000
@@ -134,6 +147,7 @@ final class KestrelEngine: NSObject {
     synchronizer.setRate(0, time: synchronizer.currentTime())
     displayLayer.flushAndRemoveImage()
     audioRenderer.flush()
+    closeDecoder()
   }
 
   /// Starts over at the live edge (after a pause, a long dropout, a failure).
@@ -303,30 +317,113 @@ final class KestrelEngine: NSObject {
     lastDecodeTime = dts
     guard
       let sample = Self.videoSample(
-        H264.sample(units), format: format, pts: time, dts: dts, duration: frameLength, keyframe: frame.isKeyframe, hidden: hidden)
+        H264.sample(units), format: format, pts: time, dts: dts, duration: frameLength, keyframe: frame.isKeyframe, hidden: false)
     else { return }
     if displayLayer.status == .failed || displayLayer.requiresFlushToResumeDecoding {
-      // The decoder gave up (a corrupt frame, or the app was in the background): flush and carry
-      // on from the next keyframe.
+      // The layer gave up, or the app was in the background: start it again.
       if displayLayer.status == .failed {
         decoderFailures += 1
         let error = displayLayer.error as NSError?
-        let text = error.map { "\($0.domain) \($0.code): \($0.localizedDescription)" } ?? "unknown"
-        if text != lastDecoderError || decoderFailures % 20 == 1 {
-          ActivityLog.shared.add("Kestrel player: the video decoder failed (\(text)); starting again from the next keyframe")
-        }
-        lastDecoderError = text
+        lastDecoderError = error.map { "layer \($0.domain) \($0.code)" } ?? "layer failed"
       }
       displayLayer.flush()
+    }
+    guard let session = decoderSession(for: format) else {
       waitingForKeyframe = true
-      if !frame.isKeyframe { return }
+      return
     }
     waitingForKeyframe = false
-    displayLayer.enqueue(sample)
+    if hidden { showFrom = max(showFrom, time + 1) }
+    decode(sample, in: session)
     videoFramesQueued += 1
     if hidden { videoFramesHidden += 1 }
     if firstVideoTime == nil { firstVideoTime = time }
     if lastVideoTime.map({ time > $0 }) ?? true { lastVideoTime = time }
+  }
+
+  // MARK: Decoding (VideoToolbox)
+
+  /// The decompression session for this format (a new one when the format changes).
+  private func decoderSession(for format: CMVideoFormatDescription) -> VTDecompressionSession? {
+    if let decoder, let decoderFormat, CMFormatDescriptionEqual(decoderFormat, otherFormatDescription: format) { return decoder }
+    closeDecoder()
+    let attributes: [CFString: Any] = [
+      kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+      kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any],
+    ]
+    var session: VTDecompressionSession?
+    let status = VTDecompressionSessionCreate(
+      allocator: kCFAllocatorDefault, formatDescription: format, decoderSpecification: nil,
+      imageBufferAttributes: attributes as CFDictionary, outputCallback: nil, decompressionSessionOut: &session)
+    guard status == noErr, let session else {
+      lastDecodeStatus = status
+      decodeErrors += 1
+      lastDecoderError = "couldn't start the decoder (\(status))"
+      ActivityLog.shared.add("Kestrel player: couldn't start the video decoder (\(status))")
+      return nil
+    }
+    decoder = session
+    decoderFormat = format
+    return session
+  }
+
+  private func closeDecoder() {
+    if let decoder {
+      VTDecompressionSessionWaitForAsynchronousFrames(decoder)
+      VTDecompressionSessionInvalidate(decoder)
+    }
+    decoder = nil
+    decoderFormat = nil
+    showFrom = .min
+  }
+
+  private func decode(_ sample: CMSampleBuffer, in session: VTDecompressionSession) {
+    // Temporal processing: pictures come out in the order they're shown, not decoded.
+    let flags: VTDecodeFrameFlags = [._EnableAsynchronousDecompression, ._EnableTemporalProcessing]
+    let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: flags, infoFlagsOut: nil) {
+      [weak self] status, _, image, pts, duration in
+      let picture = image.map { PictureBox($0) }
+      DispatchQueue.main.async {
+        MainActor.assumeIsolated { self?.decoded(status, picture?.image, pts: pts, duration: duration) }
+      }
+    }
+    if status != noErr { decodeFailed(status) }
+  }
+
+  private func decoded(_ status: OSStatus, _ image: CVImageBuffer?, pts: CMTime, duration: CMTime) {
+    guard running else { return }
+    guard status == noErr, let image else {
+      if status != noErr { decodeFailed(status) }
+      return
+    }
+    framesDecoded += 1
+    let time = Int64(pts.convertScale(Self.clock, method: .default).value)
+    guard time >= showFrom else { return }
+    var format: CMVideoFormatDescription?
+    CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: image, formatDescriptionOut: &format)
+    guard let format else { return }
+    var timing = CMSampleTimingInfo(duration: duration, presentationTimeStamp: pts, decodeTimeStamp: .invalid)
+    var sample: CMSampleBuffer?
+    CMSampleBufferCreateReadyWithImageBuffer(
+      allocator: kCFAllocatorDefault, imageBuffer: image, formatDescription: format, sampleTiming: &timing, sampleBufferOut: &sample)
+    guard let sample else { return }
+    displayLayer.enqueue(sample)
+    framesShown += 1
+  }
+
+  private func decodeFailed(_ status: OSStatus) {
+    decodeErrors += 1
+    if status != lastDecodeStatus || decodeErrors % 30 == 1 {
+      ActivityLog.shared.add("Kestrel player: a video frame didn't decode (\(status))")
+    }
+    lastDecodeStatus = status
+    lastDecoderError = "decode \(status)"
+    if status == kVTInvalidSessionErr {
+      // The session is gone (the app was in the background): a new one from the next keyframe.
+      decoder = nil
+      decoderFormat = nil
+      waitingForKeyframe = true
+    }
   }
 
   private func enqueueAudio(_ frame: AudioFrame, time: Int64) {
@@ -498,6 +595,12 @@ final class KestrelEngine: NSObject {
     else { return nil }
     return sample
   }
+}
+
+/// Carries a decoded picture to the main queue.
+private final class PictureBox: @unchecked Sendable {
+  let image: CVImageBuffer
+  init(_ image: CVImageBuffer) { self.image = image }
 }
 
 // MARK: - Downloads

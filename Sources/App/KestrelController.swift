@@ -183,7 +183,12 @@ final class KestrelController {
     default: decoder = "waiting"
     }
     lines.append(
-      StatLine(label: "Decoder", value: engine.decoderFailures > 0 ? "\(decoder), \(engine.decoderFailures) failures" : decoder))
+      StatLine(
+        label: "Decoded",
+        value: "\(engine.framesDecoded) pictures, \(engine.framesShown) shown, \(engine.decodeErrors) errors"
+          + (engine.decodeErrors > 0 ? " (last \(engine.lastDecodeStatus))" : "")))
+    lines.append(
+      StatLine(label: "Display", value: engine.decoderFailures > 0 ? "\(decoder), \(engine.decoderFailures) failures" : decoder))
     if let error = engine.lastDecoderError { lines.append(StatLine(label: "Decoder error", value: error)) }
     if let behind = engine.startedBehind { lines.append(StatLine(label: "Started", value: String(format: "%.2f s behind newest", behind))) }
     lines.append(StatLine(label: "Ads", value: AppSettings.shared.adBlockingSummary))
