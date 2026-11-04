@@ -105,15 +105,49 @@ final class ImagePipeline: @unchecked Sendable {
     lock.unlock()
   }
 
-  /// Fetches a picture into the disk cache only (no decoding, at low priority), so it shows at
-  /// once when it's wanted: for the emote picker's channel emotes. (Decoding them all ahead, for
-  /// six chats at once in multi-view, queued hundreds of pictures nobody was looking at.)
+  /// Fetches a picture into the disk cache only (no decoding), so it shows at once when it's
+  /// wanted: for the emote picker's channel emotes. A few at a time, on a connection of their own:
+  /// hundreds queued at once on the pictures' own connection made the emotes in view wait behind
+  /// them (7TV takes up to a second or more to answer each), which is slower than not fetching
+  /// ahead at all.
   func prefetch(_ url: URL) {
-    var request = URLRequest(url: url)
-    request.cachePolicy = .returnCacheDataElseLoad
-    let task = session.dataTask(with: request) { _, _, _ in }
-    task.priority = URLSessionTask.lowPriority
-    task.resume()
+    lock.lock()
+    prefetchQueue.append(url)
+    lock.unlock()
+    runPrefetches()
+  }
+
+  private var prefetchQueue: [URL] = []
+  private var prefetching = 0
+  private lazy var prefetchSession: URLSession = {
+    let configuration = URLSessionConfiguration.default
+    // (The same disk cache as the pictures' own session: what's fetched here is found there.)
+    configuration.urlCache = session.configuration.urlCache
+    configuration.requestCachePolicy = .returnCacheDataElseLoad
+    configuration.timeoutIntervalForRequest = 20
+    configuration.httpAdditionalHeaders = session.configuration.httpAdditionalHeaders
+    return URLSession(configuration: configuration)
+  }()
+
+  private func runPrefetches() {
+    lock.lock()
+    var next: [URL] = []
+    while prefetching < 3, !prefetchQueue.isEmpty {
+      prefetching += 1
+      next.append(prefetchQueue.removeFirst())
+    }
+    lock.unlock()
+    for url in next {
+      let task = prefetchSession.dataTask(with: url) { [weak self] _, _, _ in
+        guard let self else { return }
+        self.lock.lock()
+        self.prefetching -= 1
+        self.lock.unlock()
+        self.runPrefetches()
+      }
+      task.priority = URLSessionTask.lowPriority
+      task.resume()
+    }
   }
 
   /// - Parameters:
