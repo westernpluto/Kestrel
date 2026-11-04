@@ -1121,6 +1121,16 @@ struct PlayerScreen: View {
           .overlay(alignment: .top) {
             if !landscape { Divider().overlay(Color.white.opacity(0.08)) }
           }
+          // Chat beside the video: swiped toward its edge, it goes and the video takes the window.
+          .simultaneousGesture(
+            DragGesture(minimumDistance: 24, coordinateSpace: .global).onEnded { value in
+              guard large, layout.landscape, layout.panelVisible, keyboard.overlap == 0 else { return }
+              let dx = value.translation.width, dy = value.translation.height
+              guard abs(dx) > abs(dy) * 1.5 else { return }
+              let towardEdge = layout.chatOnLeft ? dx < -80 : dx > 80
+              if towardEdge { withAnimation(Self.spring) { largeFullScreen = true } }
+            }
+          )
           .offset(x: layout.panel.minX, y: layout.panel.minY + progress * 260)
           .opacity(layout.panelVisible ? expandedOpacity : 0)
           .allowsHitTesting(layout.panelVisible && progress == 0)
@@ -1141,6 +1151,7 @@ struct PlayerScreen: View {
           pictureInsets: progress == 0 ? layout.pictureInsets : EdgeInsets(),
           topBarExtra: layout.topBarExtra, bottomRowExtra: layout.bottomRowExtra,
           chromeVisible: progress == 0, minimized: app.playerMinimized, chatOnLeft: layout.chatOnLeft,
+          sideChat: layout.large && layout.landscape,
           viewersShownElsewhere: layout.details != nil,
           showsStreamer: layout.large && layout.landscape && !layout.fullScreen && layout.info == nil,
           chat: chat,

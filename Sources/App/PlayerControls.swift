@@ -23,6 +23,9 @@ struct PlayerVideoArea: View {
   var minimized: Bool = false
   /// Landscape chat is on the left (swipes to show and hide it are mirrored).
   var chatOnLeft: Bool = false
+  /// Chat in a column beside the video (a large window held sideways): sideways swipes put it
+  /// away and bring it back, as in phone landscape, instead of a swipe up for full screen.
+  var sideChat: Bool = false
   /// The details panel beside the video already shows the viewer count.
   var viewersShownElsewhere = false
   /// Theater mode: the streamer's picture and name go on the video (nothing else shows them).
@@ -282,7 +285,8 @@ struct PlayerVideoArea: View {
   // MARK: Gestures
 
   /// Pull down (portrait): the player shrinks with your finger into the mini player. Swipe down
-  /// in landscape: leave full screen. Swipe up: full screen. Sideways in landscape: chat.
+  /// in landscape: leave full screen. Swipe up (portrait): full screen. Sideways with chat beside
+  /// the video (landscape): chat away (the video takes the space) and back.
   private var swipe: some Gesture {
     // Screen coordinates: the video shrinks under the finger while it's pulled.
     DragGesture(minimumDistance: 14, coordinateSpace: .global)
@@ -316,10 +320,10 @@ struct PlayerVideoArea: View {
         if abs(dy) > abs(dx) {
           if dy > 70, landscape {
             exitFullScreen()
-          } else if dy < -70, !landscape {
+          } else if dy < -70, !landscape, !sideChat {
             enterFullScreen()
           }
-        } else if landscape {
+        } else if landscape || sideChat {
           // Swipe toward the middle to bring chat in, toward its edge to put it away.
           let towardChatEdge = chatOnLeft ? dx < -60 : dx > 60
           let awayFromChatEdge = chatOnLeft ? dx > 60 : dx < -60
