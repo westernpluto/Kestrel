@@ -82,8 +82,14 @@ final class KestrelController {
       engine.setMuted(userMuted)
       engine.setVolume(volume)
       self.engine = engine
-      // (Picture in Picture first: its copy of the picture goes in with the player's view.)
-      setUpPictureInPicture(engine)
+      // (Picture in Picture first: its copy of the picture goes in with the player's view.) With
+      // controls: the window takes a copy of the picture. Without: the picture itself moves into
+      // the window and back, as multi-view's does (no black on the way back).
+      if AppSettings.shared.pipControls {
+        setUpPictureInPicture(engine)
+      } else {
+        engine.onScreenView = { [weak self] view in self?.setUpCallPictureInPicture(on: view) }
+      }
       model?.kestrelEngineReady()
       engine.start()
       ActivityLog.shared.add("Kestrel player: \(login) at \(found[start].label)")
@@ -120,6 +126,7 @@ final class KestrelController {
     pipObservation = nil
     pip = nil
     pipDelegate = nil
+    callDelegate = nil
     loadTask?.cancel()
     if let engine { ChannelMargins.remember(engine.catchUp.targetBuffer, for: login, network: NetworkWatch.shared.memoryKey) }
     engine?.stop()
@@ -178,17 +185,47 @@ final class KestrelController {
         self?.pictureInPictureActive = active
         self?.engine?.screenNote(active ? "window up" : "window gone")
         self?.engine?.windowUp = active
-        if !active {
-          // Back in sight a little later (it has to be for the next Picture in Picture).
-          let engine = self?.engine
-          DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak engine] in
-            MainActor.assumeIsolated { engine?.setMirrorHidden(false) }
-          }
-        }
+
       }
     }
     pip = controller
     pipDelegate = delegate
+  }
+
+  // The kind without controls: the screen's own layers move into the window.
+  private let callContent = AVPictureInPictureVideoCallViewController()
+  private var callDelegate: KestrelCallPictureInPicture?
+  private weak var callSource: UIView?
+
+  private func setUpCallPictureInPicture(on view: UIView) {
+    guard AVPictureInPictureController.isPictureInPictureSupported(), view !== callSource, pip?.isPictureInPictureActive != true else { return }
+    callSource = view
+    callContent.preferredContentSize = CGSize(width: 1920, height: 1080)
+    callContent.view.backgroundColor = .black
+    let delegate = KestrelCallPictureInPicture(controller: self)
+    let controller = AVPictureInPictureController(contentSource: .init(activeVideoCallSourceView: view, contentViewController: callContent))
+    controller.canStartPictureInPictureAutomaticallyFromInline = true
+    controller.delegate = delegate
+    pipObservation = controller.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
+      let active = pip.isPictureInPictureActive
+      Task { @MainActor in self?.pictureInPictureActive = active }
+    }
+    pip = controller
+    callDelegate = delegate
+  }
+
+  /// Right as the window opens: the picture moves into it.
+  func callWindowOpening() {
+    guard let view = callSource as? KestrelVideoView.LayerView else { return }
+    engine?.screenInWindow = true
+    view.lendScreen(to: callContent.view)
+  }
+
+  /// The window has gone: the picture is back in the app.
+  func callWindowClosed() {
+    guard let view = callSource as? KestrelVideoView.LayerView else { return }
+    view.takeScreenBack()
+    engine?.screenInWindow = false
   }
 
   func togglePictureInPicture() {
@@ -357,6 +394,31 @@ struct KestrelVideoView: UIViewRepresentable {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Lends the screen's layers (their view) to the Picture in Picture window: the picture itself
+    /// goes into the window and comes back, nothing handed over (the kind without controls).
+    func lendScreen(to container: UIView) {
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      container.addSubview(screenHost)
+      screenHost.frame = container.bounds
+      screenHost.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      for layer in shown { layer.frame = screenHost.bounds }
+      CATransaction.commit()
+    }
+
+    func takeScreenBack() {
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      addSubview(screenHost)
+      screenHost.autoresizingMask = []
+      screenHost.frame = bounds
+      for layer in shown { layer.frame = bounds }
+      CATransaction.commit()
+    }
+
+    /// The screen's layers are out in the window.
+    var screenLent: Bool { screenHost.superview !== self }
+
     func show(_ video: AVSampleBufferDisplayLayer, retiring: AVSampleBufferDisplayLayer?, cover: CALayer? = nil, mirror newMirror: AVSampleBufferDisplayLayer?) {
       CATransaction.begin()
       CATransaction.setDisableActions(true)
@@ -389,6 +451,10 @@ struct KestrelVideoView: UIViewRepresentable {
 
     override func layoutSubviews() {
       super.layoutSubviews()
+      guard !screenLent else {
+        placeMirror()
+        return
+      }
       CATransaction.begin()
       CATransaction.setDisableActions(true)
       screenHost.frame = bounds
@@ -410,6 +476,7 @@ struct KestrelVideoView: UIViewRepresentable {
     view.show(engine.displayLayer, retiring: engine.retiringLayer, cover: engine.coverLayer, mirror: engine.mirrorLayer)
     view.placeMirror()
     engine.placeMirror = { [weak view] in view?.placeMirror() }
+    engine.screenView = view
     engine.onScreenLayers = { [weak view, weak engine] in
       guard let view, let engine else { return }
       view.show(engine.displayLayer, retiring: engine.retiringLayer, cover: engine.coverLayer, mirror: engine.mirrorLayer)
@@ -423,12 +490,35 @@ struct KestrelVideoView: UIViewRepresentable {
 
 /// The Picture in Picture window's controls for the Kestrel player (a live stream: play and pause,
 /// no seeking).
+/// The window without controls: the screen's own layers move in as it opens and back once it's
+/// gone (on the main thread, in the calls themselves: a hop later the window grew empty).
+final class KestrelCallPictureInPicture: NSObject, AVPictureInPictureControllerDelegate {
+  private weak var controller: KestrelController?
+
+  init(controller: KestrelController) {
+    self.controller = controller
+  }
+
+  func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    MainActor.assumeIsolated { controller?.callWindowOpening() }
+  }
+
+  func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    MainActor.assumeIsolated { controller?.callWindowClosed() }
+  }
+
+  func pictureInPictureController(
+    _ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error
+  ) {
+    MainActor.assumeIsolated { controller?.callWindowClosed() }
+  }
+}
+
 final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPlaybackDelegate, AVPictureInPictureControllerDelegate {
   // The picture in the app steps aside while the window is up (the window plays the copy; both
   // playing at once looked like a second video), and is back as the window heads home.
   func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
     MainActor.assumeIsolated {
-      controller?.engine?.setMirrorHidden(false)
       controller?.engine?.placeMirror?()
       controller?.engine?.screenHiddenForPictureInPicture = true
     }
@@ -457,10 +547,6 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
         return
       }
       engine.screenHiddenForPictureInPicture = false
-      // The copy out of sight for the handover: the system shows it in front for a moment as it
-      // gives it back, and empty from the window it's black (three black frames over the picture,
-      // with every layer of the picture in place).
-      engine.setMirrorHidden(true)
       engine.screenNote("window asks for the picture")
       let started = Date()
       @MainActor func check() {

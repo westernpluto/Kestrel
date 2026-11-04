@@ -212,7 +212,7 @@ struct PictureInPictureSettingsView: View {
       Section {
         Toggle("Playback controls", isOn: $settings.pipControls)
       } footer: {
-        Text("On: the regular window with play and pause; the picture can show black for a moment when you come back to the app. Off: no buttons in the window, but the stream comes back without the black (pause from the lock screen, Control Center or headphones). Applies from the next stream you open.")
+        Text("On: the regular window with play and pause; the picture can show black for a moment when you come back to the app. Off: no buttons in the window, but the stream comes back without the black (pause from the lock screen, Control Center or headphones). For both players (the low-latency one and Kestrel's own). Applies from the next stream you open.")
       }
       if PlayerEngine.isLowLatencyBuilt {
         Section {

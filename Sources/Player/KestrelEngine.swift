@@ -58,6 +58,14 @@ final class KestrelEngine: NSObject {
   var onScreenLayers: (() -> Void)?
   /// Picture in Picture's window is up (the old picture isn't taken away before it's gone).
   var windowUp = false
+  /// The screen's own layers are in the Picture in Picture window (the kind without controls):
+  /// they go on being fed in the background.
+  var screenInWindow = false
+  /// The view the screen's layers are in (set by it), and who wants to know when it's there.
+  weak var screenView: UIView? {
+    didSet { if let screenView, screenView !== oldValue { onScreenView?(screenView) } }
+  }
+  var onScreenView: ((UIView) -> Void)?
   /// The screen's layer has a frame on screen and is caught up (nothing hidden).
   var screenDrawing: Bool {
     guard !screenBehind, !inBackground, !displayLayer.isHidden, displayLayer.status == .rendering,
@@ -66,16 +74,6 @@ final class KestrelEngine: NSObject {
     if #available(iOS 17.4, tvOS 17.4, *) { return displayLayer.sampleBufferRenderer.displayedPixelBuffer() != nil }
     return true
   }
-  /// Hides or shows the Picture in Picture copy (out of sight while the window is handed back).
-  func setMirrorHidden(_ hidden: Bool) {
-    guard let mirrorLayer, mirrorLayer.isHidden != hidden else { return }
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    mirrorLayer.isHidden = hidden
-    CATransaction.commit()
-    screenNote(hidden ? "copy hidden" : "copy shown")
-  }
-
   /// Puts the Picture in Picture copy's view over the picture's spot again (set by the view).
   var placeMirror: (() -> Void)?
   /// The sound, decoded here and played through AVAudioEngine; it's also the clock (see `syncClock`).
@@ -600,7 +598,9 @@ final class KestrelEngine: NSObject {
     if decodeInLayer {
       // The picture on screen (left alone in the background: it can't decode there, and is
       // brought back up to the frame showing when the app returns).
-      if inBackground || (UIApplication.shared.applicationState != .active && displayLayer.requiresFlushToResumeDecoding) {
+      if (inBackground && !screenInWindow)
+        || (UIApplication.shared.applicationState != .active && displayLayer.requiresFlushToResumeDecoding && !screenInWindow)
+      {
         // (Past the keyframe check above: the copy goes on from here.) Not while the app is still
         // coming back and can't decode yet either: catching up then reset the screen with every
         // frame; it catches up once the app is active (see `enteringForeground`).
