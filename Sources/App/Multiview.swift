@@ -376,6 +376,34 @@ final class MultiviewModel: ObservableObject, Identifiable {
   }
 }
 
+/// How far multi-view is pulled up from its dock (nil: it isn't), watched only by what shows it
+/// (published from AppModel, every frame of the pull would redraw the whole app).
+@MainActor
+final class MultiviewPull: ObservableObject {
+  static let shared = MultiviewPull()
+  @Published var progress: CGFloat?
+}
+
+/// Multi-view on screen: open, or growing out of its dock under the finger (the same view either
+/// way, so letting go just carries on growing it).
+struct MultiviewPresenter: View {
+  let model: MultiviewModel
+  let minimized: Bool
+  @ObservedObject private var pull = MultiviewPull.shared
+
+  var body: some View {
+    if !minimized || pull.progress != nil {
+      let progress = minimized ? (pull.progress ?? 0) : 1
+      MultiviewScreen(model: model)
+        // Only a scale and a fade while it moves (nothing re-laid out), from the dock's corner.
+        .scaleEffect(0.25 + 0.75 * progress, anchor: .bottomTrailing)
+        .opacity(Double(min(1, progress * 1.8)))
+        .allowsHitTesting(!minimized)
+        .transition(.opacity.combined(with: .scale(scale: 0.5, anchor: .bottomTrailing)))
+    }
+  }
+}
+
 struct MultiviewScreen: View {
   @ObservedObject var model: MultiviewModel
   @StateObject private var keyboard = KeyboardObserver()
@@ -413,7 +441,9 @@ struct MultiviewScreen: View {
     .statusBarHidden(true)
     .persistentSystemOverlays(.hidden)
     .sheet(isPresented: $picking, onDismiss: { showChrome() }) { MultiviewPicker(model: model) }
-    .onAppear(perform: opened)
+    // (Being pulled up from the dock it's on screen but not open yet: opened once let go.)
+    .onAppear { if !app.multiviewMinimized { opened() } }
+    .onChange(of: app.multiviewMinimized) { minimized in if !minimized { opened() } }
     .onDisappear {
       hideTask?.cancel()
       model.setHidden(true)
@@ -529,7 +559,6 @@ struct MultiviewScreen: View {
             player: tile.player, channel: tile.channel, heard: model.heardIDs.contains(tile.id),
             selected: tile.id == model.selectedID, volume: model.volume(tile.id),
             several: model.heardIDs.count > 1 || (model.heardIDs.count == 1 && !model.heardIDs.contains(tile.id)),
-            chrome: chrome,
             tap: {
               // The first tap just brings the controls back; with them showing, it picks the stream.
               if chromeVisible { withAnimation(Self.spring) { model.select(tile.id) } }
@@ -561,6 +590,10 @@ struct MultiviewScreen: View {
               withAnimation(Self.spring) { swapTiles(tile.id, other) }
             }
           )
+          // Redrawn only when what it shows changes; the controls fading reach its picture through
+          // the environment, past it (each redraw rebuilt its hold menu: the text flashed).
+          .equatable()
+          .environment(\.multiviewChrome, chrome)
           .frame(width: rect.width, height: rect.height)
           // Hold a picture and drag it onto another: they change places.
           .onDrag {
@@ -923,7 +956,7 @@ struct MultiviewDockSpot: View {
     let corner = MiniCorner.frame(window: bounds, insets: insets, tabBar: app.tabBarHeight, rail: app.tabRail)
     let bottom = bounds.height - insets.bottom - corner.maxY + (app.playing != nil ? corner.height + 10 : 0)
     // Tap to open, hold for more. (Swipes on it opened or threw it away by accident.)
-    MultiviewDock(model: model, open: open, close: close)
+    MultiviewDock(model: model, open: open, close: close, closeNow: closeNow)
       .padding(.trailing, max(10, bounds.width - insets.right - corner.maxX))
       .padding(.bottom, max(10, bottom))
   }
@@ -932,7 +965,14 @@ struct MultiviewDockSpot: View {
     withAnimation(Self.spring) {
       if app.playing != nil { app.playing = nil }
       app.multiviewMinimized = false
+      MultiviewPull.shared.progress = nil
     }
+  }
+
+  /// From the dock's own button: at once, fading as it goes (a press, then nothing for a moment,
+  /// felt like the tap hadn't taken).
+  private func closeNow() {
+    withAnimation(.easeOut(duration: 0.25)) { app.closeMultiview() }
   }
 
   private func close() {
@@ -950,9 +990,9 @@ struct MultiviewDock: View {
   @ObservedObject var model: MultiviewModel
   var open: () -> Void
   var close: () -> Void
-  /// Pulled up by a finger (it follows, then opens multi-view past a little way, as the mini
-  /// player does). Only an offset and a slight scale: nothing re-laid out while it moves.
-  @State private var lift: CGFloat = 0
+  var closeNow: () -> Void = {}
+  /// Pulled up: multi-view grows out of the dock under the finger (see MultiviewPresenter).
+  @ObservedObject private var pull = MultiviewPull.shared
 
   var body: some View {
     HStack(spacing: 6) {
@@ -994,7 +1034,7 @@ struct MultiviewDock: View {
         .frame(width: 26, height: 40)
       // Closes it in one tap (holding the dock or opening multi-view to close it was a chore).
       Rectangle().fill(Color.white.opacity(0.18)).frame(width: 1, height: 26)
-      Button(action: close) {
+      Button(action: closeNow) {
         Image(systemName: "xmark")
           .font(.system(size: 14, weight: .bold))
           .foregroundColor(.white.opacity(0.85))
@@ -1008,29 +1048,37 @@ struct MultiviewDock: View {
     .padding(.trailing, 2)
     .padding(.vertical, 5)
     .background(.ultraThinMaterial, in: Capsule())
-    .background(Color.black.opacity(0.45), in: Capsule())
+    // The shadow cast by the capsule alone (on the whole dock it was worked out from its contents
+    // every frame they changed).
+    .background(Capsule().fill(Color.black.opacity(0.45)).shadow(color: .black.opacity(0.45), radius: 10, y: 4))
     .overlay(Capsule().stroke(Color.white.opacity(0.14), lineWidth: 1))
-    .shadow(color: .black.opacity(0.45), radius: 10, y: 4)
     .contentShape(Capsule())
-    .offset(y: lift)
-    .scaleEffect(1 + min(0.08, -lift / 900), anchor: .bottomTrailing)
+    // Fades as multi-view grows out of it.
+    .opacity(Double(1 - min(1, (pull.progress ?? 0) * 3)))
     .onTapGesture(perform: open)
-    // Swiped up: opens multi-view, as the mini player does (the dock rides the finger first).
+    // Pulled up: multi-view grows out of the dock under the finger, and carries on opening (or
+    // sinks back) when let go, as the mini player does.
     .simultaneousGesture(
-      DragGesture(minimumDistance: 12, coordinateSpace: .global)
+      DragGesture(minimumDistance: 10, coordinateSpace: .global)
         .onChanged { value in
-          let up = min(0, value.translation.height)
-          // Mostly upward, and less and less the further it goes.
-          guard abs(value.translation.width) < 60 || up < -30 else { return }
-          lift = -(pow(-up, 0.85))
+          let up = -value.translation.height
+          guard pull.progress != nil || (up > 8 && up > abs(value.translation.width)) else { return }
+          let distance = max(300, (AppWindow.current?.bounds.height ?? 800) * 0.6)
+          pull.progress = min(1, max(0, up / distance))
         }
         .onEnded { value in
-          let opens = value.translation.height < -50 || value.predictedEndTranslation.height < -140
-          if opens {
+          guard let progress = pull.progress else { return }
+          let distance = max(300, (AppWindow.current?.bounds.height ?? 800) * 0.6)
+          let flung = -value.predictedEndTranslation.height / distance
+          if progress > 0.3 || flung > 0.6 {
             Haptics.tap()
             open()
+          } else {
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) { pull.progress = 0 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+              if pull.progress == 0 { pull.progress = nil }
+            }
           }
-          withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) { lift = 0 }
         }
     )
     .contextMenu {
@@ -1057,17 +1105,23 @@ struct MultiviewDock: View {
 private struct DockAvatar: View {
   let tile: MultiviewModel.Tile
   @ObservedObject var model: MultiviewModel
-  @ObservedObject private var player: PlayerModel
 
   init(tile: MultiviewModel.Tile, model: MultiviewModel) {
     self.tile = tile
     self.model = model
-    _player = ObservedObject(wrappedValue: tile.player)
   }
 
+  // Whether it's heard and playing, looked at once a second. (Watching the stream's player
+  // redrew the dock with every one of its updates, several a second per stream: the dock, and
+  // what's around it, felt laggy.)
   var body: some View {
-    let sounding = model.isSounding(tile.id)
-    Avatar(url: player.channel?.profileImageURL ?? tile.channel.profileImageURL, size: 38)
+    TimelineView(.periodic(from: .now, by: 1)) { _ in
+      face(sounding: model.isSounding(tile.id))
+    }
+  }
+
+  private func face(sounding: Bool) -> some View {
+    Avatar(url: tile.player.channel?.profileImageURL ?? tile.channel.profileImageURL, size: 38)
       .opacity(model.running ? 1 : 0.85)
       .overlay(Circle().stroke(sounding ? Color.accentTeal : Color.white.opacity(0.18), lineWidth: sounding ? 2.5 : 1))
       .overlay(alignment: .bottomTrailing) {
@@ -1100,7 +1154,7 @@ private struct SoundBadge: View {
 
 /// A stream in multi-view, with its hold menu. The menu is put on here, where the player isn't
 /// watched: on the picture's own view (redrawn with every stats update) its text flickered.
-struct MultiviewTileView: View {
+struct MultiviewTileView: View, Equatable {
   let player: PlayerModel
   let channel: Channel
   let heard: Bool
@@ -1109,8 +1163,6 @@ struct MultiviewTileView: View {
   let volume: Float
   /// Another stream is heard too (the menu then offers "only this one").
   let several: Bool
-  /// The name, sound button and outline show (they fade with the rest of the controls).
-  var chrome = true
   var tap: () -> Void
   var toggleSound: () -> Void
   var listenOnly: () -> Void
@@ -1122,9 +1174,14 @@ struct MultiviewTileView: View {
   var others: [Channel] = []
   var swap: (String) -> Void = { _ in }
 
+  static func == (a: Self, b: Self) -> Bool {
+    a.player === b.player && a.channel.id == b.channel.id && a.heard == b.heard && a.selected == b.selected
+      && a.volume == b.volume && a.several == b.several && a.others.map(\.id) == b.others.map(\.id)
+  }
+
   var body: some View {
     MultiviewTileFace(
-      player: player, channel: channel, heard: heard, selected: selected, volume: volume, several: several, chrome: chrome,
+      player: player, channel: channel, heard: heard, selected: selected, volume: volume, several: several,
       tap: tap, toggleSound: toggleSound, listenOnly: listenOnly, setVolume: setVolume, makeMain: makeMain,
       openInPlayer: openInPlayer, remove: remove, others: others, swap: swap
     )
@@ -1205,7 +1262,7 @@ struct MultiviewTileFace: View {
   /// Another stream is heard too (the menu then offers "only this one").
   let several: Bool
   /// The name, sound button and outline show (they fade with the rest of the controls).
-  var chrome = true
+  @Environment(\.multiviewChrome) private var chrome
   var tap: () -> Void
   var toggleSound: () -> Void
   var listenOnly: () -> Void
@@ -1491,5 +1548,17 @@ enum StreamPictures {
   static func box(_ places: [CGRect]) -> CGRect? {
     guard !places.isEmpty else { return nil }
     return places.map(picture(in:)).reduce(CGRect.null) { $0.union($1) }
+  }
+}
+
+/// Multi-view's controls are showing (each picture's name, sound button and outline with them).
+private struct MultiviewChromeKey: EnvironmentKey {
+  static let defaultValue = true
+}
+
+extension EnvironmentValues {
+  var multiviewChrome: Bool {
+    get { self[MultiviewChromeKey.self] }
+    set { self[MultiviewChromeKey.self] = newValue }
   }
 }

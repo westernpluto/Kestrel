@@ -94,10 +94,9 @@ struct RootView: View {
           .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
           .zIndex(1)
       }
-      if let session = app.multiview, !app.multiviewMinimized {
-        MultiviewScreen(model: session)
+      if let session = app.multiview {
+        MultiviewPresenter(model: session, minimized: app.multiviewMinimized)
           .id(session.id)
-          .transition(.opacity.combined(with: .scale(scale: 0.5, anchor: .bottomTrailing)))
           .zIndex(2)
       }
     }

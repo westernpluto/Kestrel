@@ -427,9 +427,12 @@ final class AppModel: ObservableObject {
 
   @MainActor
   func closeMultiview() {
-    multiview?.stopAll()
+    // Off the screen first, the streams stopped just after: stopping six players in the same
+    // moment held up the close.
+    let session = multiview
     multiview = nil
     multiviewMinimized = false
+    DispatchQueue.main.async { session?.stopAll() }
   }
   /// The player is shrunk into the mini player above the tab bar.
   @Published var playerMinimized = false
