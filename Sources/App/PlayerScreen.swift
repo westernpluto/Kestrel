@@ -425,7 +425,9 @@ struct PlayerLayout: Equatable {
     landscape = safe.width > safe.height
     self.large = large
     // A little air above the keyboard (newer keyboards draw slightly above the frame they report).
-    let bottomPad = keyboard > 0 ? keyboard + 14 : insets.bottom
+    // Without it, the message box sits just above the home indicator (the indicator's whole
+    // inset under it left a band of nothing under chat).
+    let bottomPad = keyboard > 0 ? keyboard + 14 : max(0, insets.bottom - 20)
     // The window's edges, in safe-area coordinates.
     let windowLeft = -insets.leading
     let windowRight = safe.width + insets.trailing
@@ -505,13 +507,16 @@ struct PlayerLayout: Equatable {
       let videoSpan = insets.leading + insets.trailing > 0 ? windowRight - windowLeft : width
       let fullHeight = (videoSpan * 9 / 16).rounded()
       let windowBottom = safe.height + insets.bottom
+      // A large window (iPhone Duo's inner display) hides the status bar while the player is up,
+      // and the video takes its band at the top (its controls stay below it).
+      let videoTop: CGFloat = large ? windowTop : 0
       var videoHeight = fullHeight
       var showInfo = true
       if keyboard > 0 {
         // Typing: the message box and some chat have to fit above the keyboard. The info bar goes
         // first, then the video shrinks (iPhone Duo's inner display has a tall keyboard, and on
         // its own it left no room at all).
-        let room = windowBottom - bottomPad
+        let room = windowBottom - bottomPad - videoTop
         let minChat: CGFloat = large ? 200 : 150
         if room - fullHeight - Self.infoHeight < minChat {
           showInfo = false
@@ -523,17 +528,18 @@ struct PlayerLayout: Equatable {
       let videoX =
         videoWidth < videoSpan && videoWidth <= width
         ? ((width - videoWidth) / 2).rounded() : videoLeft + ((videoSpan - videoWidth) / 2).rounded()
-      video = CGRect(x: videoX, y: 0, width: videoWidth, height: videoHeight)
+      video = CGRect(x: videoX, y: videoTop, width: videoWidth, height: videoHeight)
       controls = EdgeInsets(
-        top: 2, leading: max(0, -video.minX) + 6, bottom: 2, trailing: max(0, video.maxX - width) + 6)
+        top: max(0, -videoTop) + 2, leading: max(0, -video.minX) + 6, bottom: 2, trailing: max(0, video.maxX - width) + 6)
       // iPhone Duo's outer screen: below the status strip's clock and signal, the strip is empty,
       // so the info bar and chat run the window's whole width (iOS keeps all of it clear).
       let sideStrip = !large && max(insets.leading, insets.trailing) > Self.cornerStripWidth
       let fullWidthFrom = Self.stripContentBottom - insets.top
       let rowLeft: (CGFloat) -> CGFloat = { y in sideStrip && y >= fullWidthFrom ? windowLeft : 0 }
       let rowWidth: (CGFloat) -> CGFloat = { y in sideStrip && y >= fullWidthFrom ? windowRight - windowLeft : width }
-      info = showInfo ? CGRect(x: rowLeft(videoHeight), y: videoHeight, width: rowWidth(videoHeight), height: Self.infoHeight) : nil
-      let top = videoHeight + (showInfo ? Self.infoHeight : 0)
+      let videoBottom = videoTop + videoHeight
+      info = showInfo ? CGRect(x: rowLeft(videoBottom), y: videoBottom, width: rowWidth(videoBottom), height: Self.infoHeight) : nil
+      let top = videoBottom + (showInfo ? Self.infoHeight : 0)
       panel = CGRect(x: rowLeft(top), y: top, width: rowWidth(top), height: max(0, windowBottom - top))
       panelPadding = EdgeInsets(top: 0, leading: 0, bottom: bottomPad, trailing: 0)
       panelVisible = true
@@ -807,15 +813,17 @@ struct PlayerLayout: Equatable {
       return out
     }
     // Portrait, or a large window: the strip at the top of the video's place.
-    let lost = video.height - strip
-    out.video = CGRect(x: video.minX, y: video.minY, width: video.width, height: strip)
+    // (Under a hidden status bar's band, the strip grows by it.)
+    let band = strip + max(0, -video.minY)
+    let lost = video.height - band
+    out.video = CGRect(x: video.minX, y: video.minY, width: video.width, height: band)
     out.info = info?.offsetBy(dx: 0, dy: -lost)
     out.details = details.map { CGRect(x: $0.minX, y: $0.minY - lost, width: $0.width, height: $0.height + lost) }
     if !landscape {
       // Chat is under the video here (beside it in a large window held sideways).
       out.panel = CGRect(x: panel.minX, y: panel.minY - lost, width: panel.width, height: panel.height + lost)
     }
-    out.controls = EdgeInsets(top: 0, leading: controls.leading, bottom: 0, trailing: controls.trailing)
+    out.controls = EdgeInsets(top: max(0, -video.minY), leading: controls.leading, bottom: 0, trailing: controls.trailing)
     return out
   }
 
@@ -857,7 +865,7 @@ struct PlayerLayout: Equatable {
         ? CGRect(x: windowLeft, y: windowTop, width: crease.minX - windowLeft, height: height)
         : CGRect(x: crease.maxX, y: windowTop, width: windowRight - crease.maxX, height: height)
       out.panelPadding = EdgeInsets(
-        top: insets.top + 6, leading: chatOnLeft ? insets.leading : 0, bottom: insets.bottom, trailing: chatOnLeft ? 0 : insets.trailing)
+        top: insets.top + 6, leading: chatOnLeft ? insets.leading : 0, bottom: max(0, insets.bottom - 20), trailing: chatOnLeft ? 0 : insets.trailing)
       out.chatOnLeft = chatOnLeft
       out.landscape = true
       out.controls = EdgeInsets(
@@ -876,7 +884,7 @@ struct PlayerLayout: Equatable {
       out.details = nil
       let chatTop = crease.maxY + Self.infoHeight
       out.panel = CGRect(x: 0, y: chatTop, width: safe.width, height: max(0, windowBottom - chatTop))
-      out.panelPadding = EdgeInsets(top: 0, leading: 0, bottom: insets.bottom, trailing: 0)
+      out.panelPadding = EdgeInsets(top: 0, leading: 0, bottom: max(0, insets.bottom - 20), trailing: 0)
       out.landscape = false
       out.controls = EdgeInsets(
         top: max(0, -out.video.minY) + 2, leading: max(0, -out.video.minX) + 6, bottom: 2,
@@ -1077,7 +1085,7 @@ struct PlayerScreen: View {
           ? LayoutToggle(title: "Theater mode", systemImage: "theatermasks", onImage: "theatermasks.fill", isOn: theater)
           : LayoutToggle(
             title: "Chat over video", systemImage: "rectangle.righthalf.inset.filled",
-            onImage: "rectangle.righthalf.inset.filled", isOn: chatOverVideo))
+            onImage: "rectangle.righthalf.inset.filled", isOn: chatOverVideo, chatOverVideo: true))
         : nil
       // (Phone landscape can't shrink; a large window's full screen can, under the finger.)
       let progress = layout.fullScreen && !layout.large ? 0 : (dragProgress ?? (app.playerMinimized ? 1 : 0))
@@ -1299,7 +1307,7 @@ struct PlayerScreen: View {
       // on iPhone Duo's inner display it runs down one side of the video. It comes back once the
       // player is actually shrinking (not while a finger is still deciding): bringing it back
       // re-lays out the window, which cut the keyboard's slide short when a swipe put it away.
-      .statusBarHidden((layout.fullScreen || (layout.large && layout.landscape)) && !app.playerMinimized)
+      .statusBarHidden((layout.fullScreen || layout.large) && !app.playerMinimized)
       .persistentSystemOverlays(layout.fullScreen && !app.playerMinimized ? .hidden : .automatic)
     }
     .ignoresSafeArea(.keyboard)

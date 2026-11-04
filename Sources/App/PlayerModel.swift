@@ -68,9 +68,6 @@ final class PlayerModel: ObservableObject {
   /// Zoomed to fill the screen (crops the sides) instead of fitting.
   @Published var fillsScreen = false
   @Published private(set) var pictureInPictureActive = false
-  /// Picture in Picture's window is on its way back into the app (the player screen fills the
-  /// window for it to land in, then moves back: see PlayerScreen).
-  @Published var pictureInPictureReturning = false
   /// Playing the audio-only rendition (the picture would only freeze, so the player says so).
   enum AudioOnly: Equatable {
     /// Picked in the quality menu.
@@ -213,6 +210,15 @@ final class PlayerModel: ObservableObject {
 
   func kestrelEngineReady() {
     kestrelEngine = kestrel?.engine
+  }
+
+  /// Kestrel's player ran dry and Twitch says the channel is offline: the stream ended.
+  func kestrelOffline() {
+    guard !stopped, kestrel != nil else { return }
+    ActivityLog.shared.add("Kestrel player: the stream ended")
+    teardownPlayback()
+    waitingForStream = false
+    phase = .offline
   }
 
   private func startKestrel(_ channel: Channel) {

@@ -110,13 +110,42 @@ final class KestrelController {
     switch state {
     case .starting:
       model.isBuffering = true
+      watchForEnd()
     case .playing:
       model.isBuffering = false
+      endWatch?.cancel()
+      endWatch = nil
       if model.phase != .playing { model.phase = .playing }
     case .stalled:
       model.isBuffering = true
+      watchForEnd()
     case .failed(let message):
       model.phase = .failed(message)
+    }
+  }
+
+  /// While nothing plays: asks Twitch now and then whether the channel is still live (a stream that
+  /// ended just stops sending, and the player waited for it in black forever).
+  private var endWatch: Task<Void, Never>?
+
+  private func watchForEnd() {
+    guard endWatch == nil, !stopped else { return }
+    let login = self.login
+    endWatch = Task { [weak self] in
+      // A hiccup is usually over in a moment; after that, every few seconds.
+      var wait: UInt64 = 4_000_000_000
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: wait)
+        guard !Task.isCancelled else { return }
+        wait = 6_000_000_000
+        guard let page = try? await TwitchAPI.shared.channelPage(login: login) else { continue }
+        guard !Task.isCancelled, let self, !self.stopped else { return }
+        if page.stream == nil {
+          self.endWatch = nil
+          self.model?.kestrelOffline()
+          return
+        }
+      }
     }
   }
 
@@ -127,6 +156,8 @@ final class KestrelController {
 
   func stop() {
     stopped = true
+    endWatch?.cancel()
+    endWatch = nil
     pip?.stopPictureInPicture()
     pipObservation = nil
     pip = nil
@@ -268,10 +299,6 @@ final class KestrelController {
     callDelegate = delegate
   }
 
-  /// The window is about to come back into the app / is back (the player screen's transition).
-  func pictureInPictureReturning() { model?.pictureInPictureReturning = true }
-  func pictureInPictureReturned() { model?.pictureInPictureReturning = false }
-
   /// Right as the window opens: the picture moves into it.
   func callWindowOpening() {
     guard let view = callSource as? KestrelVideoView.LayerView else { return }
@@ -281,7 +308,6 @@ final class KestrelController {
 
   /// The window has gone: the picture is back in the app.
   func callWindowClosed() {
-    pictureInPictureReturned()
     guard let view = callSource as? KestrelVideoView.LayerView else { return }
     view.takeScreenBack()
     engine?.screenInWindow = false
@@ -627,7 +653,6 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
   func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
     MainActor.assumeIsolated {
       ignorePausesUntil = Date().addingTimeInterval(1.5)
-      controller?.pictureInPictureReturned()
     }
   }
 
@@ -651,8 +676,6 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
       }
       ignorePausesUntil = Date().addingTimeInterval(3)
       engine.screenHiddenForPictureInPicture = false
-      // The player goes to the whole window for the window to land in (it's moved back after).
-      controller?.pictureInPictureReturning()
       engine.screenNote("window asks for the picture")
       let started = Date()
       @MainActor func check() {

@@ -61,6 +61,32 @@ struct PlayerVideoArea: View {
   /// Full screen with chat put away: a small see-through chat can lie over the video instead.
   private var overlayAvailable: Bool { landscape && !chatOpen && chat != nil }
 
+  /// Where chat is in full screen (one menu for all of it: beside, over the video, a small
+  /// see-through one, or none).
+  private var chatMode: ChatMode {
+    if chatOpen { return layoutToggle?.chatOverVideo == true && layoutToggle?.isOn == true ? .over : .beside }
+    return chatOverlay && chat != nil ? .floating : .off
+  }
+
+  private var chatModes: [ChatMode] {
+    // (A large window's chat only goes beside the video.)
+    [.beside] + (largeWindow ? [] : [.over]) + (chat != nil ? [.floating] : []) + [.off]
+  }
+
+  private func setChatMode(_ mode: ChatMode) {
+    guard mode != chatMode else { return }
+    withAnimation(.easeInOut(duration: 0.2)) {
+      switch mode {
+      case .beside, .over:
+        if !largeWindow { setLayoutToggle(mode == .over) }
+        if !chatOpen { toggleChat() }
+      case .floating, .off:
+        chatOverlay = mode == .floating
+        if chatOpen { toggleChat() }
+      }
+    }
+  }
+
   var body: some View {
     ZStack {
       Color.black
@@ -116,10 +142,8 @@ struct PlayerVideoArea: View {
         model: model, landscape: landscape, chatOpen: chatOpen, visible: controlsShown && chromeVisible && !pulling,
         insets: controlInsets, pictureInsets: pictureInsets, topBarExtra: topBarExtra, bottomRowExtra: bottomRowExtra,
         viewersShownElsewhere: viewersShownElsewhere, showsStreamer: showsStreamer,
-        layoutToggle: layoutToggle, setLayoutToggle: setLayoutToggle,
-        chatOverlay: overlayAvailable ? chatOverlay : nil,
-        setChatOverlay: { on in withAnimation(.easeInOut(duration: 0.2)) { chatOverlay = on } },
-        toggleChat: toggleChat,
+        layoutToggle: layoutToggle?.chatOverVideo == true ? nil : layoutToggle, setLayoutToggle: setLayoutToggle,
+        chatMode: landscape ? chatMode : nil, chatModes: chatModes, setChatMode: setChatMode,
         minimize: minimize, enterFullScreen: enterFullScreen, exitFullScreen: exitFullScreen,
         interacted: { scheduleHide(after: $0) })
       if let resumed = model.resumedAt, chromeVisible {
@@ -428,10 +452,10 @@ struct PlayerControls: View {
   var showsStreamer = false
   var layoutToggle: LayoutToggle? = nil
   var setLayoutToggle: (Bool) -> Void = { _ in }
-  /// The chat overlay's switch (nil: not offered here).
-  var chatOverlay: Bool? = nil
-  var setChatOverlay: (Bool) -> Void = { _ in }
-  var toggleChat: () -> Void
+  /// Where chat is (nil: no chat menu here), and where it can go.
+  var chatMode: ChatMode? = nil
+  var chatModes: [ChatMode] = []
+  var setChatMode: (ChatMode) -> Void = { _ in }
   var minimize: () -> Void
   var enterFullScreen: () -> Void
   var exitFullScreen: () -> Void
@@ -443,6 +467,9 @@ struct PlayerControls: View {
   @ObservedObject private var autoRecorder = AutoRecorder.shared
   /// While dragging the seek bar everything else steps aside for the preview.
   @State private var scrubbing = false
+  /// A word on what a button just did (icons alone didn't say).
+  @State private var hint: String?
+  @State private var hintTask: Task<Void, Never>?
 
   var body: some View {
     ZStack {
@@ -484,7 +511,19 @@ struct PlayerControls: View {
         // Centred on the picture, not the area around it.
         .padding(pictureInsets)
       }
+      if let hint {
+        Text(hint)
+          .font(.footnote.weight(.semibold))
+          .padding(.horizontal, 14).padding(.vertical, 8)
+          .background(.ultraThinMaterial, in: Capsule())
+          .environment(\.colorScheme, .dark)
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+          .padding(.top, insets.top + 52)
+          .transition(.opacity)
+          .allowsHitTesting(false)
+      }
     }
+    .animation(.easeInOut(duration: 0.2), value: hint)
     .foregroundColor(.white)
     .opacity(visible ? 1 : 0)
     .animation(.easeInOut(duration: 0.22), value: visible)
@@ -603,14 +642,18 @@ struct PlayerControls: View {
             label: layoutToggle.isOn ? "\(layoutToggle.title) off" : layoutToggle.title, highlighted: layoutToggle.isOn
           ) { setLayoutToggle(!layoutToggle.isOn) }
         }
-        if let chatOverlay {
+        if model.kestrelEngine != nil {
+          // The audio compressor (Kestrel's player): loud moments down, quiet ones up.
           button(
-            chatOverlay ? "text.bubble.fill" : "text.bubble", label: chatOverlay ? "Hide chat overlay" : "Chat overlay",
-            highlighted: chatOverlay
-          ) { setChatOverlay(!chatOverlay) }
+            "waveform", label: settings.audioCompressor ? "Audio compressor on" : "Audio compressor off",
+            highlighted: settings.audioCompressor
+          ) {
+            settings.audioCompressor.toggle()
+            show(settings.audioCompressor ? "Audio compressor on" : "Audio compressor off")
+          }
         }
-        if landscape {
-          button(chatOpen ? "bubble.left.fill" : "bubble.left", label: chatOpen ? "Hide chat" : "Show chat", action: toggleChat)
+        if let chatMode {
+          chatMenu(chatMode)
         }
         button(
           landscape ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
@@ -776,6 +819,39 @@ struct PlayerControls: View {
     }
     .buttonStyle(PressableStyle(scale: 0.88))
     .accessibilityLabel(seconds < 0 ? "Back 10 seconds" : "Forward 10 seconds")
+  }
+
+  /// Where chat goes, in one place (it used to be two look-alike buttons).
+  private func chatMenu(_ current: ChatMode) -> some View {
+    Menu {
+      Picker("Chat", selection: Binding(get: { current }, set: { mode in
+        setChatMode(mode)
+        show(mode.hint)
+        interacted(3.5)
+      })) {
+        ForEach(chatModes, id: \.self) { mode in
+          Label(mode.title, systemImage: mode.systemImage).tag(mode)
+        }
+      }
+    } label: {
+      Image(systemName: current == .off ? "bubble.left" : "bubble.left.fill")
+        .font(.system(size: 18, weight: .semibold))
+        .foregroundColor(current == .off ? .white : .accentTeal)
+        .frame(width: 40, height: 40)
+        .contentShape(Rectangle())
+    }
+    .accessibilityLabel("Chat")
+    .accessibilityValue(current.title)
+    .simultaneousGesture(TapGesture().onEnded { interacted(12) })
+  }
+
+  private func show(_ text: String) {
+    hint = text
+    hintTask?.cancel()
+    hintTask = Task { @MainActor in
+      try? await Task.sleep(nanoseconds: 1_300_000_000)
+      if !Task.isCancelled { hint = nil }
+    }
   }
 
   private func button(_ icon: String, label: String, highlighted: Bool = false, action: @escaping () -> Void) -> some View {
@@ -1241,6 +1317,40 @@ struct LayoutToggle: Equatable {
   var systemImage: String
   var onImage: String
   var isOn: Bool
+  /// It's chat over the video (offered in the chat menu instead of as its own button).
+  var chatOverVideo = false
+}
+
+/// Where chat goes in full screen.
+enum ChatMode: Hashable {
+  case beside, over, floating, off
+
+  var title: String {
+    switch self {
+    case .beside: return "Beside the video"
+    case .over: return "Over the video"
+    case .floating: return "Small, see-through"
+    case .off: return "Hidden"
+    }
+  }
+
+  var hint: String {
+    switch self {
+    case .beside: return "Chat beside the video"
+    case .over: return "Chat over the video"
+    case .floating: return "See-through chat"
+    case .off: return "Chat hidden"
+    }
+  }
+
+  var systemImage: String {
+    switch self {
+    case .beside: return "rectangle.split.2x1"
+    case .over: return "rectangle.righthalf.inset.filled"
+    case .floating: return "text.bubble"
+    case .off: return "eye.slash"
+    }
+  }
 }
 
 /// The gear menu: what's changed often at the top level (quality, low latency, recording, muted
