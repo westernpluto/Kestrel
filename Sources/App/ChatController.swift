@@ -26,6 +26,63 @@ final class ChatController: ObservableObject {
   private var lastSent: (id: String, text: String, at: Date)?
   private(set) var messages: [ChatMessage] = []
   private(set) var thirdParty: [String: URL] = [:]
+  /// 7TV's live events for this channel: personal emotes and changes to its set.
+  private var sevenTV: SevenTVEvents?
+  /// Personal 7TV emote sets (by set id), and whose they are (Twitch user id → set ids).
+  private var personalSets: [String: [String: URL]] = [:]
+  private var userSets: [String: Set<String>] = [:]
+
+  /// The emotes a message can use: the channel's and the global ones, plus its sender's personal
+  /// 7TV emotes.
+  func emoteMap(for message: ChatMessage) -> [String: URL] {
+    guard let user = message.userID, let sets = userSets[user], !sets.isEmpty else { return thirdParty }
+    var map = thirdParty
+    for set in sets { if let emotes = personalSets[set] { map.merge(emotes) { _, personal in personal } } }
+    return map
+  }
+
+  private func startSevenTV() {
+    guard sevenTV == nil, !channel.id.isEmpty else { return }
+    let events = SevenTVEvents(channelID: channel.id)
+    events.onPersonalSet = { [weak self] user, set in self?.personal(set, for: user) }
+    events.onSetChanged = { [weak self] set, added, removed in self?.setChanged(set, added: added, removed: removed) }
+    sevenTV = events
+    events.start()
+  }
+
+  private func personal(_ set: String, for user: String) {
+    let isNew = userSets[user, default: []].insert(set).inserted
+    guard isNew else { return }
+    sevenTV?.watch(set: set)
+    // (Its emotes usually came with 7TV's announcement already.)
+    guard personalSets[set]?.isEmpty ?? true else {
+      onUpdate(true)
+      return
+    }
+    personalSets[set] = [:]
+    Task { [weak self] in
+      guard let emotes = await SevenTVSets.emotes(of: set, http: URLSessionHTTPClient(timeout: 15)), let self else { return }
+      self.personalSets[set] = emotes
+      // (Their messages already in chat get them too.)
+      if !emotes.isEmpty { self.onUpdate(true) }
+    }
+  }
+
+  /// The channel's 7TV set (or a personal one) changed during the stream.
+  private func setChanged(_ set: String, added: [String: URL], removed: [String]) {
+    // Anything but the channel's own set is someone's personal one (7TV sends a personal set's
+    // emotes before saying whose it is).
+    guard set == SevenTVSets.set(for: channel.id) else {
+      for name in removed { personalSets[set]?[name] = nil }
+      personalSets[set, default: [:]].merge(added) { _, new in new }
+      return
+    }
+    for name in removed { thirdParty[name] = nil }
+    thirdParty.merge(added) { _, new in new }
+    thirdPartySets.byName = thirdParty
+    rebuildEmoteSections()
+    ActivityLog.shared.add("Chat (\(channel.name)): 7TV emotes changed live (\(added.count) added, \(removed.count) removed)")
+  }
   private(set) var badges: [String: Badge] = [:]
   /// Emotes you can use here, for the picker (Recent first).
   @Published private(set) var emoteSections: [EmoteSection] = []
@@ -118,6 +175,8 @@ final class ChatController: ObservableObject {
       rebuildEmoteSections()
       onUpdate(true)
       if !emotes.complete { retryEmotes(attempt: 1) }
+      // (The channel's 7TV set is known now, on a first visit: its live changes from here.)
+      if let set = SevenTVSets.set(for: channel.id) { sevenTV?.watch(set: set) }
       // The channel's own emotes' pictures fetched ahead (a few dozen), so the picker and chat
       // show them at once rather than filling in one by one.
       // (Only downloaded, not decoded: see `prefetch`. They stay on disk, so this is mostly once
@@ -134,6 +193,7 @@ final class ChatController: ObservableObject {
     }
     loadTwitchEmotes()
     connect()
+    startSevenTV()
   }
 
   /// A list of emotes didn't come (a timeout, a server error): asked for again a little later,
@@ -328,6 +388,8 @@ final class ChatController: ObservableObject {
     running = false
     socket?.cancel(with: .goingAway, reason: nil)
     socket = nil
+    sevenTV?.stop()
+    sevenTV = nil
     if let returnToken { NotificationCenter.default.removeObserver(returnToken) }
     returnToken = nil
   }
@@ -712,7 +774,13 @@ enum ChatRenderer {
     for fragment in message.fragments(thirdParty: thirdParty) {
       switch fragment {
       case .text(let t): text.append(NSAttributedString(string: t, attributes: body))
-      case .emote(_, let url): slot(url, height: (fontSize * 1.75).rounded(), font: font, into: text, slots: &slots, waiting: &waiting)
+      case .emote(let name, let url):
+        if ImagePipeline.shared.hasFailed(url, maxPixels: 112) {
+          // Its picture couldn't be had: its name, not a blank.
+          text.append(NSAttributedString(string: name, attributes: body))
+        } else {
+          slot(url, height: (fontSize * 1.75).rounded(), font: font, into: text, slots: &slots, waiting: &waiting)
+        }
       case .gif(_, let url): gifSlot(url, fontSize: fontSize, font: font, into: text, slots: &slots, attributes: body)
       }
     }
@@ -1021,7 +1089,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   private func freshRender(_ message: ChatMessage) -> RenderedMessage {
     let size = AppSettings.shared.chatFontSize
     return ChatRenderer.render(
-      message, badges: chat.badges, thirdParty: chat.thirdParty, fontSize: style == .overlay ? max(12, size - 1) : size,
+      message, badges: chat.badges, thirdParty: chat.emoteMap(for: message), fontSize: style == .overlay ? max(12, size - 1) : size,
       me: chat.ownLogin, shadowed: style == .overlay)
   }
 
@@ -1102,7 +1170,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     for (row, message) in displayed.enumerated() {
       let k = key(message)
       guard let old = rendered[k], !old.waiting.isEmpty,
-        old.waiting.contains(where: { ImagePipeline.shared.cached($0, maxPixels: 112) != nil })
+        old.waiting.contains(where: {
+          ImagePipeline.shared.cached($0, maxPixels: 112) != nil || ImagePipeline.shared.hasFailed($0, maxPixels: 112)
+        })
       else { continue }
       let fresh = freshRender(message)
       rendered[k] = fresh

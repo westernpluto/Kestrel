@@ -102,6 +102,8 @@ struct ChatMessage: Identifiable, Equatable {
   var gifs: [(id: String, url: URL, range: ClosedRange<Int>)] = []
   var timestamp: Date
   var isDeleted = false
+  /// The sender's Twitch id (IRC `user-id`), for their personal 7TV emotes.
+  var userID: String? = nil
 
   static func == (a: ChatMessage, b: ChatMessage) -> Bool { a.id == b.id && a.isDeleted == b.isDeleted }
 
@@ -124,6 +126,7 @@ struct ChatMessage: Identifiable, Equatable {
       self.text = text
       systemText = irc.command == "USERNOTICE" ? tags["system-msg"] : nil
       emotes = Self.parseEmotes(tags["emotes"] ?? "")
+      userID = tags["user-id"]
       if irc.command == "PRIVMSG" { gifs = Self.parseGifs(tags["gifs"] ?? "") }
       timestamp = tags["tmi-sent-ts"].flatMap(Double.init).map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date()
       if kind == .system, systemText == nil, text.isEmpty { return nil }
@@ -658,7 +661,8 @@ enum ThirdPartyEmotes {
     if let channelID, !channelID.isEmpty {
       let loaded = await EmoteSetCache.shared.channel(channelID) {
         async let a = fetch(URL(string: "https://7tv.io/v3/users/twitch/\(channelID)")!, http) {
-          parse7TV($0["emote_set"]["emotes"])
+          if let set = $0["emote_set"]["id"].string { SevenTVSets.remember(set, for: channelID) }
+          return parse7TV($0["emote_set"]["emotes"])
         }
         async let b = fetch(URL(string: "https://api.betterttv.net/3/cached/users/twitch/\(channelID)")!, http) {
           parseBTTV($0["channelEmotes"].array + $0["sharedEmotes"].array)
@@ -760,5 +764,32 @@ enum ThirdPartyEmotes {
       let object = try? JSONSerialization.jsonObject(with: data)
     else { return [] }
     return JSONValue(object)["messages"].array.compactMap { $0.string.flatMap(IRCMessage.parse) }
+  }
+}
+
+/// Each channel's 7TV emote set id (for its live updates), kept between launches.
+enum SevenTVSets {
+  private static let key = "kestrel.7tvSets"
+
+  static func remember(_ set: String, for channelID: String) {
+    var all = UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
+    guard all[channelID] != set else { return }
+    all[channelID] = set
+    UserDefaults.standard.set(all, forKey: key)
+  }
+
+  static func set(for channelID: String) -> String? {
+    (UserDefaults.standard.dictionary(forKey: key) as? [String: String])?[channelID]
+  }
+
+  /// One 7TV emote set's emotes (a personal one), by name.
+  static func emotes(of set: String, http: HTTPClient) async -> [String: URL]? {
+    guard let url = URL(string: "https://7tv.io/v3/emote-sets/\(set)") else { return nil }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 15
+    guard let (data, response) = try? await http.data(for: request), response.statusCode == 200,
+      let object = try? JSONSerialization.jsonObject(with: data)
+    else { return nil }
+    return ThirdPartyEmotes.parse7TV(JSONValue(object)["emotes"])
   }
 }

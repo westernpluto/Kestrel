@@ -231,8 +231,20 @@ final class ImagePipeline: @unchecked Sendable {
 
   /// Hands a picture to everyone waiting for it: `final` ends the wait (else it's a first frame,
   /// with the whole animation to come).
+  /// Pictures that couldn't be had at all (every retry and format tried): chat shows the emote's
+  /// name in their place rather than a blank.
+  private var failedKeys: Set<String> = []
+
+  func hasFailed(_ url: URL, maxPixels: CGFloat? = nil) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return failedKeys.contains(Self.key(url, maxPixels))
+  }
+
   private func deliver(_ key: String, _ image: UIImage?, final: Bool) {
     lock.lock()
+    if final, image == nil, cache.object(forKey: key as NSString) == nil { failedKeys.insert(key) }
+    if image != nil { failedKeys.remove(key) }
     var picture = image
     if let image {
       cache.setObject(image, forKey: key as NSString, cost: Self.cost(image))
