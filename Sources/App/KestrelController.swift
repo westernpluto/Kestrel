@@ -244,6 +244,10 @@ final class KestrelController {
     callDelegate = delegate
   }
 
+  /// The window is about to come back into the app / is back (the player screen's transition).
+  func pictureInPictureReturning() { model?.pictureInPictureReturning = true }
+  func pictureInPictureReturned() { model?.pictureInPictureReturning = false }
+
   /// Right as the window opens: the picture moves into it.
   func callWindowOpening() {
     guard let view = callSource as? KestrelVideoView.LayerView else { return }
@@ -253,6 +257,7 @@ final class KestrelController {
 
   /// The window has gone: the picture is back in the app.
   func callWindowClosed() {
+    pictureInPictureReturned()
     guard let view = callSource as? KestrelVideoView.LayerView else { return }
     view.takeScreenBack()
     engine?.screenInWindow = false
@@ -576,7 +581,17 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
   }
 
   func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-    MainActor.assumeIsolated { controller?.engine?.screenHiddenForPictureInPicture = false }
+    MainActor.assumeIsolated {
+      ignorePausesUntil = Date().addingTimeInterval(2)
+      controller?.engine?.screenHiddenForPictureInPicture = false
+    }
+  }
+
+  func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    MainActor.assumeIsolated {
+      ignorePausesUntil = Date().addingTimeInterval(1.5)
+      controller?.pictureInPictureReturned()
+    }
   }
 
   func pictureInPictureController(
@@ -597,7 +612,10 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
         completionHandler(true)
         return
       }
+      ignorePausesUntil = Date().addingTimeInterval(3)
       engine.screenHiddenForPictureInPicture = false
+      // The player goes to the whole window for the window to land in (it's moved back after).
+      controller?.pictureInPictureReturning()
       engine.screenNote("window asks for the picture")
       let started = Date()
       @MainActor func check() {
@@ -618,8 +636,21 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
     self.controller = controller
   }
 
+  /// While the window goes back into the app, the system can ask for a pause it wasn't asked for
+  /// (seen coming back from the mini player on iPhone Duo): for a live stream that stopped it,
+  /// black until Play was pressed. Pauses then are ignored.
+  private var ignorePausesUntil = Date.distantPast
+
   func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool) {
-    MainActor.assumeIsolated { controller?.setPausedFromPictureInPicture(!playing) }
+    MainActor.assumeIsolated {
+      if !playing, Date() < ignorePausesUntil {
+        ActivityLog.shared.add("Picture in Picture asked to pause while handing back: ignored")
+        pictureInPictureController.invalidatePlaybackState()
+        return
+      }
+      ActivityLog.shared.add(playing ? "Picture in Picture: play" : "Picture in Picture: pause")
+      controller?.setPausedFromPictureInPicture(!playing)
+    }
   }
 
   func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {

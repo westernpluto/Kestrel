@@ -160,8 +160,7 @@ final class KestrelEngine: NSObject {
   /// The segment being made, before the start: when its frames came in (see `backlogIn`).
   private var liveArrivals: [(at: Date, newest: Int64)] = []
   private var liveSince: Date?
-  private var timestampsChecked = false
-  private var timestampSkew = 0.0
+  private var delivery = KestrelEngine.deliveryDelay
   private var lastHeardMoved = Date()
   private(set) var lateAudio = 0
   private(set) var audioGaps = 0
@@ -416,13 +415,16 @@ final class KestrelEngine: NSObject {
   }
 
   /// Seconds behind live: now, less when the frame showing was captured.
+  /// How far from live it plays: what's in hand ahead of the picture (on average: video comes in
+  /// pieces) plus how long the newest video takes to get here. Both measured here; the stream's
+  /// own clock (some channels have it seconds off) only nudges the second, within sense.
   var latency: Double? {
-    guard let raw = streamClockLatency else { return nil }
-    return max(0, raw - timestampSkew)
+    guard clockRunning, let ahead = bufferAhead else { return nil }
+    return (catchUp.level ?? ahead) + delivery
   }
 
   /// From the stream's own timestamps (Twitch's program date-time), which some channels have well
-  /// off (one read 33 s behind with 2.5 s in hand): see `timestampSkew`.
+  /// off (one read 33 s behind with 2.5 s in hand): only for lining up ad times.
   var rawLatency: Double? {
     streamClockLatency
   }
@@ -439,28 +441,13 @@ final class KestrelEngine: NSObject {
   /// How far the stream's timestamps are off, when they're clearly off: checked once a few
   /// seconds in, against what's in hand (the player is never much further behind live than that
   /// plus a second or two on the way).
-  private func checkTimestamps(ahead: Double) {
-    guard let raw = streamClockLatency, let since = playingSince, Date().timeIntervalSince(since) > 3 else { return }
-    // The player can't be closer to live than what it has in hand ahead of what's showing, plus
-    // the newest video's own delay on the way (Twitch's low latency: about 0.8 s). A clock that
-    // says less runs ahead (one read 0.00 s with 1.5 s in hand): measured and taken off, and again
-    // whenever it drifts below that.
-    let floor = ahead + Self.deliveryDelay
-    if raw - timestampSkew < floor - 0.25 {
-      timestampSkew = raw - floor
-      if !timestampsChecked {
-        ActivityLog.shared.add(String(format: "Kestrel player: this stream's clock runs %.1f s ahead; latency shown corrected", -timestampSkew))
-      }
-      timestampsChecked = true
-      return
-    }
-    guard !timestampsChecked else { return }
-    timestampsChecked = true
-    let expected = ahead + 2
-    if raw > expected + 4 {
-      timestampSkew = raw - expected
-      ActivityLog.shared.add(String(format: "Kestrel player: this stream's timestamps are about %.0f s off; latency shown corrected", timestampSkew))
-    }
+  /// The newest video's delay on the way, learned slowly from the stream's clock where it makes
+  /// sense (0.2 to 4 s), else left at the usual.
+  private func learnDelivery(ahead: Double) {
+    guard let raw = streamClockLatency, let since = playingSince, Date().timeIntervalSince(since) > 2 else { return }
+    let seen = raw - ahead
+    guard seen > 0.2, seen < 4 else { return }
+    delivery += (seen - delivery) * 0.03
   }
 
   /// How far behind the broadcast the newest video usually arrives (Twitch low latency).
@@ -1171,7 +1158,7 @@ final class KestrelEngine: NSObject {
       }
       return
     }
-    checkTimestamps(ahead: ahead)
+    learnDelivery(ahead: ahead)
     let skipped = skipStartSurplus(ahead: ahead)
     if settling, startSkipDone {
       settling = false

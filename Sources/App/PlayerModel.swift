@@ -68,6 +68,9 @@ final class PlayerModel: ObservableObject {
   /// Zoomed to fill the screen (crops the sides) instead of fitting.
   @Published var fillsScreen = false
   @Published private(set) var pictureInPictureActive = false
+  /// Picture in Picture's window is on its way back into the app (the player screen fills the
+  /// window for it to land in, then moves back: see PlayerScreen).
+  @Published var pictureInPictureReturning = false
   /// Playing the audio-only rendition (the picture would only freeze, so the player says so).
   enum AudioOnly: Equatable {
     /// Picked in the quality menu.
