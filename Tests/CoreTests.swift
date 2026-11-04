@@ -1554,6 +1554,18 @@ func testWholeSegmentSteering() {
   check(old.targetBuffer > 2, "started just the margin behind: the margin grows (\(old.targetBuffer))")
 }
 
+func testConnectionFitTooSlow() {
+  let t0 = Date(timeIntervalSince1970: 4_000_000)
+  var fit = ConnectionFit(count: 4)
+  check(fit.tooSlow(now: t0) && fit.step == 1, "too slow: one down at once")
+  check(!fit.tooSlow(now: t0.addingTimeInterval(5)), "not again straight away")
+  check(fit.tooSlow(now: t0.addingTimeInterval(13)) && fit.step == 2, "again after a while")
+  var cellular = ConnectionFit(count: 5)
+  cellular.start(at: 2, tryAfter: 90, now: t0)
+  check(cellular.step == 2 && !cellular.tick(now: t0.addingTimeInterval(60)), "cellular: lower first")
+  check(cellular.tick(now: t0.addingTimeInterval(91)) && cellular.step == 1, "then tries better")
+}
+
 func testRecordingJoin() {
   let first = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PROGRAM-DATE-TIME:2026-11-04T01:00:00.000Z\n#EXT-X-MAP:URI=\"init0.mp4\"\n#EXTINF:2.000,\nseg0.m4s\n#EXTINF:2.000,\nseg1.m4s\n#EXT-X-ENDLIST\n"
   let second = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-START:TIME-OFFSET=0\n#EXTINF:2.500,\nseg0.ts\n"
@@ -2214,6 +2226,7 @@ testMutedParts()
 testMultiviewLayout()
 testRecordingJoin()
 testWholeSegmentSteering()
+testConnectionFitTooSlow()
 testStreamArrival()
 testMediaParsing()
 testFrameGrid()

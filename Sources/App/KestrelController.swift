@@ -22,6 +22,7 @@ final class KestrelController {
   private(set) var isPaused = false
   private var userMuted = false
   private var volume: Float = 1
+  private var networkToken: NSObjectProtocol?
 
   init(login: String, model: PlayerModel) {
     self.login = login.lowercased()
@@ -83,6 +84,31 @@ final class KestrelController {
       engine.onState = { [weak self] state in self?.engineState(state) }
       engine.setMuted(userMuted)
       engine.setVolume(volume)
+      // Cellular: a little more in hand from the start, and (Auto) a lower quality first, 720p
+      // (480p in Low Data Mode), trying better once it's played smoothly a while: on a weak
+      // signal the best one stalled before Auto could step down.
+      let network = NetworkWatch.shared
+      engine.setMarginFloor(network.floor)
+      if preferred == nil, network.kind == .cellular || network.constrained {
+        let cap = network.constrained ? 480 : 720
+        if let lower = videoIndices.firstIndex(where: { min(found[$0].width, found[$0].height) <= cap }), lower > 0 {
+          engine.startLower(steps: lower)
+        }
+      }
+      networkToken = NotificationCenter.default.addObserver(forName: NetworkWatch.changed, object: nil, queue: .main) {
+        [weak engine] _ in
+        MainActor.assumeIsolated {
+          guard let engine else { return }
+          engine.setMarginFloor(NetworkWatch.shared.floor)
+          // Back on a connection (out of a tunnel, onto another network) while stuck: the
+          // downloads in flight went with the old one, so straight back to live (it waited up
+          // to 12 s for them before).
+          if NetworkWatch.shared.kind != .none, case .stalled = engine.state {
+            ActivityLog.shared.add("Kestrel player: connection back while stalled; starting again at live")
+            engine.restart()
+          }
+        }
+      }
       self.engine = engine
       // (Picture in Picture first: its copy of the picture goes in with the player's view.) With
       // controls: the window takes a copy of the picture. Without: the picture itself moves into
@@ -156,6 +182,8 @@ final class KestrelController {
 
   func stop() {
     stopped = true
+    if let networkToken { NotificationCenter.default.removeObserver(networkToken) }
+    networkToken = nil
     endWatch?.cancel()
     endWatch = nil
     pip?.stopPictureInPicture()

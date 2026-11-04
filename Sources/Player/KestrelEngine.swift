@@ -368,6 +368,8 @@ final class KestrelEngine: NSObject {
     // (Whole segments: one more back, to have a segment's worth on top of the margin.)
     planner = LiveSegmentPlanner(startBack: wholeSegments ? 1 : 0)
     aheadHistory = []
+    paceHistory = []
+    slowSince = nil
     timeline = StreamTimeline()
     heldVideo = []
     heldAudio = []
@@ -410,6 +412,19 @@ final class KestrelEngine: NSObject {
     guard index != rendition else { return }
     rendition = index
     catchUp.hold(for: 3)
+  }
+
+  /// The least to keep in hand on this connection (cellular: more, see NetworkWatch).
+  func setMarginFloor(_ value: Double) {
+    catchUp.setFloor(value)
+  }
+
+  /// Auto, starting `steps` qualities down from the best (on cellular), trying better once it's
+  /// played smoothly a while.
+  func startLower(steps: Int) {
+    guard autoQuality, steps > 0, !renditions.isEmpty else { return }
+    fit.start(at: steps)
+    setRendition(renditions[fit.step], byHand: false)
   }
 
   /// Auto: the best quality that plays smoothly.
@@ -1190,6 +1205,35 @@ final class KestrelEngine: NSObject {
 
   // MARK: Ticking: margin, stalls
 
+  /// The newest video in hand over the last while (how fast it's coming in).
+  private var paceHistory: [(at: Date, newest: Int64)] = []
+  /// Since when it's come in slower than it plays.
+  private var slowSince: Date?
+
+  /// Video coming in slower than it plays for several seconds while what's in hand runs down: the
+  /// connection can't carry this quality (a weak cellular signal, underground): one lower now,
+  /// before it runs dry. (Only stalls stepped it down before, two of them: on a train that was
+  /// stall after stall first.)
+  private func checkPace(ahead: Double) {
+    guard autoQuality, let newest = newestPlayable, speed > 0 else { return }
+    let at = Date()
+    paceHistory.append((at, newest))
+    paceHistory.removeAll { at.timeIntervalSince($0.at) > 8 }
+    guard let first = paceHistory.first, at.timeIntervalSince(first.at) >= 6 else { return }
+    let pace = Double(newest - first.newest) / Double(Self.clock) / at.timeIntervalSince(first.at)
+    // (Whole segments come two seconds at a time: judged over the whole window, that evens out.)
+    if pace < 0.8, ahead < catchUp.targetBuffer + (wholeSegments ? Self.segmentLength : 0.5) {
+      if slowSince == nil { slowSince = at }
+    } else {
+      slowSince = nil
+    }
+    guard let since = slowSince, at.timeIntervalSince(since) >= 3, fit.tooSlow(), fit.step < renditions.count else { return }
+    slowSince = nil
+    paceHistory = []
+    setRendition(renditions[fit.step], byHand: false)
+    ActivityLog.shared.add(String(format: "Kestrel player: video coming in at %.0f%% of real time; one quality lower", pace * 100))
+  }
+
   private func tick() {
     guard running else { return }
     retireOldLayer()
@@ -1229,6 +1273,7 @@ final class KestrelEngine: NSObject {
       return
     }
     learnDelivery(ahead: ahead)
+    checkPace(ahead: ahead)
     let skipped = skipStartSurplus(ahead: ahead)
     if settling, startSkipDone {
       settling = false
