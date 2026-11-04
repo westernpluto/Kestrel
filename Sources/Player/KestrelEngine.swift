@@ -132,6 +132,9 @@ final class KestrelEngine: NSObject {
   private var lastAudioResync = Date.distantPast
   private var lastHeard: Int64?
   private var playingSince: Date?
+  /// The segment being made, before the start: when its frames came in (see `backlogIn`).
+  private var liveArrivals: [(at: Date, newest: Int64)] = []
+  private var liveSince: Date?
   private var timestampsChecked = false
   private var timestampSkew = 0.0
   private var lastHeardMoved = Date()
@@ -307,6 +310,8 @@ final class KestrelEngine: NSObject {
     timeline = StreamTimeline()
     heldVideo = []
     heldAudio = []
+    liveArrivals = []
+    liveSince = nil
     lastDecodeTime = nil
     grid.reset()
     videoFormat = nil
@@ -560,6 +565,13 @@ final class KestrelEngine: NSObject {
         heldVideo.append((video, time, decodeTime))
         if firstVideoTime == nil { firstVideoTime = time }
         if lastVideoTime.map({ time > $0 }) ?? true { lastVideoTime = time }
+        if load.planned.live, let newest = lastVideoTime {
+          // How fast the segment being made comes in (see `backlogIn`).
+          let at = Date()
+          liveArrivals.append((at, newest))
+          liveArrivals.removeAll { at.timeIntervalSince($0.at) > 1.5 }
+          if liveSince == nil { liveSince = at }
+        }
       }
     case .audio(let audio):
       let time = timeline.map(audio.pts, isVideo: false)
@@ -1026,8 +1038,24 @@ final class KestrelEngine: NSObject {
 
   /// Starts the clock once there's video: just behind the newest frame in hand (the stream's
   /// margin), so it opens close to live instead of at the start of the first segment.
+  /// The segment being made has sent what it already had: its video now comes in at about the
+  /// pace it's made. Asked for mid-way, the server first sends all of it made so far in one
+  /// rush; starting during that rush put the start behind live by however much was still to
+  /// come, and the player then had to catch up on every start.
+  private var backlogIn: Bool {
+    guard let since = liveSince else { return false }
+    let now = Date()
+    if now.timeIntervalSince(since) > 3 { return true }
+    let window = liveArrivals.filter { now.timeIntervalSince($0.at) <= 1.0 }
+    guard let first = window.first, let last = window.last, now.timeIntervalSince(since) >= 0.6 else { return false }
+    let wall = max(now.timeIntervalSince(first.at), 0.6)
+    let media = Double(last.newest - first.newest) / Double(Self.clock)
+    return media / wall < 1.4
+  }
+
   private func startIfReady() {
     guard !clockRunning, !paused, let first = heldVideo.first?.pts, let last = newestPlayable else { return }
+    guard backlogIn || Date().timeIntervalSince(startedLoading) > 6 else { return }
     let margin = Int64(max(catchUp.targetBuffer, 0.5) * Double(Self.clock))
     // Only once what's being unpacked is the segment still being made (everything before it is
     // in): starting earlier put the start seconds back, with all of that to catch up.
@@ -1044,7 +1072,7 @@ final class KestrelEngine: NSObject {
     heldAudio = []
     startedBehind = Double(last - start) / Double(Self.clock)
     ActivityLog.shared.add(
-      String(format: "Kestrel player: started %.2f s behind the newest frame (%@, %d frames decoded ahead of it)", startedBehind ?? 0, container, videoFramesHidden))
+      String(format: "Kestrel player: started %.2f s behind the newest frame, %.1f s after asking (%@, %d frames decoded ahead of it)", startedBehind ?? 0, Date().timeIntervalSince(startedLoading), container, videoFramesHidden))
     CMTimebaseSetTime(videoClock, time: CMTime(value: start, timescale: Self.clock))
     clockRunning = true
     playingSince = Date()
