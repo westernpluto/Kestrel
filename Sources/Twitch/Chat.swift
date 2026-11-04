@@ -532,29 +532,67 @@ struct ThirdPartyEmoteSets: Sendable {
   var byName: [String: URL] = [:]
 }
 
+/// Emote sets fetched lately, kept in memory: the global ones once a session (half an hour),
+/// each channel's for ten minutes. Every chat opened (switching chats in multi-view, above all)
+/// fetched all six sets again and waited for the slowest before showing anything.
+actor EmoteSetCache {
+  static let shared = EmoteSetCache()
+  typealias Sets = (seventv: [String: URL], bttv: [String: URL], ffz: [String: URL])
+  private var globals: (sets: Sets, at: Date)?
+  private var globalsTask: Task<Sets, Never>?
+  private var channels: [String: (sets: Sets, at: Date)] = [:]
+  private var channelTasks: [String: Task<Sets, Never>] = [:]
+
+  func globals(_ load: @escaping @Sendable () async -> Sets) async -> Sets {
+    if let globals, Date().timeIntervalSince(globals.at) < 1800 { return globals.sets }
+    if let globalsTask { return await globalsTask.value }
+    let task = Task { await load() }
+    globalsTask = task
+    let sets = await task.value
+    globalsTask = nil
+    // (Nothing at all came back: not kept, so the next chat tries again.)
+    if !(sets.seventv.isEmpty && sets.bttv.isEmpty && sets.ffz.isEmpty) { globals = (sets, Date()) }
+    return sets
+  }
+
+  func channel(_ id: String, _ load: @escaping @Sendable () async -> Sets) async -> Sets {
+    if let cached = channels[id], Date().timeIntervalSince(cached.at) < 600 { return cached.sets }
+    if let task = channelTasks[id] { return await task.value }
+    let task = Task { await load() }
+    channelTasks[id] = task
+    let sets = await task.value
+    channelTasks[id] = nil
+    channels[id] = (sets, Date())
+    return sets
+  }
+}
+
 enum ThirdPartyEmotes {
   static func load(channelID: String?, http: HTTPClient) async -> ThirdPartyEmoteSets {
-    async let seventvGlobal = fetch(URL(string: "https://7tv.io/v3/emote-sets/global")!, http) { parse7TV($0["emotes"]) }
-    async let bttvGlobal = fetch(URL(string: "https://api.betterttv.net/3/cached/emotes/global")!, http) {
-      parseBTTV($0.array)
+    async let globalSets = EmoteSetCache.shared.globals {
+      async let seventv = fetch(URL(string: "https://7tv.io/v3/emote-sets/global")!, http) { parse7TV($0["emotes"]) }
+      async let bttv = fetch(URL(string: "https://api.betterttv.net/3/cached/emotes/global")!, http) { parseBTTV($0.array) }
+      async let ffz = fetch(URL(string: "https://api.frankerfacez.com/v1/set/global")!, http) { parseFFZ($0["sets"]) }
+      return await (seventv, bttv, ffz)
     }
-    async let ffzGlobal = fetch(URL(string: "https://api.frankerfacez.com/v1/set/global")!, http) { parseFFZ($0["sets"]) }
     var channel7TV: [String: URL] = [:]
     var channelBTTV: [String: URL] = [:]
     var channelFFZ: [String: URL] = [:]
-    if let channelID {
-      async let a = fetch(URL(string: "https://7tv.io/v3/users/twitch/\(channelID)")!, http) {
-        parse7TV($0["emote_set"]["emotes"])
+    if let channelID, !channelID.isEmpty {
+      (channel7TV, channelBTTV, channelFFZ) = await EmoteSetCache.shared.channel(channelID) {
+        async let a = fetch(URL(string: "https://7tv.io/v3/users/twitch/\(channelID)")!, http) {
+          parse7TV($0["emote_set"]["emotes"])
+        }
+        async let b = fetch(URL(string: "https://api.betterttv.net/3/cached/users/twitch/\(channelID)")!, http) {
+          parseBTTV($0["channelEmotes"].array + $0["sharedEmotes"].array)
+        }
+        async let c = fetch(URL(string: "https://api.frankerfacez.com/v1/room/id/\(channelID)")!, http) {
+          parseFFZ($0["sets"])
+        }
+        return await (a, b, c)
       }
-      async let b = fetch(URL(string: "https://api.betterttv.net/3/cached/users/twitch/\(channelID)")!, http) {
-        parseBTTV($0["channelEmotes"].array + $0["sharedEmotes"].array)
-      }
-      async let c = fetch(URL(string: "https://api.frankerfacez.com/v1/room/id/\(channelID)")!, http) {
-        parseFFZ($0["sets"])
-      }
-      (channel7TV, channelBTTV, channelFFZ) = await (a, b, c)
     }
-    let globals = await (seventvGlobal, bttvGlobal, ffzGlobal)
+    let globals = await globalSets
     var result = ThirdPartyEmoteSets()
     // Lowest priority first; channel 7TV wins on name clashes.
     for map in [globals.2, globals.1, globals.0, channelFFZ, channelBTTV, channel7TV] {

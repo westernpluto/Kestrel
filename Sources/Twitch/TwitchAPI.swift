@@ -480,6 +480,8 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
 
   // MARK: Chat badges
 
+  private static let globalBadges = Locked<[String: Badge]?>(nil)
+
   func badges(channelID: String?) async -> [String: Badge] {
     var result: [String: Badge] = [:]
     func add(_ list: [JSONValue]) {
@@ -488,8 +490,12 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
         result["\(set)/\(version)"] = Badge(setID: set, version: version, title: b["title"].string ?? set, imageURL: url)
       }
     }
-    if let data = try? await query("query null { badges { imageURL(size: DOUBLE) setID title version } }") {
+    // The global badges once a session (they were fetched again for every chat opened).
+    if let cached = Self.globalBadges.value {
+      result = cached
+    } else if let data = try? await query("query null { badges { imageURL(size: DOUBLE) setID title version } }") {
       add(data["badges"].array)
+      if !result.isEmpty { Self.globalBadges.value = result }
     }
     if let channelID,
       let data = try? await query(

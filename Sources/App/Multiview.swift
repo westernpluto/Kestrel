@@ -108,6 +108,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
     guard let index = tiles.firstIndex(where: { $0.id == id }) else { return }
     tiles[index].player.stop()
     tiles.remove(at: index)
+    chats.removeValue(forKey: id)?.stop()
     let wasHeard = heardIDs.remove(id) != nil
     volumes[id] = nil
     if selectedID == id {
@@ -115,8 +116,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
       if let first = tiles.first {
         select(first.id)
       } else {
-        chat?.stop()
-        chat = nil
+        stopChats()
       }
     }
     // Don't leave it silent because the one heard went.
@@ -169,8 +169,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
     paused = false
     for tile in tiles { tile.player.stop() }
     tiles = tiles.map { Tile(channel: $0.channel, player: makePlayer($0.channel, heard: heardIDs.contains($0.id))) }
-    chat?.stop()
-    chat = nil
+    stopChats()
   }
 
   /// Tucked away or back on screen: while hidden, every picture is fetched small (the sound
@@ -195,12 +194,37 @@ final class MultiviewModel: ObservableObject, Identifiable {
     if running { startChat(for: id) }
   }
 
+  /// Every stream's chat, kept connected while multi-view plays: switching to one shows it at
+  /// once, messages and emotes already in (each switch used to connect and load it from nothing).
+  private var chats: [String: ChatController] = [:]
+
   private func startChat(for id: String) {
     guard let tile = tiles.first(where: { $0.id == id }), chat?.channel.id != tile.channel.id else { return }
-    chat?.stop()
-    let next = ChatController(channel: tile.channel)
-    chat = next
-    next.start()
+    chat = chatController(for: tile)
+    // The others' chats come up in the background, a moment apart, ready for a switch.
+    let others = tiles.filter { $0.id != id && chats[$0.id] == nil }
+    guard !others.isEmpty else { return }
+    Task { [weak self] in
+      for tile in others {
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        guard let self, self.running, self.tiles.contains(where: { $0.id == tile.id }) else { return }
+        _ = self.chatController(for: tile)
+      }
+    }
+  }
+
+  private func chatController(for tile: Tile) -> ChatController {
+    if let existing = chats[tile.id] { return existing }
+    let controller = ChatController(channel: tile.channel)
+    chats[tile.id] = controller
+    controller.start()
+    return controller
+  }
+
+  private func stopChats() {
+    for controller in chats.values { controller.stop() }
+    chats = [:]
+    chat = nil
   }
 
   /// Sound on or off for one stream, leaving the others as they are (several can be heard at once).
@@ -371,7 +395,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
     stopPictureInPicture()
     NowPlaying.shared.detach(multiview: self)
     for tile in tiles { tile.player.stop() }
-    chat?.stop()
+    stopChats()
     running = false
   }
 }

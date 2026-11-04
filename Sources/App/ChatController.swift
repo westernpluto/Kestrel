@@ -102,16 +102,26 @@ final class ChatController: ObservableObject {
       let http = URLSessionHTTPClient(timeout: 10)
       async let history = replay ? [] : ThirdPartyEmotes.recentMessages(login: channel.login, http: http)
       async let badgeMap = TwitchAPI.shared.badges(channelID: channel.id)
-      let emotes = await ThirdPartyEmotes.load(channelID: channel.id, http: http)
+      async let emoteSets = ThirdPartyEmotes.load(channelID: channel.id, http: http)
+      // Emotes (usually from memory now) are waited for only briefly: the recent messages show as
+      // soon as they're in, and any emotes that come later are put into them then (it used to
+      // wait for the slowest of six emote services before showing anything).
       let (recent, loadedBadges) = await (history, badgeMap)
-      thirdPartySets = emotes
-      thirdParty = emotes.byName
       badges = loadedBadges
       let old = recent.compactMap(ChatMessage.init(irc:)).filter { $0.kind != .notice }
       messages = Array((old + messages).suffix(maxMessages))
       for message in old.reversed() { noteChatter(message.displayName) }
+      if !old.isEmpty { onUpdate(true) }
+      let emotes = await emoteSets
+      thirdPartySets = emotes
+      thirdParty = emotes.byName
       rebuildEmoteSections()
       onUpdate(true)
+      // The channel's own emotes' pictures fetched ahead (a few dozen), so the picker and chat
+      // show them at once rather than filling in one by one.
+      for url in emotes.channel.flatMap(\.emotes).prefix(60).map(\.url) where ImagePipeline.shared.cached(url, maxPixels: 112) == nil {
+        ImagePipeline.shared.load(url, maxPixels: 112) { _ in }
+      }
     }
     if isReplay {
       status = .connected
