@@ -41,43 +41,57 @@ enum MultiviewLayout {
   }
 
   /// One big picture (`main`) with the others in a strip beside it or under it (whichever leaves
-  /// the big one bigger), all centred. Same order as given.
+  /// the big one bigger), all centred. Same order as given. More than four others go in two lanes.
   static func focus(count: Int, main: Int, in size: CGSize, spacing: CGFloat = 2) -> [CGRect] {
     guard count > 1, main >= 0, main < count, size.width > 1, size.height > 1 else {
       return grid(count: count, in: size, spacing: spacing)
     }
-    let others = CGFloat(count - 1)
-    let gaps = spacing * (others - 1)
-    // A column of small pictures on the right.
-    let columnWidth = min(size.width * 0.3, (size.height - gaps) / others * 16 / 9).rounded(.down)
-    let besideWidth = min(size.width - columnWidth - spacing, size.height * 16 / 9).rounded(.down)
-    // A row of small pictures underneath.
-    let rowHeight = min(size.height * 0.3, (size.width - gaps) / others * 9 / 16).rounded(.down)
-    let aboveWidth = min(size.width, (size.height - rowHeight - spacing) * 16 / 9).rounded(.down)
+    let othersCount = count - 1
+    let lanes = othersCount > 4 ? 2 : 1
+    let perLane = (othersCount + lanes - 1) / lanes
+    let laneGaps = spacing * CGFloat(perLane - 1)
+    let lanesGap = spacing * CGFloat(lanes - 1)
+    // The strip's share of the space (more for two lanes).
+    let share: CGFloat = lanes == 1 ? 0.3 : 0.4
+    // Columns of small pictures on the right.
+    let columnWidth = min(size.width * share / CGFloat(lanes), (size.height - laneGaps) / CGFloat(perLane) * 16 / 9).rounded(.down)
+    let stripWidth = columnWidth * CGFloat(lanes) + lanesGap
+    let besideWidth = min(size.width - stripWidth - spacing, size.height * 16 / 9).rounded(.down)
+    // Rows of small pictures underneath.
+    let rowHeight = min(size.height * share / CGFloat(lanes), (size.width - laneGaps) / CGFloat(perLane) * 9 / 16).rounded(.down)
+    let stripHeight = rowHeight * CGFloat(lanes) + lanesGap
+    let aboveWidth = min(size.width, (size.height - stripHeight - spacing) * 16 / 9).rounded(.down)
     var big: CGRect
     var small: [CGRect] = []
     if besideWidth >= aboveWidth {
       let bigHeight = (besideWidth * 9 / 16).rounded(.down)
       let smallHeight = (columnWidth * 9 / 16).rounded(.down)
-      let left = ((size.width - besideWidth - spacing - columnWidth) / 2).rounded()
+      let left = ((size.width - besideWidth - spacing - stripWidth) / 2).rounded()
       big = CGRect(x: left, y: ((size.height - bigHeight) / 2).rounded(), width: besideWidth, height: bigHeight)
-      let column = smallHeight * others + gaps
-      let top = ((size.height - column) / 2).rounded()
-      for index in 0..<(count - 1) {
+      for index in 0..<othersCount {
+        let lane = index / perLane
+        let inLane = min(perLane, othersCount - lane * perLane)
+        let column = smallHeight * CGFloat(inLane) + spacing * CGFloat(inLane - 1)
+        let top = ((size.height - column) / 2).rounded()
         small.append(
           CGRect(
-            x: big.maxX + spacing, y: top + CGFloat(index) * (smallHeight + spacing), width: columnWidth, height: smallHeight))
+            x: big.maxX + spacing + CGFloat(lane) * (columnWidth + spacing),
+            y: top + CGFloat(index % perLane) * (smallHeight + spacing), width: columnWidth, height: smallHeight))
       }
     } else {
       let bigHeight = (aboveWidth * 9 / 16).rounded(.down)
       let smallWidth = (rowHeight * 16 / 9).rounded(.down)
-      let top = ((size.height - bigHeight - spacing - rowHeight) / 2).rounded()
+      let top = ((size.height - bigHeight - spacing - stripHeight) / 2).rounded()
       big = CGRect(x: ((size.width - aboveWidth) / 2).rounded(), y: top, width: aboveWidth, height: bigHeight)
-      let row = smallWidth * others + gaps
-      let left = ((size.width - row) / 2).rounded()
-      for index in 0..<(count - 1) {
+      for index in 0..<othersCount {
+        let lane = index / perLane
+        let inLane = min(perLane, othersCount - lane * perLane)
+        let row = smallWidth * CGFloat(inLane) + spacing * CGFloat(inLane - 1)
+        let left = ((size.width - row) / 2).rounded()
         small.append(
-          CGRect(x: left + CGFloat(index) * (smallWidth + spacing), y: big.maxY + spacing, width: smallWidth, height: rowHeight))
+          CGRect(
+            x: left + CGFloat(index % perLane) * (smallWidth + spacing),
+            y: big.maxY + spacing + CGFloat(lane) * (rowHeight + spacing), width: smallWidth, height: rowHeight))
       }
     }
     var rects: [CGRect] = []

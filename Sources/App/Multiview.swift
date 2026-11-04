@@ -11,6 +11,7 @@
 import AVKit
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 @MainActor
 final class MultiviewModel: ObservableObject, Identifiable {
@@ -20,7 +21,8 @@ final class MultiviewModel: ObservableObject, Identifiable {
     var id: String { channel.id }
   }
 
-  static let maxTiles = 4
+  /// Nine at most (3×3): every one is fetched only as sharp as it's shown, so a full grid stays light.
+  static let maxTiles = 9
   static let volumeSteps: [Float] = [1, 0.75, 0.5, 0.25]
   /// Tucked away (or waiting to start): nothing's on screen, so nothing sharper than this is fetched.
   static let hiddenHeight = 160
@@ -110,6 +112,13 @@ final class MultiviewModel: ObservableObject, Identifiable {
     applySound()
     updatePictureInPicture()
     AppModel.shared.objectWillChange.send()
+  }
+
+  /// Two streams change places (dragged onto each other, or from a picture's hold menu).
+  func swap(_ a: String, _ b: String) {
+    guard a != b, let i = tiles.firstIndex(where: { $0.id == a }), let j = tiles.firstIndex(where: { $0.id == b }) else { return }
+    tiles.swapAt(i, j)
+    updatePictureInPicture()
   }
 
   /// Starts every stream (and the picked one's chat).
@@ -498,9 +507,35 @@ struct MultiviewScreen: View {
               showChrome()
             },
             openInPlayer: { app.playing = .live(tile.channel) },
-            remove: { withAnimation(Self.spring) { model.remove(tile.id) } }
+            remove: { withAnimation(Self.spring) { model.remove(tile.id) } },
+            others: model.tiles.filter { $0.id != tile.id }.map(\.channel),
+            swap: { other in
+              Haptics.tap()
+              withAnimation(Self.spring) { model.swap(tile.id, other) }
+            }
           )
           .frame(width: rect.width, height: rect.height)
+          // Hold a picture and drag it onto another: they change places.
+          .onDrag {
+            NSItemProvider(object: tile.id as NSString)
+          } preview: {
+            Label(tile.channel.name, systemImage: "arrow.up.and.down.and.arrow.left.and.right")
+              .font(.subheadline.weight(.semibold))
+              .padding(.horizontal, 14).padding(.vertical, 10)
+              .background(Color.accentTeal, in: Capsule())
+              .foregroundColor(.white)
+          }
+          .onDrop(of: [.text], isTargeted: nil) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: NSString.self) { item, _ in
+              guard let dragged = item as? String else { return }
+              Task { @MainActor in
+                Haptics.tap()
+                withAnimation(Self.spring) { model.swap(dragged, tile.id) }
+              }
+            }
+            return true
+          }
           .offset(x: areas.grid.minX + rect.minX, y: areas.grid.minY + rect.minY)
           .transition(.opacity.combined(with: .scale(scale: 0.92)))
         }
@@ -844,7 +879,11 @@ struct MultiviewDockSpot: View {
   }
 
   private func close() {
-    withAnimation(Self.spring) { app.closeMultiview() }
+    // After the hold menu has gone (closed from inside it, the dock just vanished): it fades and
+    // shrinks away.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+      withAnimation(.easeInOut(duration: 0.3)) { app.closeMultiview() }
+    }
   }
 }
 
@@ -857,8 +896,13 @@ struct MultiviewDock: View {
 
   var body: some View {
     HStack(spacing: 6) {
-      ForEach(model.tiles) { tile in
+      // (Five pictures at most, then how many more: nine didn't fit across a phone.)
+      ForEach(model.tiles.prefix(5)) { tile in
         DockAvatar(tile: tile, model: model)
+      }
+      if model.tiles.count > 5 {
+        Text("+\(model.tiles.count - 5)").font(.footnote.weight(.bold)).foregroundColor(.white.opacity(0.85))
+          .padding(.horizontal, 2)
       }
       Image(systemName: model.running ? "chevron.up" : "play.fill")
         .font(.system(size: model.running ? 13 : 14, weight: .bold))
@@ -958,6 +1002,9 @@ struct MultiviewTileView: View {
   var makeMain: () -> Void
   var openInPlayer: () -> Void
   var remove: () -> Void
+  /// The other streams, to change places with.
+  var others: [Channel] = []
+  var swap: (String) -> Void = { _ in }
 
   var body: some View {
     ZStack {
@@ -1023,6 +1070,15 @@ struct MultiviewTileView: View {
       }
       .pickerStyle(.menu)
       Button(action: makeMain) { Label("Make it the big one", systemImage: "rectangle.inset.topleft.filled") }
+      if !others.isEmpty {
+        Menu {
+          ForEach(others, id: \.id) { other in
+            Button(other.name) { swap(other.id) }
+          }
+        } label: {
+          Label("Swap places with…", systemImage: "arrow.left.arrow.right")
+        }
+      }
       Button(action: openInPlayer) { Label("Watch on its own", systemImage: "play.rectangle") }
       Button(role: .destructive, action: remove) { Label("Remove", systemImage: "xmark") }
     }
@@ -1167,7 +1223,7 @@ struct MultiviewPicker: View {
           Text("Live now")
         } footer: {
           Text(
-            "Up to \(MultiviewModel.maxTiles) streams. Tap a picture for its sound and chat; tap the speaker on a picture to hear it alongside the others (hold a picture for its volume); double-tap to make it the big one. Each picture is fetched only as sharp as it's shown, to spare data."
+            "Up to \(MultiviewModel.maxTiles) streams. Tap a picture for its sound and chat; hold one and drag it onto another to swap them; tap the speaker on a picture to hear it alongside the others (hold a picture for its volume); double-tap to make it the big one. Each picture is fetched only as sharp as it's shown, to spare data."
           )
         }
       }

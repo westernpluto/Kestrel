@@ -185,14 +185,7 @@ struct PlaybackSettingsView: View {
           Text("Kestrel (experimental)").tag(true)
         }
       } footer: {
-        Text("Kestrel's own player downloads each piece of the stream while it's still being made and shows it as it arrives, aiming at about a second behind live. It's new: if a stream misbehaves, switch back. Applies from the next stream you open, multi-view included.")
-      }
-      if settings.kestrelPlayer {
-        Section {
-          Toggle("Audio compressor", isOn: $settings.audioCompressor)
-        } footer: {
-          Text("Evens out the volume, as FrankerFaceZ's compressor does: loud moments come down and quiet ones up, so shouting and whispering end up at about the same level. Changes at once.")
-        }
+        Text("Kestrel's own player downloads each piece of the stream while it's still being made and shows it as it arrives, aiming at about a second behind live. It's new: if a stream misbehaves, switch back. Applies from the next stream you open, multi-view included. Its audio compressor (the waveform button on the video) evens out the volume, as FrankerFaceZ's does.")
       }
       Section {
         Toggle("Background audio", isOn: $settings.backgroundAudio)

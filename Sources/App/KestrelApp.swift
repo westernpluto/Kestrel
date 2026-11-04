@@ -69,10 +69,14 @@ struct RootView: View {
       // Multi-view tucked away: its dock where the mini player sits, laid over the tabs on its own
       // so the rest of the app stays usable.
       .overlay(alignment: .bottomTrailing) {
-        if let session = app.multiview, app.multiviewMinimized {
-          MultiviewDockSpot(model: session)
-            .transition(.opacity.combined(with: .scale(scale: 0.6, anchor: .bottomTrailing)))
+        // (In a container that's always there, so the dock's going is animated too.)
+        ZStack(alignment: .bottomTrailing) {
+          if let session = app.multiview, app.multiviewMinimized {
+            MultiviewDockSpot(model: session)
+              .transition(.opacity.combined(with: .scale(scale: 0.6, anchor: .bottomTrailing)))
+          }
         }
+        .animation(.easeInOut(duration: 0.3), value: app.multiview?.id)
       }
       .alert(
         "Following",

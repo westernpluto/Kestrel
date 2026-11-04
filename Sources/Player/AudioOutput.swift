@@ -49,6 +49,9 @@ final class AudioOutput {
   init() {
     engine.attach(player)
     engine.attach(pitch)
+    // The most overlap between the pieces it stretches (8 by default): speeding up to catch up
+    // sounded warbly and hollow; this smooths it, for a little more processing.
+    pitch.overlap = 32
     engine.attach(compressor)
     configureCompressor()
     let center = NotificationCenter.default

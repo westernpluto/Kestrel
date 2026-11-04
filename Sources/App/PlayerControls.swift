@@ -223,26 +223,30 @@ struct PlayerVideoArea: View {
     }
   }
 
+  /// Zoomed to fill only while the player is open: the mini player always shows the whole picture
+  /// (it kept the zoom, cropped).
+  private var fill: Bool { model.fillsScreen && !minimized }
+
   @ViewBuilder
   private var surface: some View {
     ZStack {
       if let engine = model.kestrelEngine {
-        KestrelVideoView(engine: engine, fill: model.fillsScreen)
+        KestrelVideoView(engine: engine, fill: fill)
       } else {
         #if canImport(AmazonIVSPlayer)
           if let controller = model.lowLatency {
-            LowLatencyVideoView(controller: controller, fill: model.fillsScreen)
+            LowLatencyVideoView(controller: controller, fill: fill)
           } else {
-            ApplePlayerSurface(model: model, fill: model.fillsScreen)
+            ApplePlayerSurface(model: model, fill: fill)
           }
         #else
-          ApplePlayerSurface(model: model, fill: model.fillsScreen)
+          ApplePlayerSurface(model: model, fill: fill)
         #endif
       }
       // Rewinding: the broadcast's VOD plays on top once it has a picture; the live player stays
       // underneath, paused on its last frame, so the switch never flashes black.
       if model.rewind != nil {
-        ApplePlayerSurface(model: model, role: .rewind, fill: model.fillsScreen)
+        ApplePlayerSurface(model: model, role: .rewind, fill: fill)
           .opacity((model.isRewinding || model.rewindLinger) && model.rewindShowing ? 1 : 0)
           .animation(.easeInOut(duration: 0.25), value: model.rewindShowing)
       }

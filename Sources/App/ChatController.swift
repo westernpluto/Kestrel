@@ -1131,6 +1131,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   }
 
   private func resume() {
+    // Still coasting from a flick: stopped here, so the jump down starts now (it waited for the
+    // coasting to end).
+    if tableView.isDecelerating { tableView.setContentOffset(tableView.contentOffset, animated: false) }
     following = true
     UIView.animate(withDuration: 0.2) { self.resumeButton.alpha = 0 } completion: { _ in
       if self.following { self.resumeButton.isHidden = true }
@@ -1281,15 +1284,20 @@ struct ChatMessagesView: UIViewControllerRepresentable {
   let chat: ChatController
   var style: ChatViewController.Style = .panel
   var onMention: ((String) -> Void)?
+  /// False while the player is in the mini player: the hidden chat takes no touches. (SwiftUI's
+  /// own switch didn't reach this UIKit view: hidden under the app, it took touches meant for it.)
+  var active = true
 
   func makeUIViewController(context: Context) -> ChatViewController {
     let controller = ChatViewController(chat: chat, style: style)
     controller.onMention = onMention
+    controller.view.isUserInteractionEnabled = active
     return controller
   }
 
   func updateUIViewController(_ controller: ChatViewController, context: Context) {
     controller.onMention = onMention
+    if controller.view.isUserInteractionEnabled != active { controller.view.isUserInteractionEnabled = active }
   }
 }
 
@@ -1328,7 +1336,7 @@ struct ChatPanel: View {
         ChatMessagesView(chat: chat, onMention: account.session == nil ? nil : { login in
           draft = "@\(login) " + draft
           focused = true
-        })
+        }, active: active)
         statusPill
       }
       Divider().overlay(Color.white.opacity(0.08))

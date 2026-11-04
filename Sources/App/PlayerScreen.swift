@@ -824,12 +824,23 @@ struct PlayerLayout: Equatable {
     out.pictureInsets = EdgeInsets()
     out.topBarExtra = EdgeInsets()
     out.bottomRowExtra = EdgeInsets()
-    if landscape && !large {
+    if landscape {
+      // Sideways: chat across the whole window under the strip (a large window's info bar between
+      // them), nothing beside it, until the stream starts.
       let left = -insets.leading
       let width = safe.width + insets.leading + insets.trailing
       let top = -insets.top
       out.video = CGRect(x: left, y: top, width: width, height: insets.top + strip)
-      out.panel = CGRect(x: left, y: out.video.maxY, width: width, height: safe.height + insets.bottom - out.video.maxY)
+      var chatTop = out.video.maxY
+      out.details = nil
+      if large, info != nil {
+        out.info = CGRect(x: 0, y: chatTop, width: safe.width, height: Self.infoHeight)
+        chatTop += Self.infoHeight
+      } else {
+        out.info = nil
+      }
+      out.foldAligned = false
+      out.panel = CGRect(x: left, y: chatTop, width: width, height: safe.height + insets.bottom - chatTop)
       out.panelPadding = EdgeInsets(
         top: 2, leading: insets.leading + 8, bottom: panelPadding.bottom, trailing: insets.trailing + 8)
       out.controls = EdgeInsets(top: insets.top, leading: insets.leading + 6, bottom: 0, trailing: insets.trailing + 6)

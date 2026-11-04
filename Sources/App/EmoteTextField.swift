@@ -84,6 +84,7 @@ struct EmoteTextField: UIViewRepresentable {
     // same value) makes UIKit refresh its keyboard, which can cut the keyboard's slide short.
     if view.placeholder != placeholder { view.placeholder = placeholder }
     if view.isEditable != enabled { view.isEditable = enabled }
+    if view.isUserInteractionEnabled != enabled { view.isUserInteractionEnabled = enabled }
     if view.allowsFocus != enabled { view.allowsFocus = enabled }
     if !enabled, view.isFirstResponder { view.resignFirstResponder() }
     // Changed from outside (an emote picked, a name completed, sent and cleared).

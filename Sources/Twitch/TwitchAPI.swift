@@ -309,16 +309,22 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
 
   // MARK: Browse
 
-  func topStreams(after cursor: String? = nil, first: Int = 30) async throws -> Page<LiveStream> {
+  /// `sort`: Twitch's StreamSort (VIEWER_COUNT, VIEWER_COUNT_ASC, RELEVANCE; RECENT in a
+  /// category). `languages`: broadcast languages, upper case ("EN", "ES"…; none: all of them).
+  func topStreams(
+    after cursor: String? = nil, first: Int = 30, sort: String = "VIEWER_COUNT", languages: [String] = []
+  ) async throws -> Page<LiveStream> {
+    var variables: [String: Any] = ["sort": sort, "first": first]
+    if !languages.isEmpty { variables["languages"] = languages }
     let data = try await query(
       """
-      query null($sort: StreamSort, $first: Int, $after: Cursor) {
-        streams(first: $first, after: $after, options: { sort: $sort }) {
+      query null($sort: StreamSort, $first: Int, $after: Cursor, $languages: [Language!]) {
+        streams(first: $first, after: $after, options: { sort: $sort, broadcasterLanguages: $languages }) {
           edges { cursor node { \(Self.streamFields) } }
           pageInfo { hasNextPage }
         }
       }
-      """, variables: Self.vars(["sort": "VIEWER_COUNT", "first": first], after: cursor))
+      """, variables: Self.vars(variables, after: cursor))
     return Self.page(data["streams"]) { Self.stream($0) }
   }
 
@@ -335,18 +341,22 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     return Self.page(data["games"]) { Self.category($0) }
   }
 
-  func categoryStreams(id: String, after cursor: String? = nil, first: Int = 30) async throws -> Page<LiveStream> {
+  func categoryStreams(
+    id: String, after cursor: String? = nil, first: Int = 30, sort: String = "VIEWER_COUNT", languages: [String] = []
+  ) async throws -> Page<LiveStream> {
+    var variables: [String: Any] = ["id": id, "sort": sort, "first": first]
+    if !languages.isEmpty { variables["languages"] = languages }
     let data = try await query(
       """
-      query null($id: ID, $sort: StreamSort, $first: Int, $after: Cursor) {
+      query null($id: ID, $sort: StreamSort, $first: Int, $after: Cursor, $languages: [Language!]) {
         game(id: $id) {
-          streams(first: $first, after: $after, options: { sort: $sort }) {
+          streams(first: $first, after: $after, options: { sort: $sort, broadcasterLanguages: $languages }) {
             edges { cursor node { \(Self.streamFields) } }
             pageInfo { hasNextPage }
           }
         }
       }
-      """, variables: Self.vars(["id": id, "sort": "VIEWER_COUNT", "first": first], after: cursor))
+      """, variables: Self.vars(variables, after: cursor))
     return Self.page(data["game"]["streams"]) { Self.stream($0) }
   }
 

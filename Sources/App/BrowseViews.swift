@@ -4,7 +4,11 @@ import SwiftUI
 struct BrowseView: View {
   enum Mode: String, CaseIterable, Hashable { case live = "Live", categories = "Categories" }
   @State private var mode: Mode = .live
-  @StateObject private var streams = Paginator<LiveStream> { try await TwitchAPI.shared.topStreams(after: $0) }
+  @StateObject private var streams = Paginator<LiveStream> { cursor in
+    let filter = await StreamFilter.shared.snapshot
+    return try await TwitchAPI.shared.topStreams(after: cursor, sort: filter.sort, languages: filter.languages)
+  }
+  @ObservedObject private var filter = StreamFilter.shared
   @StateObject private var categories = Paginator<Category> { try await TwitchAPI.shared.topCategories(after: $0) }
 
   var body: some View {
@@ -20,6 +24,9 @@ struct BrowseView: View {
     }
     .tabViewStyle(.page(indexDisplayMode: .never))
     .toolbar {
+      ToolbarItem(placement: .navigationBarTrailing) {
+        if mode == .live { StreamFilterMenu(filter: filter, inCategory: false) }
+      }
       ToolbarItem(placement: .principal) {
         Picker("Browse", selection: $mode.animation(.easeInOut(duration: 0.3))) {
           ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -33,6 +40,7 @@ struct BrowseView: View {
     .task {
       if streams.items.isEmpty { await streams.refresh() }
     }
+    .onChange(of: filter.version) { _ in Task { await streams.refresh() } }
     .onChange(of: mode) { newMode in
       if newMode == .categories, categories.items.isEmpty { Task { await categories.refresh() } }
     }
@@ -106,8 +114,15 @@ struct CategoryView: View {
   init(category: Category) {
     self.category = category
     let id = category.id
-    _streams = StateObject(wrappedValue: Paginator { try await TwitchAPI.shared.categoryStreams(id: id, after: $0) })
+    _streams = StateObject(
+      wrappedValue: Paginator { cursor in
+        let filter = await StreamFilter.shared.snapshot
+        return try await TwitchAPI.shared.categoryStreams(
+          id: id, after: cursor, sort: filter.categorySort, languages: filter.languages)
+      })
   }
+
+  @ObservedObject private var filter = StreamFilter.shared
 
   var body: some View {
     FeedList(refresh: { [streams] in await streams.refresh() }) {
@@ -128,6 +143,10 @@ struct CategoryView: View {
     }
     .navigationTitle(category.name)
     .navigationBarTitleDisplayMode(.inline)
+    .toolbar {
+      ToolbarItem(placement: .navigationBarTrailing) { StreamFilterMenu(filter: filter, inCategory: true) }
+    }
+    .onChange(of: filter.version) { _ in Task { await streams.refresh() } }
     .task { if streams.items.isEmpty { await streams.refresh() } }
   }
 }
@@ -517,6 +536,10 @@ struct SearchView: View {
 
   /// A live stream, compactly: who, what, and how many are watching. Tap to watch; hold for more.
   private func liveRow(_ stream: LiveStream) -> some View {
+    HoldMenuTile(cornerRadius: 8, menu: { StreamMenu.make(stream) }) { liveRowContent(stream) }
+  }
+
+  private func liveRowContent(_ stream: LiveStream) -> some View {
     Button {
       model.remember(stream.channel)
       Keyboard.dismiss()
@@ -545,20 +568,6 @@ struct SearchView: View {
       .contentShape(Rectangle())
     }
     .buttonStyle(PressableStyle(scale: 0.98))
-    .contextMenu {
-      Button {
-        model.remember(stream.channel)
-        app.playing = .live(stream.channel)
-      } label: { Label("Watch", systemImage: "play.fill") }
-      MultiviewMenuButton(channel: stream.channel)
-      Button {
-        model.remember(stream.channel)
-        app.push(.channel(stream.channel))
-      } label: { Label("Open channel", systemImage: "person.crop.circle") }
-      if let category = stream.category {
-        Button { app.push(.category(category)) } label: { Label(category.name, systemImage: "square.grid.2x2") }
-      }
-    }
   }
 }
 
@@ -843,5 +852,129 @@ struct FollowingView: View {
       .background(Color(white: 0.11), in: RoundedRectangle(cornerRadius: 12))
     }
     .buttonStyle(.plain)
+  }
+}
+
+/// Browse's live lists by language and order, as Twitch's directory filters them (kept between
+/// launches; the same for Browse and every category).
+@MainActor
+final class StreamFilter: ObservableObject {
+  static let shared = StreamFilter()
+
+  enum Sort: String, CaseIterable {
+    case viewers = "VIEWER_COUNT"
+    case fewestViewers = "VIEWER_COUNT_ASC"
+    case recommended = "RELEVANCE"
+    case recent = "RECENT"
+
+    var title: String {
+      switch self {
+      case .viewers: return "Most viewers"
+      case .fewestViewers: return "Fewest viewers"
+      case .recommended: return "Recommended"
+      case .recent: return "Recently started"
+      }
+    }
+  }
+
+  /// Twitch's broadcast languages offered (its codes; "OTHER" for the rest).
+  static let languageCodes = [
+    "EN", "ES", "PT", "DE", "FR", "IT", "RU", "PL", "TR", "JA", "KO", "ZH", "ZH_HK", "AR", "NL", "SV", "NO", "DA", "FI", "CS", "HU",
+    "UK", "TH", "VI", "ID", "MS", "TL", "HI", "EL", "RO", "BG", "SK", "CA", "ASL", "OTHER",
+  ]
+
+  static func name(of code: String) -> String {
+    switch code {
+    case "OTHER": return "Other"
+    case "ASL": return "American Sign Language"
+    case "ZH_HK": return "Cantonese"
+    default:
+      return Locale.current.localizedString(forLanguageCode: code.lowercased())?.capitalized(with: Locale.current) ?? code
+    }
+  }
+
+  @Published var sort: Sort { didSet { save() } }
+  @Published var languages: Set<String> { didSet { save() } }
+  /// Bumped on every change (the lists refresh on it).
+  @Published private(set) var version = 0
+
+  private init() {
+    let defaults = UserDefaults.standard
+    sort = Sort(rawValue: defaults.string(forKey: "browseSort") ?? "") ?? .viewers
+    languages = Set(defaults.stringArray(forKey: "browseLanguages") ?? [])
+  }
+
+  private func save() {
+    UserDefaults.standard.set(sort.rawValue, forKey: "browseSort")
+    UserDefaults.standard.set(Array(languages).sorted(), forKey: "browseLanguages")
+    version += 1
+  }
+
+  var isFiltered: Bool { !languages.isEmpty || sort != .viewers }
+
+  /// What a fetch uses (read on the main actor, sent with the request).
+  var snapshot: (sort: String, categorySort: String, languages: [String]) {
+    // Twitch's front page has nothing for "recently started": most viewers there instead.
+    let top = sort == .recent ? Sort.viewers.rawValue : sort.rawValue
+    return (top, sort.rawValue, Array(languages).sorted())
+  }
+}
+
+/// The filter button for live lists: order, and which languages.
+struct StreamFilterMenu: View {
+  @ObservedObject var filter: StreamFilter
+  /// A category's list (it can also sort by recently started).
+  var inCategory: Bool
+
+  var body: some View {
+    Menu {
+      Picker("Sort by", selection: $filter.sort) {
+        ForEach(StreamFilter.Sort.allCases.filter { inCategory || $0 != .recent }, id: \.self) { Text($0.title).tag($0) }
+      }
+      Menu {
+        Button {
+          filter.languages = []
+        } label: {
+          if filter.languages.isEmpty { Label("All languages", systemImage: "checkmark") } else { Text("All languages") }
+        }
+        // Picked ones first, then the rest by name.
+        let ordered = StreamFilter.languageCodes.sorted {
+          let a = filter.languages.contains($0), b = filter.languages.contains($1)
+          return a != b ? a : StreamFilter.name(of: $0) < StreamFilter.name(of: $1)
+        }
+        ForEach(ordered, id: \.self) { code in
+          Button {
+            if filter.languages.contains(code) { filter.languages.remove(code) } else { filter.languages.insert(code) }
+          } label: {
+            if filter.languages.contains(code) {
+              Label(StreamFilter.name(of: code), systemImage: "checkmark")
+            } else {
+              Text(StreamFilter.name(of: code))
+            }
+          }
+        }
+      } label: {
+        Label(languageSummary, systemImage: "globe")
+      }
+      if filter.isFiltered {
+        Button(role: .destructive) {
+          filter.sort = .viewers
+          filter.languages = []
+        } label: {
+          Label("Reset filters", systemImage: "arrow.counterclockwise")
+        }
+      }
+    } label: {
+      Image(systemName: filter.isFiltered ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+    }
+    .accessibilityLabel("Filter and sort")
+  }
+
+  private var languageSummary: String {
+    switch filter.languages.count {
+    case 0: return "Language: all"
+    case 1: return "Language: \(StreamFilter.name(of: filter.languages.first!))"
+    default: return "Languages: \(filter.languages.count)"
+    }
   }
 }

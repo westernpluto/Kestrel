@@ -1491,6 +1491,25 @@ func testMutedParts() {
   check(VODPlaylists.mutedParts("#EXTM3U\n#EXTINF:10,\n0.ts\n").isEmpty, "none")
 }
 
+func testRecordingJoin() {
+  let first = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PROGRAM-DATE-TIME:2026-11-04T01:00:00.000Z\n#EXT-X-MAP:URI=\"init0.mp4\"\n#EXTINF:2.000,\nseg0.m4s\n#EXTINF:2.000,\nseg1.m4s\n#EXT-X-ENDLIST\n"
+  let second = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-START:TIME-OFFSET=0\n#EXTINF:2.500,\nseg0.ts\n"
+  let joined = RecordingJoin.playlist([(id: "a", text: first), (id: "b", text: second)])
+  let lines = joined.split(separator: "\n").map(String.init)
+  check(lines.filter { $0 == "#EXTM3U" }.count == 1, "one header")
+  check(lines.contains("#EXT-X-TARGETDURATION:3"), "longest target")
+  check(lines.contains("#EXT-X-MAP:URI=\"/rec/a/init0.mp4\""), "map rewritten: \(joined)")
+  check(lines.contains("/rec/a/seg0.m4s") && lines.contains("/rec/b/seg0.ts"), "segments rewritten")
+  check(lines.filter { $0 == "#EXT-X-DISCONTINUITY" }.count == 1, "one join")
+  check(!lines.contains("#EXT-X-ENDLIST") && lines.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "still recording: no end")
+  check(lines.contains("#EXT-X-PROGRAM-DATE-TIME:2026-11-04T01:00:00.000Z"), "dates kept")
+  let done = RecordingJoin.playlist([(id: "a", text: first), (id: "b", text: second + "#EXT-X-ENDLIST\n")])
+  check(done.hasSuffix("#EXT-X-ENDLIST\n") && done.contains("PLAYLIST-TYPE:VOD"), "ended")
+  let t0 = Date(timeIntervalSince1970: 1_000_000)
+  let gaps = RecordingJoin.gaps([(t0, 100), (t0.addingTimeInterval(160), 50), (t0.addingTimeInterval(210), 10)])
+  check(gaps.count == 2 && gaps[0].at == 100 && gaps[0].missing == 60 && gaps[1].at == 150 && gaps[1].missing == 0, "gaps: \(gaps)")
+}
+
 func testMultiviewLayout() {
   // Two streams: side by side when wide, stacked when tall.
   let wide = MultiviewLayout.grid(count: 2, in: CGSize(width: 800, height: 360))
@@ -1517,6 +1536,18 @@ func testMultiviewLayout() {
   }
   let portraitFocus = MultiviewLayout.focus(count: 3, main: 0, in: CGSize(width: 390, height: 500))
   check(portraitFocus[0].maxY <= portraitFocus[1].minY && portraitFocus[1].minY == portraitFocus[2].minY, "under: \(portraitFocus)")
+  // Up to nine: a 3×3 grid; focus with eight others in two lanes, nothing overlapping or outside.
+  let nine = MultiviewLayout.grid(count: 9, in: area.size)
+  check(Set(nine.map { Int($0.minY) }).count == 3 && Set(nine.map { Int($0.minX) }).count == 3, "3x3: \(nine)")
+  for size in [CGSize(width: 900, height: 420), CGSize(width: 390, height: 520)] {
+    let bounds = CGRect(origin: .zero, size: size)
+    let many = MultiviewLayout.focus(count: 9, main: 4, in: size)
+    check(many.count == 9 && many[4].width > many[0].width * 2, "focus nine: \(many)")
+    for (index, rect) in many.enumerated() {
+      check(bounds.insetBy(dx: -0.5, dy: -0.5).contains(rect) && rect.width > 20, "focus nine inside: \(rect) in \(size)")
+      for other in many[(index + 1)...] { check(!rect.intersects(other.insetBy(dx: 0.5, dy: 0.5)), "focus nine overlap \(rect) \(other)") }
+    }
+  }
   // Sharpness: a small picture doesn't fetch 1080p.
   check(MultiviewLayout.heightCap(points: 110, scale: 3, heard: false) == 360, "small cap")
   check(MultiviewLayout.heightCap(points: 200, scale: 3, heard: true) == 720, "heard cap")
@@ -2118,6 +2149,7 @@ testMasterClock()
 testRecordingPlaylist()
 testMutedParts()
 testMultiviewLayout()
+testRecordingJoin()
 testStreamArrival()
 testMediaParsing()
 testFrameGrid()

@@ -209,14 +209,16 @@ struct StreamTile: View {
   @Environment(\.feedColumns) private var columns
 
   var body: some View {
+    // UIKit's hold menu: it opens at the finger, the card staying where it is (SwiftUI's lifted
+    // the card, or the whole row, out on a see-through background).
     if columns > 1 {
-      // Several cards share one list row here: UIKit's own hold menu, so holding a card lifts just
-      // that card (SwiftUI's lifted the whole row).
       HoldMenuTile(cornerRadius: 10, menu: { StreamMenu.make(stream) }) {
         StreamCard(stream: stream, showChannel: true, showCategory: showCategory, holdMenu: false)
       }
     } else {
-      StreamRow(stream: stream, showCategory: showCategory)
+      HoldMenuTile(cornerRadius: 8, menu: { StreamMenu.make(stream) }) {
+        StreamRow(stream: stream, showCategory: showCategory, holdMenu: false)
+      }
     }
   }
 }
@@ -227,7 +229,7 @@ enum StreamMenu {
   static func make(_ stream: LiveStream) -> UIMenu {
     let app = AppModel.shared
     let channel = stream.channel
-    var items: [UIMenuElement] = [
+    let items: [UIMenuElement] = [
       UIAction(title: "Watch", image: UIImage(systemName: "play.fill")) { _ in
         Task { @MainActor in app.playing = .live(channel) }
       },
@@ -236,12 +238,6 @@ enum StreamMenu {
         Task { @MainActor in app.push(.channel(channel)) }
       },
     ]
-    if let category = stream.category {
-      items.append(
-        UIAction(title: category.name, image: UIImage(systemName: "square.grid.2x2")) { _ in
-          Task { @MainActor in app.push(.category(category)) }
-        })
-    }
     return UIMenu(children: items)
   }
 
@@ -321,21 +317,45 @@ final class HoldMenuHostView: UIView, UIContextMenuInteractionDelegate {
 
   required init?(coder: NSCoder) { fatalError() }
 
+  /// Where the finger is: the menu opens from there, with nothing lifted out (the whole card used
+  /// to come up on a see-through background, moved into view if it was partly off screen).
+  private var anchor: UIView?
+  private var touchPoint = CGPoint.zero
+
   func contextMenuInteraction(
     _ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint
   ) -> UIContextMenuConfiguration? {
     guard let menu = menu?() else { return nil }
+    touchPoint = location
     return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in menu }
+  }
+
+  private func anchorPreview() -> UITargetedPreview {
+    let view = anchor ?? UIView()
+    view.backgroundColor = .clear
+    view.isUserInteractionEnabled = false
+    view.frame = CGRect(x: touchPoint.x - 1, y: touchPoint.y - 1, width: 2, height: 2)
+    if view.superview !== self { addSubview(view) }
+    anchor = view
+    let parameters = UIPreviewParameters()
+    parameters.backgroundColor = .clear
+    parameters.visiblePath = UIBezierPath(rect: view.bounds)
+    parameters.shadowPath = UIBezierPath()
+    return UITargetedPreview(view: view, parameters: parameters)
   }
 
   func contextMenuInteraction(
     _ interaction: UIContextMenuInteraction, configuration: UIContextMenuConfiguration,
     highlightPreviewForItemWithIdentifier identifier: any NSCopying
   ) -> UITargetedPreview? {
-    let parameters = UIPreviewParameters()
-    parameters.backgroundColor = .clear
-    parameters.visiblePath = UIBezierPath(roundedRect: bounds.insetBy(dx: -4, dy: -4), cornerRadius: cornerRadius + 4)
-    return UITargetedPreview(view: self, parameters: parameters)
+    anchorPreview()
+  }
+
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction, configuration: UIContextMenuConfiguration,
+    dismissalPreviewForItemWithIdentifier identifier: any NSCopying
+  ) -> UITargetedPreview? {
+    anchorPreview()
   }
 }
 
@@ -368,6 +388,8 @@ struct LiveBadge: View {
 struct StreamRow: View {
   let stream: LiveStream
   var showCategory = true
+  /// Its own SwiftUI hold menu (off when HoldMenuTile gives it UIKit's).
+  var holdMenu = true
   @EnvironmentObject private var app: AppModel
 
   var body: some View {
@@ -414,11 +436,10 @@ struct StreamRow: View {
     }
     .buttonStyle(PressableStyle(scale: 0.98))
     .contextMenu {
-      Button { app.playing = .live(stream.channel) } label: { Label("Watch", systemImage: "play.fill") }
-      MultiviewMenuButton(channel: stream.channel)
-      Button { app.push(.channel(stream.channel)) } label: { Label("Open channel", systemImage: "person.crop.circle") }
-      if let category = stream.category {
-        Button { app.push(.category(category)) } label: { Label(category.name, systemImage: "square.grid.2x2") }
+      if holdMenu {
+        Button { app.playing = .live(stream.channel) } label: { Label("Watch", systemImage: "play.fill") }
+        MultiviewMenuButton(channel: stream.channel)
+        Button { app.push(.channel(stream.channel)) } label: { Label("Open channel", systemImage: "person.crop.circle") }
       }
     }
   }
@@ -542,9 +563,6 @@ struct StreamCard: View {
         Button { app.playing = .live(stream.channel) } label: { Label("Watch", systemImage: "play.fill") }
         MultiviewMenuButton(channel: stream.channel)
         Button { app.push(.channel(stream.channel)) } label: { Label("Open channel", systemImage: "person.crop.circle") }
-        if let category = stream.category {
-          Button { app.push(.category(category)) } label: { Label(category.name, systemImage: "square.grid.2x2") }
-        }
       }
     }
   }

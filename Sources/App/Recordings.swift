@@ -223,6 +223,24 @@ final class RecordingStore: ObservableObject {
 
   func playbackURL(_ info: RecordingInfo) -> URL? { try? StreamProxy.shared.recordingURL(id: info.id) }
 
+  /// One broadcast's recordings together (a recording of a live stream started again, by hand or
+  /// by itself, is another piece of the same broadcast): newest broadcast first.
+  var groups: [RecordingGroup] {
+    var order: [String] = []
+    var byKey: [String: [RecordingInfo]] = [:]
+    for info in recordings {
+      let key = info.videoID == nil ? info.streamID.map { "stream-\($0)" } ?? info.id : info.id
+      if byKey[key] == nil { order.append(key) }
+      byKey[key, default: []].append(info)
+    }
+    return order.map { RecordingGroup(id: $0, pieces: (byKey[$0] ?? []).sorted { $0.startedAt < $1.startedAt }) }
+  }
+
+  func playbackURL(_ group: RecordingGroup) -> URL? {
+    group.pieces.count == 1
+      ? playbackURL(group.pieces[0]) : try? StreamProxy.shared.joinedRecordingURL(ids: group.pieces.map(\.id))
+  }
+
   private func update(_ status: RecorderStatus) {
     if let index = recordings.firstIndex(where: { $0.id == status.info.id }) { recordings[index] = status.info }
     if status.state == .ended {
@@ -288,6 +306,30 @@ final class RecordingStore: ObservableObject {
 }
 
 /// On a channel's page: record them whenever they go live (see AutoRecorder).
+/// A broadcast's recordings, oldest piece first (see `RecordingStore.groups`).
+struct RecordingGroup: Identifiable, Equatable {
+  let id: String
+  let pieces: [RecordingInfo]
+
+  /// The pieces as one: from the first's start, every piece's length and size, each join counted
+  /// as a jump (the newest piece's id, so a recording still being made shows as one).
+  var combined: RecordingInfo {
+    guard var info = pieces.last, let first = pieces.first else { return pieces[0] }
+    info.startedAt = first.startedAt
+    info.firstSegmentAt = first.firstSegmentAt ?? first.startedAt
+    info.streamStartedAt = pieces.compactMap(\.streamStartedAt).first
+    info.duration = pieces.reduce(0) { $0 + $1.duration }
+    info.bytes = pieces.reduce(0) { $0 + $1.bytes }
+    info.gaps = pieces.reduce(0) { $0 + $1.gaps } + pieces.count - 1
+    return info
+  }
+
+  /// Where the pieces join in the whole and how much wasn't recorded at each.
+  var joins: [(at: Double, missing: Double)] {
+    RecordingJoin.gaps(pieces.map { ($0.firstSegmentAt ?? $0.startedAt, $0.duration) })
+  }
+}
+
 struct AutoRecordButton: View {
   let channel: Channel
   var font: Font = .title2
@@ -329,7 +371,7 @@ struct RecordingsView: View {
   @ObservedObject private var store = RecordingStore.shared
   @ObservedObject private var auto = AutoRecorder.shared
   @EnvironmentObject private var app: AppModel
-  @State private var playing: RecordingInfo? = nil
+  @State private var playing: RecordingGroup? = nil
 
   var body: some View {
     List {
@@ -369,16 +411,18 @@ struct RecordingsView: View {
           Text("Nothing saved yet. Record a live stream or download a video from the player's gear menu, or schedule a channel above.")
             .font(.subheadline).foregroundColor(.secondary)
         }
-        ForEach(store.recordings) { info in
+        ForEach(store.groups) { group in
+          let info = group.combined
           Button {
-            play(info)
+            play(group)
           } label: {
-            RecordingRow(info: info, state: store.active[info.id], progress: store.downloadProgress[info.id])
+            RecordingRow(
+              info: info, state: store.active[info.id], progress: store.downloadProgress[info.id], pieces: group.pieces.count)
           }
           .buttonStyle(.plain)
           .swipeActions(edge: .trailing) {
             Button(role: .destructive) {
-              store.delete(info)
+              group.pieces.forEach(store.delete)
             } label: {
               Label("Delete", systemImage: "trash")
             }
@@ -405,16 +449,16 @@ struct RecordingsView: View {
     }
     .navigationTitle("Recordings")
     .onAppear { store.reload() }
-    .fullScreenCover(item: $playing) { info in
-      RecordingPlayerScreen(info: info, url: store.playbackURL(info))
+    .fullScreenCover(item: $playing) { group in
+      RecordingPlayerScreen(info: group.combined, url: store.playbackURL(group), positionKey: group.id, joins: group.joins)
     }
   }
 
-  private func play(_ info: RecordingInfo) {
-    guard info.duration > 0 else { return }
+  private func play(_ group: RecordingGroup) {
+    guard group.combined.duration > 0 else { return }
     // One thing playing at a time (a recording being made carries on).
     if app.playing != nil { app.playing = nil }
-    playing = info
+    playing = group
   }
 
   static func size(_ bytes: Int64) -> String {
@@ -427,6 +471,8 @@ struct RecordingRow: View {
   let state: RecorderStatus.State?
   /// A VOD downloading: how far along.
   var progress: Double? = nil
+  /// Pieces of one broadcast shown as one.
+  var pieces = 1
 
   var body: some View {
     HStack(spacing: 12) {
@@ -461,13 +507,17 @@ struct RecordingRow: View {
   private var details: String {
     var parts = [Format.relative(info.startedAt)]
     // Where it sits in the broadcast, on the stream's own clock.
-    if let offset = info.streamOffset {
+    if pieces > 1 {
+      // (Pieces with stretches between them: the time recorded, not a range of the stream.)
+      parts.append("\(Format.duration(Int(info.duration))) recorded")
+    } else if let offset = info.streamOffset {
       parts.append("\(Format.duration(Int(offset)))–\(Format.duration(Int(offset + info.duration))) of the stream")
     } else {
       parts.append(Format.duration(Int(info.duration)))
     }
     if info.bytes > 0 { parts.append(RecordingsView.size(info.bytes)) }
     if !info.quality.isEmpty { parts.append(info.quality) }
+    if pieces > 1 { parts.append("\(pieces) parts") }
     if info.gaps > 0 { parts.append(info.gaps == 1 ? "1 jump" : "\(info.gaps) jumps") }
     return parts.joined(separator: " · ")
   }
@@ -495,6 +545,12 @@ struct RecordingRow: View {
 struct RecordingPlayerScreen: View {
   let info: RecordingInfo
   let url: URL?
+  /// Where it was left is kept under this (a broadcast's pieces as one: the broadcast's).
+  var positionKey: String? = nil
+  /// Pieces joined: where, and how much of the stream wasn't recorded there (said as it's passed).
+  var joins: [(at: Double, missing: Double)] = []
+  @State private var skipNotice: String?
+  @State private var lastPosition: Double = 0
   @ObservedObject private var store = RecordingStore.shared
   @Environment(\.dismiss) private var dismiss
   @StateObject private var playback = RecordingPlayback()
@@ -525,7 +581,29 @@ struct RecordingPlayerScreen: View {
           .opacity(controlsShown ? 1 : 0)
           .allowsHitTesting(controlsShown)
           .animation(.easeInOut(duration: 0.22), value: controlsShown)
+        if let skipNotice {
+          Label(skipNotice, systemImage: "forward.end.fill")
+            .font(.footnote.weight(.semibold))
+            .padding(.horizontal, 14).padding(.vertical, 9)
+            .background(.ultraThinMaterial, in: Capsule())
+            .environment(\.colorScheme, .dark)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.top, 64)
+            .transition(.opacity.combined(with: .move(edge: .top)))
+            .allowsHitTesting(false)
+        }
       }
+      .animation(.easeInOut(duration: 0.25), value: skipNotice)
+    }
+    .onChange(of: playback.position) { position in
+      // Played across a join (not jumped over by seeking): says what wasn't recorded.
+      defer { lastPosition = position }
+      guard position > lastPosition, position - lastPosition < 3,
+        let join = joins.first(where: { lastPosition < $0.at && position >= $0.at })
+      else { return }
+      let missing = join.missing >= 1 ? Format.duration(Int(join.missing)) : nil
+      skipNotice = missing.map { "Skipped \($0) that wasn't recorded" } ?? "Next recorded part"
+      DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { skipNotice = nil }
     }
     .background(Color.black.ignoresSafeArea())
     .preferredColorScheme(.dark)
@@ -533,7 +611,7 @@ struct RecordingPlayerScreen: View {
     .onAppear {
       OrientationLock.playerVisible(true)
       AppModel.shared.watchingRecording = true
-      if let url { playback.start(url: url, id: info.id) }
+      if let url { playback.start(url: url, id: positionKey ?? info.id) }
       scheduleHide()
     }
     .onDisappear {
@@ -645,6 +723,8 @@ struct RecordingPlayerScreen: View {
       if playback.end > 0 {
         SeekBar(
           position: playback.position, duration: playback.end, storyboard: nil,
+          // Where pieces join (stretches of the stream that weren't recorded).
+          marks: joins.map { max(0, $0.at - 1)...($0.at + 1) },
           label: { [recording, playback, base] time in
             recording && playback.end - time < 15 ? "Latest" : Format.duration(Int((base ?? 0) + time))
           },
