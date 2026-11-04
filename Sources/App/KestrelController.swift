@@ -182,6 +182,11 @@ final class KestrelController {
   private func apply(_ update: LowLatencyUpdate) {
     adTimeline = update.ads
     model?.adState = update.state
+    // (An ad being replaced, looked for or covered: the player isn't on Twitch's own stream.)
+    switch update.state {
+    case .replaced, .searching, .covering: engine?.setAdBreak(true)
+    case .none, .skipped: engine?.setAdBreak(false)
+    }
   }
 
   func stop() {

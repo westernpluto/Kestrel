@@ -147,6 +147,16 @@ final class ImagePipeline: @unchecked Sendable {
   /// hundreds queued at once on the pictures' own connection made the emotes in view wait behind
   /// them (7TV takes up to a second or more to answer each), which is slower than not fetching
   /// ahead at all.
+  /// Keeps the pictures' connection to a host open (a tiny request now and then): chat's first new
+  /// emote after a quiet spell waited for a fresh secure connection to 7TV on top of 7TV's own slow
+  /// answer, which made emotes drag in slow chats.
+  func keepWarm(_ url: URL) {
+    var request = URLRequest(url: url)
+    request.httpMethod = "HEAD"
+    request.cachePolicy = .reloadIgnoringLocalCacheData
+    session.dataTask(with: request) { _, _, _ in }.resume()
+  }
+
   /// - Parameter stillPixels: also decode its first frame at this size ahead (see `still`).
   func prefetch(_ url: URL, stillPixels: CGFloat? = nil) {
     lock.lock()

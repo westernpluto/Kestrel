@@ -175,6 +175,7 @@ final class ChatController: ObservableObject {
       rebuildEmoteSections()
       onUpdate(true)
       if !emotes.complete { retryEmotes(attempt: 1) }
+      keepImagesWarm()
       // (The channel's 7TV set is known now, on a first visit: its live changes from here.)
       if let set = SevenTVSets.set(for: channel.id) { sevenTV?.watch(set: set) }
       // The channel's own emotes' pictures fetched ahead (a few dozen), so the picker and chat
@@ -194,6 +195,18 @@ final class ChatController: ObservableObject {
     loadTwitchEmotes()
     connect()
     startSevenTV()
+  }
+
+  /// The connection to the emote hosts (7TV above all) kept open while chat runs (see `keepWarm`).
+  private func keepImagesWarm() {
+    if UIApplication.shared.applicationState != .background {
+      let hosts = Dictionary(grouping: thirdParty.values, by: { $0.host ?? "" }).compactMap { $0.value.first }
+      for url in hosts { ImagePipeline.shared.keepWarm(url) }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 40) { [weak self] in
+      guard let self, self.running else { return }
+      self.keepImagesWarm()
+    }
   }
 
   /// A list of emotes didn't come (a timeout, a server error): asked for again a little later,

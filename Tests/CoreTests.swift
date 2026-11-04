@@ -1585,6 +1585,15 @@ func testQualityChangeNotLearned() {
   check(catchUp.targetBuffer > before + 0.3, "a stall later is learned (\(catchUp.targetBuffer))")
   catchUp.qualityChanged(lowered: true, now: t0.addingTimeInterval(t + 40))
   check(catchUp.targetBuffer < before + 0.05, "stepped down: back to what was needed (\(catchUp.targetBuffer))")
+  // An ad break: stalls during it aren't learned, even across a quality change; afterwards the
+  // margin is what was needed before.
+  catchUp.pauseLearning()
+  catchUp.stalled(now: t0.addingTimeInterval(t + 60))
+  catchUp.qualityChanged(lowered: false, now: t0.addingTimeInterval(t + 65))
+  catchUp.stalled(now: t0.addingTimeInterval(t + 90))
+  check(catchUp.targetBuffer < before + 0.05, "ad break: nothing learned (\(catchUp.targetBuffer))")
+  catchUp.resumeLearning(now: t0.addingTimeInterval(t + 120))
+  check(catchUp.targetBuffer < before + 0.05, "after the ad: margin as before (\(catchUp.targetBuffer))")
 }
 
 func testRecordingJoin() {

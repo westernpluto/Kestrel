@@ -436,6 +436,21 @@ final class KestrelEngine: NSObject {
     setRendition(renditions[position], byHand: false)
   }
 
+  /// An ad break (the stream from an ad-free copy meanwhile): nothing learned from how it arrives,
+  /// and its playlists don't count toward "not low latency".
+  private var inAdBreak = false
+
+  func setAdBreak(_ active: Bool) {
+    guard active != inAdBreak else { return }
+    inAdBreak = active
+    if active {
+      catchUp.pauseLearning()
+      playlistsWithoutPrefetch = 0
+    } else {
+      catchUp.resumeLearning()
+    }
+  }
+
   /// The least to keep in hand on this connection (cellular: more, see NetworkWatch).
   func setMarginFloor(_ value: Double) {
     catchUp.setFloor(value)
@@ -567,7 +582,7 @@ final class KestrelEngine: NSObject {
             prefetchSeen = true
             playlistsWithoutPrefetch = 0
             wholeSegments = false
-          } else if !text.contains(",Amazon") && !text.localizedCaseInsensitiveContains("stitched") {
+          } else if !inAdBreak, !text.contains(",Amazon"), !text.localizedCaseInsensitiveContains("stitched") {
             // (A playlist with ad segments in it doesn't count: an ad at the start of a low-latency
             // stream is served without the hints too.)
             playlistsWithoutPrefetch += 1

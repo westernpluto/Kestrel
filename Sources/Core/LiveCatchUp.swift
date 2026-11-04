@@ -384,12 +384,32 @@ struct LiveCatchUp: Sendable {
   /// margin goes back to what's been needed otherwise.
   mutating func qualityChanged(lowered: Bool, now: Date = Date()) {
     hold(for: 3, now: now)
-    quietUntil = now.addingTimeInterval(10)
+    // (Not shortening a pause for an ad break.)
+    quietUntil = max(quietUntil, now.addingTimeInterval(10))
     shortfall = 0
     shortfallPeak = 0
     marginBeforeGap = nil
     guard lowered else { return }
     hiccups.removeAll { now.timeIntervalSince($0.at) < 180 }
+    let needed = neededBuffer(now: now)
+    if targetBuffer > needed { targetBuffer = needed }
+  }
+
+  /// An ad break: the stream comes from an ad-free copy meanwhile (another server, often far away,
+  /// without Twitch's low latency), unevenly. Nothing is learned from it: learned, the margin grew
+  /// during every blocked ad and stayed up for minutes after.
+  mutating func pauseLearning() {
+    quietUntil = .distantFuture
+    shortfall = 0
+    shortfallPeak = 0
+    marginBeforeGap = nil
+  }
+
+  /// The ad break is over: learning again a few seconds on, and the margin back to what was
+  /// needed before it (whatever crept in around the switches is forgotten).
+  mutating func resumeLearning(now: Date = Date()) {
+    quietUntil = now.addingTimeInterval(10)
+    hiccups.removeAll { now.timeIntervalSince($0.at) < 300 }
     let needed = neededBuffer(now: now)
     if targetBuffer > needed { targetBuffer = needed }
   }
