@@ -416,6 +416,26 @@ final class KestrelEngine: NSObject {
     catchUp.qualityChanged(lowered: lowered)
   }
 
+  /// The best Auto may play, as a place in `renditions` (multi-view: no sharper than the picture
+  /// is shown). Auto's own steps stay at or below it (they used to step straight past it: six
+  /// tiles each "trying the better quality again" at 1080p flooded the connection).
+  private var capPosition: Int?
+
+  func setCap(_ rendition: Int?) {
+    capPosition = rendition.flatMap { renditions.firstIndex(of: $0) }
+    // Auto's steps count from the cap (a step down from above it would change nothing; a cap
+    // raised for a bigger picture is taken at once).
+    if let capPosition { fit.start(at: capPosition, tryAfter: 1e9) }
+    if autoQuality { applyFit() }
+  }
+
+  /// Plays what Auto has settled on, within the cap.
+  private func applyFit() {
+    guard !renditions.isEmpty else { return }
+    let position = min(renditions.count - 1, max(fit.step, capPosition ?? 0))
+    setRendition(renditions[position], byHand: false)
+  }
+
   /// The least to keep in hand on this connection (cellular: more, see NetworkWatch).
   func setMarginFloor(_ value: Double) {
     catchUp.setFloor(value)
@@ -426,14 +446,15 @@ final class KestrelEngine: NSObject {
   func startLower(steps: Int) {
     guard autoQuality, steps > 0, !renditions.isEmpty else { return }
     fit.start(at: steps)
-    setRendition(renditions[fit.step], byHand: false)
+    applyFit()
   }
 
   /// Auto: the best quality that plays smoothly.
   func setAuto() {
     autoQuality = true
     fit = ConnectionFit(count: renditions.count)
-    if let best = renditions.first { setRendition(best, byHand: false) }
+    if let capPosition { fit.start(at: capPosition, tryAfter: 1e9) }
+    applyFit()
   }
 
   func setMuted(_ mute: Bool) {
@@ -1232,7 +1253,7 @@ final class KestrelEngine: NSObject {
     guard let since = slowSince, at.timeIntervalSince(since) >= 3, fit.tooSlow(), fit.step < renditions.count else { return }
     slowSince = nil
     paceHistory = []
-    setRendition(renditions[fit.step], byHand: false)
+    applyFit()
     ActivityLog.shared.add(String(format: "Kestrel player: video coming in at %.0f%% of real time; one quality lower", pace * 100))
   }
 
@@ -1253,13 +1274,14 @@ final class KestrelEngine: NSObject {
       // Twice in a few minutes while the video kept arriving: the connection can't carry this
       // quality; one lower from the next segment.
       if autoQuality, fit.stalled(), fit.step < renditions.count {
-        setRendition(renditions[fit.step], byHand: false)
+        applyFit()
         ActivityLog.shared.add("Kestrel player: stalling at this quality; one lower for now (trying again in a few minutes)")
       }
       return
     }
-    if autoQuality, fit.tick(), fit.step < renditions.count {
-      setRendition(renditions[fit.step], byHand: false)
+    // (Never past the cap: at it, there's nothing better to try.)
+    if autoQuality, fit.step > (capPosition ?? 0), fit.tick(), fit.step < renditions.count {
+      applyFit()
       ActivityLog.shared.add("Kestrel player: trying the better quality again")
     }
     if let since = stalledSince {

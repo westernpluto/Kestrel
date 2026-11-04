@@ -172,9 +172,12 @@ final class ImagePipeline: @unchecked Sendable {
         self.decode(data, maxPixels: maxPixels, key: key, url: url, mimeType: response?.mimeType)
         return
       }
-      // Retry network hiccups once; then try the fallback address.
-      if status == 0 || status >= 500, attempt < 2 {
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) {
+      // Network trouble (a timeout while six streams' video fills the connection, say): tried again
+      // a few times, waiting longer each time (once wasn't enough in multi-view, and the emote
+      // stayed blank); then the fallback address.
+      if status == 0 || status >= 500 || status == 429, attempt < 5 {
+        let wait = min(8, 0.8 * pow(2, Double(attempt - 1)))
+        DispatchQueue.global().asyncAfter(deadline: .now() + wait) {
           self.fetch(url, maxPixels: maxPixels, fallback: fallback, attempt: attempt + 1, key: key)
         }
         return
@@ -386,8 +389,22 @@ final class LoadingImageView: UIImageView {
       return
     }
     show(nil)
+    request(url, maxPixels: maxPixels, fallback: fallback, attempt: 1)
+  }
+
+  /// Asks for the picture; if nothing came (the network gave up), asks again a little later while
+  /// it's still the one wanted here, rather than staying blank.
+  private func request(_ url: URL, maxPixels: CGFloat?, fallback: URL?, attempt: Int) {
     ImagePipeline.shared.load(url, maxPixels: maxPixels, fallback: fallback) { [weak self] image in
-      guard let self, self.current == url, image == nil || image !== self.shownPicture else { return }
+      guard let self, self.current == url else { return }
+      if image == nil, self.shownPicture == nil, attempt < 4 {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5 * Double(attempt)) { [weak self] in
+          guard let self, self.current == url, self.shownPicture == nil else { return }
+          self.request(url, maxPixels: maxPixels, fallback: fallback, attempt: attempt + 1)
+        }
+        return
+      }
+      guard image == nil || image !== self.shownPicture else { return }
       if self.shownPicture == nil {
         UIView.transition(with: self, duration: 0.15, options: .transitionCrossDissolve) { self.show(image) }
       } else if let image {

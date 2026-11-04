@@ -91,7 +91,9 @@ final class KestrelController {
       // signal the best one stalled before Auto could step down.
       let network = NetworkWatch.shared
       engine.setMarginFloor(network.floor)
-      if preferred == nil, network.kind == .cellular || network.constrained {
+      // (Not multi-view's tiles: their quality follows their size on screen, and six of them
+      // each trying better at the same moment flooded the connection.)
+      if preferred == nil, model?.isTile != true, network.kind == .cellular || network.constrained {
         let cap = network.constrained ? 480 : 720
         if let lower = videoIndices.firstIndex(where: { min(found[$0].width, found[$0].height) <= cap }), lower > 0 {
           engine.startLower(steps: lower)
@@ -234,11 +236,12 @@ final class KestrelController {
     pendingMaxHeight = height
     guard let engine else { return }
     guard let height else {
-      engine.setAuto()
+      engine.setCap(nil)
       return
     }
-    let pick = videoIndices.first { variants[$0].height <= height } ?? videoIndices.last
-    if let pick { engine.setRendition(pick, byHand: false) }
+    // (Auto within the cap: it still steps down when the connection can't carry even that.)
+    let pick = videoIndices.first { min(variants[$0].width, variants[$0].height) <= height } ?? videoIndices.last
+    engine.setCap(pick)
   }
 
   func select(_ id: Int?) {
