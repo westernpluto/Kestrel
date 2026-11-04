@@ -2,8 +2,23 @@ name: Build IPA and APK
 
 on:
   push:
+    branches: ["**"]
+    # A tag like v1.2.0 builds everything and publishes it as a GitHub release.
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: Publish this build as a GitHub release
+        type: boolean
+        default: false
+      version:
+        description: Version for the release (e.g. 1.2.0; empty for 1.0.<run number>)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
 
 env:
   # Amazon IVS Player SDK (the low-latency player). Version and checksum come from AWS's
@@ -12,12 +27,25 @@ env:
   IVS_SHA256: "a848cb36f59d5d19f11456913d7a8c035fb118a7f3a0a4e12230e2e534970430"
 
 jobs:
-  # iPhone: Xcode 27.1 and its iOS 27.1 SDK, so Kestrel fills iPhone Duo's displays (built with an
-  # older SDK, iPhone Duo shows the app at a regular iPhone's size with empty space around it).
+  # iPhone: Xcode 27.1 or later (the newest 27.x release the runner has) and its SDK, so Kestrel
+  # fills iPhone Duo's displays (built with an older SDK, iPhone Duo shows the app at a regular
+  # iPhone's size with empty space around it). `xcode-27` is GitHub's own standard runner image.
   build-ios:
     runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
+
+      - name: Version
+        # A v1.2.0 tag: 1.2.0; Run workflow with a version: that; otherwise 1.0.<run number>.
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"
+          elif [ -n "$INPUT_VERSION" ]; then V="$INPUT_VERSION"
+          else V="1.0.$GITHUB_RUN_NUMBER"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
 
       - name: Pick Xcode 27.1
         run: |
@@ -46,9 +74,6 @@ jobs:
           echo "::warning::Built without the Amazon IVS SDK, so the low-latency player isn't included."
           rm -rf vendor/AmazonIVSPlayer.xcframework
           ./build.sh
-        env:
-          VERSION: 1.0.${{ github.run_number }}
-          BUILD_NUMBER: ${{ github.run_number }}
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -60,9 +85,6 @@ jobs:
       # doesn't wait for a second Mac.
       - name: Build Apple TV IPA
         run: ./build-tv.sh
-        env:
-          VERSION: 1.0.${{ github.run_number }}
-          BUILD_NUMBER: ${{ github.run_number }}
 
       - name: Upload Apple TV IPA
         uses: actions/upload-artifact@v4
@@ -79,6 +101,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Version
+        # A v1.2.0 tag: 1.2.0; Run workflow with a version: that; otherwise 1.0.<run number>.
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"
+          elif [ -n "$INPUT_VERSION" ]; then V="$INPUT_VERSION"
+          else V="1.0.$GITHUB_RUN_NUMBER"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -90,9 +124,6 @@ jobs:
 
       - name: Build APK
         run: gradle assembleRelease --no-daemon --stacktrace
-        env:
-          VERSION: 1.0.${{ github.run_number }}
-          BUILD_NUMBER: ${{ github.run_number }}
 
       - name: Name the APK
         run: cp app/build/outputs/apk/release/app-release.apk Kestrel.apk
@@ -102,3 +133,68 @@ jobs:
         with:
           name: Kestrel-apk
           path: android/Kestrel.apk
+
+  # A release (a v* tag, or Run workflow with "Publish this build as a GitHub release"): the three
+  # builds attached to a GitHub release with notes on what changed since the last one, so they're
+  # on the repository's Releases page instead of buried in a run's artifacts (which expire).
+  release:
+    needs: [build-ios, build-android]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Name the files and write the notes
+        id: notes
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            VERSION="${{ inputs.version }}"
+            TAG="v${VERSION:-1.0.$GITHUB_RUN_NUMBER}"
+          fi
+          VERSION="${TAG#v}"
+          mkdir -p dist
+          cp artifacts/Kestrel-ipa/Kestrel.ipa "dist/Kestrel-$VERSION.ipa"
+          cp artifacts/Kestrel-tv-ipa/Kestrel-tv.ipa "dist/Kestrel-TV-$VERSION.ipa"
+          cp artifacts/Kestrel-apk/Kestrel.apk "dist/Kestrel-$VERSION.apk"
+          # What changed: the commits since the previous release's tag (or the last 30).
+          PREVIOUS="$(git tag --list 'v*' --sort=-creatordate | grep -vx "$TAG" | head -1 || true)"
+          if [ -n "$PREVIOUS" ]; then RANGE="$PREVIOUS..$GITHUB_SHA"; else RANGE="-30 $GITHUB_SHA"; fi
+          {
+            echo "## Downloads"
+            echo
+            echo "| File | For |"
+            echo "|---|---|"
+            echo "| \`Kestrel-$VERSION.ipa\` | iPhone and iPad (iOS 16+): sideload with SideStore, AltStore, Feather or TrollStore |"
+            echo "| \`Kestrel-TV-$VERSION.ipa\` | Apple TV: sideload the same way |"
+            echo "| \`Kestrel-$VERSION.apk\` | Android 8.0+: open it on the phone to install |"
+            echo
+            echo "## What's new"
+            echo
+            git log --no-merges --format='- %s' $RANGE
+            if [ -n "$PREVIOUS" ]; then
+              echo
+              echo "**Full list:** https://github.com/$GITHUB_REPOSITORY/compare/$PREVIOUS...$TAG"
+            fi
+          } > notes.md
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.notes.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Kestrel ${{ steps.notes.outputs.version }}
+          body_path: notes.md
+          files: dist/*
+          make_latest: true
