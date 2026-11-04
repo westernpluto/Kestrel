@@ -256,12 +256,13 @@ actor LowLatencySession: PlaylistSource {
       let marker = main.playlist.adMarkerActive
       noteMarkers(marker)
       if marker, config.backupStreams { prewarm(target: target) }
-      // While Twitch announces an ad break, hold back the segment it's still producing: if the ad
-      // gets stitched in, that segment would be ad video the player shows before Kestrel can
-      // tell (costs ~2 s of latency during the break, saves the ad flash). Only where ads can be
-      // stitched in at all: through an ad-free server (or an ad-free account) it would only cost
-      // latency, and a stream that started during the announcement stayed behind afterwards.
-      let body = LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: marker && route.adsPossible)
+      // The segment still being made is handed over during an announced break too. Holding it back
+      // (in case an ad got stitched into it) made the player run dry at every break, stall, fall
+      // ~2 s behind and catch up after, and the breaks seen are Twitch's own-player ones, clean.
+      // If an ad is stitched in after all, what the player was already handed of it is covered
+      // when it plays (see below: the player is about a second behind, so the cover is known in
+      // time).
+      let body = LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: false)
       return serve(index, body)
     }
 

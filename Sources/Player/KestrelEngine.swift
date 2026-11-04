@@ -537,7 +537,8 @@ final class KestrelEngine: NSObject {
   /// The newest video's delay on the way, learned slowly from the stream's clock where it makes
   /// sense (0.2 to 4 s), else left at the usual.
   private func learnDelivery(ahead: Double) {
-    guard let raw = streamClockLatency, let since = playingSince, Date().timeIntervalSince(since) > 2 else { return }
+    // (Not during an ad break: the stream comes another way then, and its delay isn't this one's.)
+    guard !inAdBreak, let raw = streamClockLatency, let since = playingSince, Date().timeIntervalSince(since) > 2 else { return }
     let seen = raw - ahead
     guard seen > 0.2, seen < 4 else { return }
     delivery += (seen - delivery) * 0.03

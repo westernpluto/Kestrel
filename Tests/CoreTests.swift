@@ -893,7 +893,7 @@ func testLowLatencySession() {
     fake.advance(4)  // the announced break reaches the live edge
     let announced = await session.mediaPlaylist(0)
     check(!announced.body.contains("DATERANGE:ID=\"stitched"), "ad marker removed")
-    check(!announced.body.contains("TWITCH-PREFETCH"), "prefetch held back while an ad is announced")
+    check(announced.body.contains("TWITCH-PREFETCH"), "prefetch kept while an ad is announced (held back, the player stalled every break)")
     check(announced.body.contains("#EXTINF:2.000,live") && announced.body.contains("https://edge.test/"), "segments kept")
     check(box.last?.state == .skipped, "client-side break shown as skipped: \(String(describing: box.last?.state))")
     let main = fake.mainToken!
