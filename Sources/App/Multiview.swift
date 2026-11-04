@@ -332,6 +332,10 @@ struct MultiviewScreen: View {
   @Environment(\.displayScale) private var displayScale
   @AppStorage("multiview.chat") private var chatShown = true
   @AppStorage("multiview.focus") private var focus = false
+  /// Chat's share of the width when it's beside the pictures (dragged at the divider).
+  @AppStorage("multiview.chatShare") private var chatShare = 0.3
+  @State private var resizedChat: CGFloat?
+  @State private var resizingFrom: CGFloat?
   @State private var picking = false
   /// The bar, names, sound buttons and the outline around the picked stream: they fade after a
   /// few seconds so it's just the streams (a tap brings them back).
@@ -428,7 +432,7 @@ struct MultiviewScreen: View {
     let keyboardSpace = keyboard.overlap > 0 ? max(0, keyboard.overlap + 14 - safeBottom) : 0
     let areas = Self.areas(
       size: size, safeBottom: safeBottom, landscape: landscape, chat: showChat, keyboardSpace: keyboardSpace,
-      count: model.tiles.count, focus: focus)
+      count: model.tiles.count, focus: focus, chatWidth: resizedChat ?? size.width * chatShare, fold: crease != nil)
     let rects = layout(
       in: areas.grid.size,
       crease: crease.flatMap { $0.intersects(areas.grid) ? $0.offsetBy(dx: -areas.grid.minX, dy: -areas.grid.minY) : nil })
@@ -514,6 +518,9 @@ struct MultiviewScreen: View {
           .frame(width: areas.chat.width, height: areas.chat.height)
           .offset(x: areas.chat.minX, y: areas.chat.minY)
           .transition(.move(edge: landscape ? .trailing : .bottom).combined(with: .opacity))
+        if landscape {
+          chatDivider(areas, width: size.width)
+        }
       }
 
       // Over the pictures, fading with the rest of the controls.
@@ -568,12 +575,51 @@ struct MultiviewScreen: View {
   /// Landscape: the pictures at full height, chat in a column on the right. Portrait: the pictures
   /// at the top (no taller than they need), chat under them (room kept above the keyboard). The
   /// bar lies over the top of the pictures.
+  /// Chat beside the pictures: between these.
+  static let minChat: CGFloat = 240
+  static func maxChat(_ width: CGFloat) -> CGFloat { max(minChat, width * 0.5) }
+
+  private func chatDivider(_ areas: Areas, width: CGFloat) -> some View {
+    Capsule()
+      .fill(Color.white.opacity(resizingFrom == nil ? 0.22 : 0.6))
+      .frame(width: 4, height: 44)
+      .frame(width: 24, height: areas.chat.height)
+      .contentShape(Rectangle())
+      .offset(x: areas.chat.minX - 12, y: areas.chat.minY)
+      .gesture(
+        DragGesture(minimumDistance: 2, coordinateSpace: .global)
+          .onChanged { value in
+            if resizingFrom == nil { resizingFrom = areas.chat.width }
+            resizedChat = min(max((resizingFrom ?? areas.chat.width) - value.translation.width, Self.minChat), Self.maxChat(width))
+          }
+          .onEnded { _ in
+            if let resized = resizedChat { chatShare = Double(resized / max(width, 1)) }
+            resizingFrom = nil
+            resizedChat = nil
+          }
+      )
+      .accessibilityLabel("Resize chat")
+  }
+
   private static func areas(
-    size: CGSize, safeBottom: CGFloat, landscape: Bool, chat: Bool, keyboardSpace: CGFloat, count: Int, focus: Bool
+    size: CGSize, safeBottom: CGFloat, landscape: Bool, chat: Bool, keyboardSpace: CGFloat, count: Int, focus: Bool,
+    chatWidth preferred: CGFloat, fold: Bool
   ) -> Areas {
     if landscape {
-      let chatWidth = chat ? min(max(size.width * 0.3, 250), 380).rounded() : 0
-      let gridWidth = size.width - chatWidth - (chat ? 1 : 0)
+      var chatWidth = chat ? min(max(preferred, minChat), maxChat(size.width)).rounded() : 0
+      var gridWidth = size.width - chatWidth - (chat ? 1 : 0)
+      if chat, !fold, count > 0 {
+        // Width the pictures can't use (they're as tall as the window allows already) goes to
+        // chat instead of black bars beside them.
+        let probe = CGSize(width: gridWidth, height: size.height)
+        let rects = focus && count > 1 ? MultiviewLayout.focus(count: count, main: 0, in: probe) : MultiviewLayout.grid(count: count, in: probe)
+        let used = (rects.map(\.maxX).max() ?? gridWidth) - (rects.map(\.minX).min() ?? 0)
+        let spare = (gridWidth - used).rounded(.down)
+        if spare > 8 {
+          gridWidth -= spare
+          chatWidth += spare
+        }
+      }
       return Areas(
         grid: CGRect(x: 0, y: 0, width: gridWidth, height: size.height),
         chat: CGRect(x: size.width - chatWidth, y: 0, width: chatWidth, height: size.height + safeBottom))
