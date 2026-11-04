@@ -410,8 +410,10 @@ final class KestrelEngine: NSObject {
   func setRendition(_ index: Int, byHand: Bool = true) {
     if byHand { autoQuality = false }
     guard index != rendition else { return }
+    // (Best first: further along the list is lower.)
+    let lowered = (renditions.firstIndex(of: index) ?? 0) > (renditions.firstIndex(of: rendition) ?? 0)
     rendition = index
-    catchUp.hold(for: 3)
+    catchUp.qualityChanged(lowered: lowered)
   }
 
   /// The least to keep in hand on this connection (cellular: more, see NetworkWatch).

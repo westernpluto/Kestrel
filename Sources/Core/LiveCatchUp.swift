@@ -277,7 +277,7 @@ struct LiveCatchUp: Sendable {
   /// arrived is what the buffer gained plus what was played. A hiccup deeper than the margin allows
   /// for raises it at once.
   private mutating func track(_ buffer: Double, position: Double?, now: Date) {
-    guard let previous = last, now.timeIntervalSince(startedAt) >= Self.learnAfterStart else { return }
+    guard let previous = last, now.timeIntervalSince(startedAt) >= Self.learnAfterStart, now >= quietUntil else { return }
     let elapsed = now.timeIntervalSince(previous.at)
     guard elapsed > 0, elapsed < 3 else { return }
     let played: Double
@@ -331,6 +331,19 @@ struct LiveCatchUp: Sendable {
   /// The player ran out of video: the hiccup was deeper than the margin. Keep more in hand from
   /// now on (it plays slower for a bit to build it), and leave it be for a moment.
   mutating func stalled(now: Date = Date()) {
+    // Right after a change of quality: the switch's gap, not the connection's. Not learned.
+    if now < quietUntil {
+      stalledAt = now
+      marginBeforeStall = targetBuffer
+      shortfall = 0
+      shortfallPeak = 0
+      marginBeforeGap = nil
+      rate = 1
+      last = nil
+      level = nil
+      holdUntil = max(holdUntil, now.addingTimeInterval(3))
+      return
+    }
     // Deeper than the margin it had before this gap began (a gap that ran on into an outage is
     // only counted up to what an outage teaches). A stall only ever raises the margin: run
     // through the outage rule as a whole it could lower it, and a stream whose hiccups ran a
@@ -361,6 +374,26 @@ struct LiveCatchUp: Sendable {
 
   /// Normal speed for a while, with no reading of the buffer (e.g. while the quality changes,
   /// which can empty and refill it).
+  /// Until when nothing is learned (just after a change of quality: the switch itself leaves a gap
+  /// in delivery that isn't the connection's).
+  private var quietUntil = Date.distantPast
+
+  /// The quality changed. The gap the switch leaves isn't learned from (Auto's switches each
+  /// raised the margin, and latency crept up while a picked quality stayed low). Stepped down
+  /// because a quality was too much: what was learned at it lately is forgotten too, and the
+  /// margin goes back to what's been needed otherwise.
+  mutating func qualityChanged(lowered: Bool, now: Date = Date()) {
+    hold(for: 3, now: now)
+    quietUntil = now.addingTimeInterval(10)
+    shortfall = 0
+    shortfallPeak = 0
+    marginBeforeGap = nil
+    guard lowered else { return }
+    hiccups.removeAll { now.timeIntervalSince($0.at) < 180 }
+    let needed = neededBuffer(now: now)
+    if targetBuffer > needed { targetBuffer = needed }
+  }
+
   mutating func hold(for seconds: TimeInterval, now: Date = Date()) {
     rate = 1
     last = nil

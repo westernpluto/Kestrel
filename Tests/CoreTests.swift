@@ -1566,6 +1566,27 @@ func testConnectionFitTooSlow() {
   check(cellular.tick(now: t0.addingTimeInterval(91)) && cellular.step == 1, "then tries better")
 }
 
+func testQualityChangeNotLearned() {
+  let t0 = Date(timeIntervalSince1970: 5_000_000)
+  var catchUp = LiveCatchUp(noise: 0.35, now: t0)
+  // Steady at the margin for a while.
+  var t = 0.0
+  while t < 20 {
+    _ = catchUp.update(buffer: 0.7, latency: 1.5, playing: true, position: t, now: t0.addingTimeInterval(t))
+    t += 0.25
+  }
+  let before = catchUp.targetBuffer
+  // A switch of quality, and the gap it leaves (a stall right after): nothing learned.
+  catchUp.qualityChanged(lowered: false, now: t0.addingTimeInterval(t))
+  catchUp.stalled(now: t0.addingTimeInterval(t + 4))
+  check(catchUp.targetBuffer == before, "a switch's stall isn't learned (\(catchUp.targetBuffer) vs \(before))")
+  // A real stall later raises it; stepping down afterwards forgets what was learned at that quality.
+  catchUp.stalled(now: t0.addingTimeInterval(t + 30))
+  check(catchUp.targetBuffer > before + 0.3, "a stall later is learned (\(catchUp.targetBuffer))")
+  catchUp.qualityChanged(lowered: true, now: t0.addingTimeInterval(t + 40))
+  check(catchUp.targetBuffer < before + 0.05, "stepped down: back to what was needed (\(catchUp.targetBuffer))")
+}
+
 func testRecordingJoin() {
   let first = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PROGRAM-DATE-TIME:2026-11-04T01:00:00.000Z\n#EXT-X-MAP:URI=\"init0.mp4\"\n#EXTINF:2.000,\nseg0.m4s\n#EXTINF:2.000,\nseg1.m4s\n#EXT-X-ENDLIST\n"
   let second = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-START:TIME-OFFSET=0\n#EXTINF:2.500,\nseg0.ts\n"
@@ -2227,6 +2248,7 @@ testMultiviewLayout()
 testRecordingJoin()
 testWholeSegmentSteering()
 testConnectionFitTooSlow()
+testQualityChangeNotLearned()
 testStreamArrival()
 testMediaParsing()
 testFrameGrid()
