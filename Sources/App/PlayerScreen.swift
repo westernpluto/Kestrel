@@ -1128,7 +1128,10 @@ struct PlayerScreen: View {
               let dx = value.translation.width, dy = value.translation.height
               guard abs(dx) > abs(dy) * 1.5 else { return }
               let towardEdge = layout.chatOnLeft ? dx < -80 : dx > 80
-              if towardEdge { withAnimation(Self.spring) { largeFullScreen = true } }
+              if towardEdge {
+                Haptics.tap()
+                withAnimation(Self.spring) { largeFullScreen = true }
+              }
             }
           )
           .offset(x: layout.panel.minX, y: layout.panel.minY + progress * 260)
@@ -1152,6 +1155,7 @@ struct PlayerScreen: View {
           topBarExtra: layout.topBarExtra, bottomRowExtra: layout.bottomRowExtra,
           chromeVisible: progress == 0, minimized: app.playerMinimized, chatOnLeft: layout.chatOnLeft,
           sideChat: layout.large && layout.landscape,
+          largeWindow: layout.large,
           viewersShownElsewhere: layout.details != nil,
           showsStreamer: layout.large && layout.landscape && !layout.fullScreen && layout.info == nil,
           chat: chat,
@@ -1189,8 +1193,11 @@ struct PlayerScreen: View {
           },
           onPullEnd: { dy, predicted in
             let finish = (dragProgress ?? 0) > 0.5 || predicted / pullDistance > 0.55
+            if finish { Haptics.tap() }
             withAnimation(Self.spring) {
               app.playerMinimized = finish
+              // Back from the mini player: as it was before (chat beside the video).
+              if finish { largeFullScreen = false }
               dragProgress = nil
             }
           }

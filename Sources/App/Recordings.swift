@@ -251,7 +251,7 @@ final class RecordingStore: ObservableObject {
   /// keeps recording.
   private func keepAwake() {
     let awake = !active.isEmpty
-    if UIApplication.shared.isIdleTimerDisabled != awake { UIApplication.shared.isIdleTimerDisabled = awake }
+    ScreenAwake.set("recordings", awake)
     if !awake { endBackgroundTask() }
   }
 

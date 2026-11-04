@@ -26,6 +26,9 @@ struct PlayerVideoArea: View {
   /// Chat in a column beside the video (a large window held sideways): sideways swipes put it
   /// away and bring it back, as in phone landscape, instead of a swipe up for full screen.
   var sideChat: Bool = false
+  /// A large window (iPhone Duo's inner display): full screen there is the same screen, so a
+  /// swipe down pulls the player into the mini player, as in portrait (not back to chat).
+  var largeWindow: Bool = false
   /// The details panel beside the video already shows the viewer count.
   var viewersShownElsewhere = false
   /// Theater mode: the streamer's picture and name go on the video (nothing else shows them).
@@ -291,7 +294,7 @@ struct PlayerVideoArea: View {
     // Screen coordinates: the video shrinks under the finger while it's pulled.
     DragGesture(minimumDistance: 14, coordinateSpace: .global)
       .onChanged { value in
-        guard !landscape, !swipeTookKeyboard, Date().timeIntervalSince(lastPinch) > 0.5 else { return }
+        guard !landscape || largeWindow, !swipeTookKeyboard, Date().timeIntervalSince(lastPinch) > 0.5 else { return }
         let dx = value.translation.width, dy = value.translation.height
         if pulling || (dy > 8 && dy > abs(dx) * 1.2) {
           // Typing: a swipe down puts the keyboard away (letting it slide off), rather than

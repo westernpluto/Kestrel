@@ -2,6 +2,7 @@
 // the play/pause buttons, for whichever player is open. Works for both players (the low-latency
 // one isn't an AVPlayer, so nothing fills this in by itself).
 
+import AVFoundation
 import MediaPlayer
 import UIKit
 
@@ -105,6 +106,13 @@ final class NowPlaying {
       Task { @MainActor in self?.model?.skip(by: -10) }
       return .success
     }
+  }
+
+  /// Headphones taken out (or Bluetooth gone): paused, as iOS apps do, rather than carrying on
+  /// out of the speaker.
+  func pauseForLostRoute() {
+    setPaused(true)
+    ActivityLog.shared.add("Headphones disconnected: paused")
   }
 
   private func setPaused(_ paused: Bool) {
@@ -229,5 +237,40 @@ final class NowPlaying {
   /// Outside the main actor: the system asks for the picture from a background thread.
   nonisolated private static func makeArtwork(_ image: UIImage) -> MPMediaItemArtwork {
     MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+  }
+}
+
+/// Keeps the screen on while anything plays in front of you (a stream, multi-view, a recording):
+/// each asks for it under its own name, and it goes off when none does.
+@MainActor
+enum ScreenAwake {
+  private static var reasons: Set<String> = []
+
+  static func set(_ reason: String, _ on: Bool) {
+    let changed = on ? reasons.insert(reason).inserted : reasons.remove(reason) != nil
+    guard changed else { return }
+    let awake = !reasons.isEmpty
+    if UIApplication.shared.isIdleTimerDisabled != awake { UIApplication.shared.isIdleTimerDisabled = awake }
+  }
+}
+
+/// Light taps for the moments other iOS apps mark with one.
+@MainActor
+enum Haptics {
+  private static let light = UIImpactFeedbackGenerator(style: .light)
+  static func tap() { light.impactOccurred() }
+}
+
+/// Watches the audio route (see `NowPlaying.pauseForLostRoute`).
+enum AudioRouteWatch {
+  nonisolated(unsafe) private static var token: NSObjectProtocol?
+
+  static func start() {
+    guard token == nil else { return }
+    token = NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { note in
+      let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+      guard raw.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:)) == .oldDeviceUnavailable else { return }
+      MainActor.assumeIsolated { NowPlaying.shared.pauseForLostRoute() }
+    }
   }
 }

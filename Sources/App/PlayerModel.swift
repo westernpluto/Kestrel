@@ -937,7 +937,10 @@ final class PlayerModel: ObservableObject {
     isBuffering = true
   }
 
+  private lazy var awakeKey = "player-\(ObjectIdentifier(self).hashValue)"
+
   func stop() {
+    ScreenAwake.set(awakeKey, false)
     guard !stopped else { return }
     if case .video(let video) = target, position > 0, phase == .playing {
       WatchHistory.shared.save(videoID: video.id, position: position, length: duration, syncToTwitch: true)
@@ -1027,6 +1030,7 @@ final class PlayerModel: ObservableObject {
   private func tick() {
     let now = Date()
     NowPlaying.shared.update(self)
+    ScreenAwake.set(awakeKey, phase == .playing && !isPaused)
     if isLive, now.timeIntervalSince(lastInfoRefresh) > 60 {
       lastInfoRefresh = now
       Task { await refreshInfo() }
