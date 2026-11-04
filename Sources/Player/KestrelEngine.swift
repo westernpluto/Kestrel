@@ -74,6 +74,28 @@ final class KestrelEngine: NSObject {
     if #available(iOS 17.4, tvOS 17.4, *) { return displayLayer.sampleBufferRenderer.displayedPixelBuffer() != nil }
     return true
   }
+  /// The Picture in Picture copy gets frames (only while it may be needed: see KestrelController).
+  private(set) var mirrorFed = false
+
+  /// Starts or stops feeding the copy. Starting brings it straight up to the frame playing now
+  /// from the frames since the last keyframe (decoded out of sight), so a window opening right
+  /// away has the picture.
+  func feedMirror(_ on: Bool) {
+    guard let mirrorLayer, on != mirrorFed else { return }
+    mirrorFed = on
+    mirrorLayer.flush()
+    guard on else { return }
+    guard decodeInLayer, group.first?.keyframe == true else {
+      mirrorWaiting = true
+      return
+    }
+    mirrorWaiting = false
+    let showing = now
+    for earlier in group {
+      if let sample = earlier.sample(hidden: earlier.pts < showing - frameLength) { mirrorLayer.enqueue(sample) }
+    }
+  }
+
   /// Puts the Picture in Picture copy's view over the picture's spot again (set by the view).
   var placeMirror: (() -> Void)?
   /// The sound, decoded here and played through AVAudioEngine; it's also the clock (see `syncClock`).
@@ -646,7 +668,7 @@ final class KestrelEngine: NSObject {
       } else if !feedScreen(entry, hidden: hidden) {
         return
       }
-      if let mirrorLayer { feedMirror(mirrorLayer, entry, hidden: hidden) }
+      if let mirrorLayer, mirrorFed { feedMirror(mirrorLayer, entry, hidden: hidden) }
     } else {
       guard let session = decoderSession(for: format), let sample = entry.sample(hidden: false) else {
         waitingForKeyframe = true
@@ -935,7 +957,7 @@ final class KestrelEngine: NSObject {
       if displayLayer.status == .failed || displayLayer.requiresFlushToResumeDecoding { displayLayer.flush() }
       displayLayer.enqueue(sample)
     }
-    if let mirrorLayer {
+    if let mirrorLayer, mirrorFed {
       if mirrorLayer.status == .failed || mirrorLayer.requiresFlushToResumeDecoding { mirrorLayer.flush() }
       mirrorLayer.enqueue(sample)
     }

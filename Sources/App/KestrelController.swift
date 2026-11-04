@@ -70,7 +70,9 @@ final class KestrelController {
       model?.route = await session.route
       model?.qualities = videoIndices.map { PlayerModel.Quality(id: $0, label: found[$0].label) } + [PlayerModel.Quality(id: nil, label: "Auto")]
       model?.selectedQuality = start
-      let margin = ChannelMargins.margin(for: login, network: NetworkWatch.shared.memoryKey).map { min($0, LiveCatchUp.startBuffer) }
+      // Always from the least margin, as on Apple TV (starting from what the channel needed last
+      // time put the iPhone up to 0.4 s further back every start); hiccups raise it as they come.
+      let margin: Double? = nil
       // The best quality, stepped down while the connection can't carry it (a quality picked by
       // hand, or the one handed over, stays).
       let engine = KestrelEngine(rendition: start, renditions: videoIndices, auto: preferred == nil, startMargin: margin) {
@@ -127,6 +129,8 @@ final class KestrelController {
     pip = nil
     pipDelegate = nil
     callDelegate = nil
+    mirrorTokens.forEach(NotificationCenter.default.removeObserver)
+    mirrorTokens = []
     loadTask?.cancel()
     if let engine { ChannelMargins.remember(engine.catchUp.targetBuffer, for: login, network: NetworkWatch.shared.memoryKey) }
     engine?.stop()
@@ -185,11 +189,37 @@ final class KestrelController {
         self?.pictureInPictureActive = active
         self?.engine?.screenNote(active ? "window up" : "window gone")
         self?.engine?.windowUp = active
+        if !active { self?.mirrorMaybeNotNeeded() }
 
       }
     }
     pip = controller
     pipDelegate = delegate
+    // The copy for the window is only decoded when it may be needed: from the moment the app
+    // starts to go (Picture in Picture starts on its own then) until it's back and the window's
+    // gone. Decoding it all the time doubled the video decoding (1440p60 twice over).
+    let center = NotificationCenter.default
+    mirrorTokens.append(
+      center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.engine?.feedMirror(true) }
+      })
+    mirrorTokens.append(
+      center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.mirrorMaybeNotNeeded() }
+      })
+  }
+
+  private var mirrorTokens: [NSObjectProtocol] = []
+
+  /// Back in the app with no window up: the copy can stop (a moment later, the window may still be
+  /// on its way back).
+  private func mirrorMaybeNotNeeded() {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+      MainActor.assumeIsolated {
+        guard let self, UIApplication.shared.applicationState == .active, !self.pictureInPictureActive, !self.pipWanted else { return }
+        self.engine?.feedMirror(false)
+      }
+    }
   }
 
   // The kind without controls: the screen's own layers move into the window.
@@ -230,6 +260,7 @@ final class KestrelController {
 
   func togglePictureInPicture() {
     guard let pip else { return }
+    engine?.feedMirror(true)
     if pip.isPictureInPictureActive {
       pip.stopPictureInPicture()
     } else if pip.isPictureInPicturePossible {
