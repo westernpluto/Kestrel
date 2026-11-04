@@ -950,12 +950,39 @@ struct MultiviewDock: View {
   @ObservedObject var model: MultiviewModel
   var open: () -> Void
   var close: () -> Void
+  /// Pulled up by a finger (it follows, then opens multi-view past a little way, as the mini
+  /// player does). Only an offset and a slight scale: nothing re-laid out while it moves.
+  @State private var lift: CGFloat = 0
 
   var body: some View {
     HStack(spacing: 6) {
+      if model.tiles.isEmpty {
+        // Nobody in it yet: say what it is (just an arrow was easy to miss).
+        Image(systemName: "rectangle.split.2x2.fill")
+          .font(.system(size: 17, weight: .semibold))
+          .foregroundColor(.accentTeal)
+          .frame(width: 36, height: 40)
+        VStack(alignment: .leading, spacing: 0) {
+          Text("Multi-view").font(.subheadline.weight(.bold))
+          Text("Tap + on streams to add").font(.caption2).foregroundColor(.white.opacity(0.65))
+        }
+        .lineLimit(1)
+        .foregroundColor(.white)
+        .padding(.trailing, 2)
+      } else if model.tiles.count == 1 {
+        DockAvatar(tile: model.tiles[0], model: model)
+        VStack(alignment: .leading, spacing: 0) {
+          Text("Multi-view").font(.caption.weight(.bold))
+          Text("Add more with +").font(.caption2).foregroundColor(.white.opacity(0.65))
+        }
+        .lineLimit(1)
+        .foregroundColor(.white)
+      }
       // (Five pictures at most, then how many more: nine didn't fit across a phone.)
-      ForEach(model.tiles.prefix(5)) { tile in
-        DockAvatar(tile: tile, model: model)
+      if model.tiles.count > 1 {
+        ForEach(model.tiles.prefix(5)) { tile in
+          DockAvatar(tile: tile, model: model)
+        }
       }
       if model.tiles.count > 5 {
         Text("+\(model.tiles.count - 5)").font(.footnote.weight(.bold)).foregroundColor(.white.opacity(0.85))
@@ -985,7 +1012,27 @@ struct MultiviewDock: View {
     .overlay(Capsule().stroke(Color.white.opacity(0.14), lineWidth: 1))
     .shadow(color: .black.opacity(0.45), radius: 10, y: 4)
     .contentShape(Capsule())
+    .offset(y: lift)
+    .scaleEffect(1 + min(0.08, -lift / 900), anchor: .bottomTrailing)
     .onTapGesture(perform: open)
+    // Swiped up: opens multi-view, as the mini player does (the dock rides the finger first).
+    .simultaneousGesture(
+      DragGesture(minimumDistance: 12, coordinateSpace: .global)
+        .onChanged { value in
+          let up = min(0, value.translation.height)
+          // Mostly upward, and less and less the further it goes.
+          guard abs(value.translation.width) < 60 || up < -30 else { return }
+          lift = -(pow(-up, 0.85))
+        }
+        .onEnded { value in
+          let opens = value.translation.height < -50 || value.predictedEndTranslation.height < -140
+          if opens {
+            Haptics.tap()
+            open()
+          }
+          withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) { lift = 0 }
+        }
+    )
     .contextMenu {
       Button(action: open) { Label(model.running ? "Open multi-view" : "Watch them together", systemImage: "rectangle.split.2x2") }
       ForEach(model.tiles) { tile in
@@ -1082,33 +1129,68 @@ struct MultiviewTileView: View {
       openInPlayer: openInPlayer, remove: remove, others: others, swap: swap
     )
     .contextMenu {
-      Button(action: toggleSound) {
-        Label(heard ? "Mute" : "Hear it too", systemImage: heard ? "speaker.slash" : "speaker.plus")
+      // Built from plain values and redrawn only when they change: the multi-view screen fading its
+      // controls a moment after the menu opened rebuilt it once, and its text flashed.
+      TileMenu(
+        heard: heard, several: several, volume: volume, others: others.map { TileMenu.Other(id: $0.id, name: $0.name) },
+        toggleSound: toggleSound, listenOnly: listenOnly, setVolume: setVolume, makeMain: makeMain, swap: swap,
+        openInPlayer: openInPlayer, remove: remove
+      )
+      .equatable()
+    }
+  }
+}
+
+/// A multi-view picture's hold menu.
+struct TileMenu: View, Equatable {
+  struct Other: Equatable {
+    let id: String
+    let name: String
+  }
+
+  var heard: Bool
+  var several: Bool
+  var volume: Float
+  var others: [Other]
+  var toggleSound: () -> Void
+  var listenOnly: () -> Void
+  var setVolume: (Float) -> Void
+  var makeMain: () -> Void
+  var swap: (String) -> Void
+  var openInPlayer: () -> Void
+  var remove: () -> Void
+
+  static func == (a: Self, b: Self) -> Bool {
+    a.heard == b.heard && a.several == b.several && a.volume == b.volume && a.others == b.others
+  }
+
+  var body: some View {
+    Button(action: toggleSound) {
+      Label(heard ? "Mute" : "Hear it too", systemImage: heard ? "speaker.slash" : "speaker.plus")
+    }
+    if several || !heard {
+      Button(action: listenOnly) { Label("Hear only this one", systemImage: "speaker.wave.2") }
+    }
+    Picker(selection: Binding(get: { volume }, set: setVolume)) {
+      ForEach(MultiviewModel.volumeSteps, id: \.self) { step in
+        Text("\(Int(step * 100))%").tag(step)
       }
-      if several || !heard {
-        Button(action: listenOnly) { Label("Hear only this one", systemImage: "speaker.wave.2") }
-      }
-      Picker(selection: Binding(get: { volume }, set: setVolume)) {
-        ForEach(MultiviewModel.volumeSteps, id: \.self) { step in
-          Text("\(Int(step * 100))%").tag(step)
+    } label: {
+      Label("Volume", systemImage: "speaker.wave.1")
+    }
+    .pickerStyle(.menu)
+    Button(action: makeMain) { Label("Make it the big one", systemImage: "rectangle.inset.topleft.filled") }
+    if !others.isEmpty {
+      Menu {
+        ForEach(others, id: \.id) { other in
+          Button(other.name) { swap(other.id) }
         }
       } label: {
-        Label("Volume", systemImage: "speaker.wave.1")
+        Label("Swap places with…", systemImage: "arrow.left.arrow.right")
       }
-      .pickerStyle(.menu)
-      Button(action: makeMain) { Label("Make it the big one", systemImage: "rectangle.inset.topleft.filled") }
-      if !others.isEmpty {
-        Menu {
-          ForEach(others, id: \.id) { other in
-            Button(other.name) { swap(other.id) }
-          }
-        } label: {
-          Label("Swap places with…", systemImage: "arrow.left.arrow.right")
-        }
-      }
-      Button(action: openInPlayer) { Label("Watch on its own", systemImage: "play.rectangle") }
-      Button(role: .destructive, action: remove) { Label("Remove", systemImage: "xmark") }
     }
+    Button(action: openInPlayer) { Label("Watch on its own", systemImage: "play.rectangle") }
+    Button(role: .destructive, action: remove) { Label("Remove", systemImage: "xmark") }
   }
 }
 
