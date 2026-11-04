@@ -438,8 +438,19 @@ struct KestrelVideoView: UIViewRepresentable {
     /// The copy's view over the picture itself in the window: the picture's own rectangle (not the
     /// view's, with the bars around the picture: the window grew to that shape, then snapped to
     /// the picture's, a little zoom).
+    /// Where the copy is now, for the Activity log: its rectangle in the window, the video view's,
+    /// and whether this view is in a window at all.
+    var mirrorDescription: String {
+      func r(_ rect: CGRect) -> String { String(format: "%.0f,%.0f %.0fx%.0f", rect.minX, rect.minY, rect.width, rect.height) }
+      guard let window else { return "view not in a window; copy at \(r(mirrorHost.frame))" }
+      return "copy \(r(mirrorHost.frame)) in \(mirrorHost.superview === window ? "window" : "elsewhere") \(r(window.bounds)); view \(r(convert(bounds, to: window)))\(mirror?.isHidden == true ? ", copy hidden" : "")"
+    }
+
     func placeMirror() {
-      guard let window, mirrorHost.superview === window else { return }
+      guard let window, mirrorHost.superview === window else {
+        ActivityLog.shared.add("PiP copy not placed: \(window == nil ? "view not in a window" : "copy's view not in the window")")
+        return
+      }
       var local = bounds
       if !fills, let size = aspect(), bounds.width > 0, bounds.height > 0 {
         local = AVMakeRect(aspectRatio: size, insideRect: bounds)
@@ -544,6 +555,7 @@ struct KestrelVideoView: UIViewRepresentable {
     view.fills = fill
     view.placeMirror()
     engine.placeMirror = { [weak view] in view?.placeMirror() }
+    engine.describeMirror = { [weak view] in view?.mirrorDescription ?? "no video view" }
     engine.screenView = view
     engine.onScreenLayers = { [weak view, weak engine] in
       guard let view, let engine else { return }
@@ -588,6 +600,7 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
   func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
     MainActor.assumeIsolated {
       controller?.engine?.placeMirror?()
+      controller?.engine?.screenNote("opens from: \(controller?.engine?.describeMirror?() ?? "?")\(AppModel.shared.playerMinimized ? " (mini player)" : "")")
       controller?.engine?.screenHiddenForPictureInPicture = true
     }
   }
@@ -635,6 +648,7 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
           // Where the window lands: the picture as it is now (the player may have just opened up).
           engine.placeMirror?()
           engine.screenNote(engine.screenDrawing ? "picture ready: window handed back" : "picture not ready in time: window handed back")
+          engine.screenNote("lands on: \(engine.describeMirror?() ?? "?")\(AppModel.shared.playerMinimized ? " (mini player)" : "")")
           completionHandler(true)
         } else {
           DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) { MainActor.assumeIsolated { check() } }

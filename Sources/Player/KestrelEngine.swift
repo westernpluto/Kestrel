@@ -105,6 +105,8 @@ final class KestrelEngine: NSObject {
 
   /// Puts the Picture in Picture copy's view over the picture's spot again (set by the view).
   var placeMirror: (() -> Void)?
+  /// Where the copy is, for the log (set by the view).
+  var describeMirror: (() -> String)?
   /// The sound, decoded here and played through AVAudioEngine; it's also the clock (see `syncClock`).
   let audio = AudioOutput()
   /// The picture's clock: on the host clock, kept on the sound's (every screen layer runs on it).
