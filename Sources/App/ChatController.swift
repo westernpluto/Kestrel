@@ -1716,7 +1716,7 @@ struct EmotePicker: View {
                       Button {
                         onPick(emote)
                       } label: {
-                        CachedImage(url: emote.url, maxPixels: 112, contentMode: .scaleAspectFit, placeholder: nil)
+                        PickerEmoteImage(url: emote.url)
                           .frame(width: 32, height: 32)
                           .frame(maxWidth: .infinity, minHeight: 42)
                           .contentShape(Rectangle())

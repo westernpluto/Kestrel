@@ -104,6 +104,29 @@ final class ImagePipeline: @unchecked Sendable {
   /// First frames decoded ahead, one at a time, at background priority.
   private let stillQueue = DispatchQueue(label: "kestrel.images.stills", qos: .utility)
 
+  /// A picture's first frame, fetched (from the disk cache when it's there) and decoded alone:
+  /// for the emote picker, where a channel can have well over a thousand. Cancelled with the task
+  /// (a cell scrolled past stops asking), so scrolling fast doesn't leave hundreds of downloads and
+  /// whole-animation decodes queued ahead of the cells in view, as it did.
+  func stillImage(_ url: URL, maxPixels: CGFloat) async -> UIImage? {
+    if let full = cached(url, maxPixels: maxPixels) { return full.images?.first ?? full }
+    if let still = still(url, maxPixels: maxPixels) { return still }
+    var request = URLRequest(url: url)
+    request.cachePolicy = .returnCacheDataElseLoad
+    guard let (data, response) = try? await session.data(for: request),
+      ((response as? HTTPURLResponse)?.statusCode ?? 0) == 200, !Task.isCancelled
+    else { return nil }
+    let key = Self.key(url, maxPixels)
+    let image = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+      guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+        let frame = Self.frame(source, 0, maxPixels: maxPixels)
+      else { return nil }
+      return UIImage(cgImage: frame, scale: 2, orientation: .up)
+    }.value
+    if let image { stills.setObject(image, forKey: key as NSString, cost: Self.cost(image)) }
+    return image
+  }
+
   /// Only the first frame is in memory so far; `load` hands out the whole animation when it's ready.
   func isUpgrading(_ url: URL, maxPixels: CGFloat? = nil) -> Bool {
     lock.lock()
@@ -623,5 +646,31 @@ struct Avatar: View {
       fallback: url.flatMap(URL.init(string:)))
       .frame(width: size, height: size)
       .clipShape(Circle())
+  }
+}
+
+/// An emote in the picker: its first frame, fetched only while its cell is on screen; the moving
+/// picture where chat has already decoded it.
+struct PickerEmoteImage: View {
+  let url: URL
+  @State private var still: UIImage?
+
+  var body: some View {
+    if let full = ImagePipeline.shared.cached(url, maxPixels: 112), !ImagePipeline.shared.isUpgrading(url, maxPixels: 112),
+      (full.images?.count ?? 0) > 1
+    {
+      CachedImage(url: url, maxPixels: 112, contentMode: .scaleAspectFit, placeholder: nil)
+    } else {
+      Group {
+        if let still {
+          Image(uiImage: still).resizable().interpolation(.high).scaledToFit()
+        } else {
+          Color.clear
+        }
+      }
+      .task(id: url) {
+        if still == nil { still = await ImagePipeline.shared.stillImage(url, maxPixels: 112) }
+      }
+    }
   }
 }
