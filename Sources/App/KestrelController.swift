@@ -199,6 +199,12 @@ final class KestrelController {
     }
     pip = controller
     pipDelegate = delegate
+    // A picture in the copy from the start (fed until it's had a few seconds of video, then held):
+    // without one, swiping home right after opening a stream didn't start Picture in Picture.
+    engine.feedMirror(true)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+      MainActor.assumeIsolated { self?.mirrorMaybeNotNeeded() }
+    }
     // The copy for the window is only decoded when it may be needed: from the moment the app
     // starts to go (Picture in Picture starts on its own then) until it's back and the window's
     // gone. Decoding it all the time doubled the video decoding (1440p60 twice over).

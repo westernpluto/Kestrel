@@ -83,8 +83,11 @@ final class KestrelEngine: NSObject {
   func feedMirror(_ on: Bool) {
     guard let mirrorLayer, on != mirrorFed else { return }
     mirrorFed = on
-    mirrorLayer.flush()
+    // Stopped, it keeps the frame it shows: iOS only offers Picture in Picture (swiping home)
+    // for a copy with a picture, and an empty one made the first swipe after opening a stream
+    // just leave the app.
     guard on else { return }
+    mirrorLayer.flush()
     guard decodeInLayer, group.first?.keyframe == true else {
       mirrorWaiting = true
       return
