@@ -190,6 +190,10 @@ final class PictureCompositor: @unchecked Sendable {
 final class MultiviewControlsPiP: NSObject, AVPictureInPictureControllerDelegate, AVPictureInPictureSampleBufferPlaybackDelegate {
   private weak var model: MultiviewModel?
   private let layer = AVSampleBufferDisplayLayer()
+  /// Over it on screen: the window's picture (laid out for 16:9, not as the screen is) showed
+  /// through between the streams, a second multi-view behind the first. Covered, it's still on
+  /// screen as far as Picture in Picture is concerned, as the single stream's copy is.
+  private let cover = CALayer()
   private lazy var compositor = PictureCompositor(layer: layer)
   private var controller: AVPictureInPictureController?
   private weak var source: UIView?
@@ -207,6 +211,7 @@ final class MultiviewControlsPiP: NSObject, AVPictureInPictureControllerDelegate
     super.init()
     layer.videoGravity = .resizeAspect
     layer.backgroundColor = UIColor.black.cgColor
+    cover.backgroundColor = UIColor.black.cgColor
   }
 
   // MARK: Setup
@@ -222,6 +227,7 @@ final class MultiviewControlsPiP: NSObject, AVPictureInPictureControllerDelegate
     controller = nil
     stopDrawing()
     layer.removeFromSuperlayer()
+    cover.removeFromSuperlayer()
     guard on, let source, AVPictureInPictureController.isPictureInPictureSupported() else {
       unhookAll()
       return
@@ -230,6 +236,7 @@ final class MultiviewControlsPiP: NSObject, AVPictureInPictureControllerDelegate
     // window can open by itself when the app is left.
     placeLayer(in: source)
     source.layer.insertSublayer(layer, at: 0)
+    source.layer.insertSublayer(cover, above: layer)
     let pip = AVPictureInPictureController(contentSource: .init(sampleBufferDisplayLayer: layer, playbackDelegate: self))
     pip.canStartPictureInPictureAutomaticallyFromInline = true
     // Live: no skipping back and forth (the window showed 10-second skip buttons).
@@ -252,10 +259,11 @@ final class MultiviewControlsPiP: NSObject, AVPictureInPictureControllerDelegate
   private func placeLayer(in source: UIView) {
     let bounds = source.bounds
     let frame = AVMakeRect(aspectRatio: PictureCompositor.size, insideRect: bounds)
-    guard layer.frame != frame else { return }
+    guard layer.frame != frame || cover.frame != bounds else { return }
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     layer.frame = frame.isEmpty ? bounds : frame
+    cover.frame = bounds
     CATransaction.commit()
   }
 
