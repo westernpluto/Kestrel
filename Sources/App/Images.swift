@@ -239,7 +239,8 @@ final class ImagePipeline: @unchecked Sendable {
 
   /// Decodes still and animated images with ImageIO.
   static func decode(_ data: Data, maxPixels: CGFloat?) -> UIImage? {
-    guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+    // (Cached while it's worked through: each frame of an animation builds on the one before.)
+    guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: true] as CFDictionary) else {
       return UIImage(data: data)
     }
     let count = CGImageSourceGetCount(source)
@@ -255,8 +256,15 @@ final class ImagePipeline: @unchecked Sendable {
     let step = max(1, Int((Double(limit) / 60).rounded(.up)))
     var frames: [UIImage] = []
     var total: Double = 0
+    // Frames decoded in order, at full size, and scaled down here: an animated WebP (most 7TV and
+    // BTTV emotes) stores each frame as a change to the one before, and asking ImageIO for a
+    // scaled copy of each frame made it decode the animation again from the start for every one,
+    // which slowed long animations to a crawl in busy chat. In order, each frame builds on the
+    // last.
+    let options = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
     for index in stride(from: 0, to: limit, by: step) {
-      guard let image = frame(source, index, maxPixels: maxPixels) else { continue }
+      guard let full = CGImageSourceCreateImageAtIndex(source, index, options) else { continue }
+      let image = scaled(full, maxPixels: maxPixels)
       var delay = 0.0
       for skipped in index..<min(index + step, limit) { delay += frameDelay(source, skipped) }
       total += delay
@@ -266,6 +274,22 @@ final class ImagePipeline: @unchecked Sendable {
     }
     guard !frames.isEmpty else { return UIImage(data: data) }
     return UIImage.animatedImage(with: frames, duration: total > 0 ? total : Double(frames.count) * 0.05)
+  }
+
+  /// A frame no bigger than `maxPixels` on its longer side (as is if it already fits).
+  private static func scaled(_ image: CGImage, maxPixels: CGFloat?) -> CGImage {
+    guard let maxPixels, CGFloat(max(image.width, image.height)) > maxPixels else { return image }
+    let scale = maxPixels / CGFloat(max(image.width, image.height))
+    let width = max(1, Int((CGFloat(image.width) * scale).rounded()))
+    let height = max(1, Int((CGFloat(image.height) * scale).rounded()))
+    guard
+      let context = CGContext(
+        data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+    else { return image }
+    context.interpolationQuality = .high
+    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    return context.makeImage() ?? image
   }
 
   private static func frameDelay(_ source: CGImageSource, _ index: Int) -> Double {
