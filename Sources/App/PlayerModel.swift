@@ -249,11 +249,6 @@ final class PlayerModel: ObservableObject {
   }
 
   /// The tallest picture worth fetching for how big it's shown (nil: any).
-  /// The player became the mini player or full size again (which Picture in Picture opens).
-  func setMinimized(_ minimized: Bool) {
-    kestrel?.setMinimized(minimized)
-  }
-
   func setMaxHeight(_ height: Int?) {
     guard height != tileMaxHeight else { return }
     tileMaxHeight = height
