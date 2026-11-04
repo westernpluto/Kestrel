@@ -1094,7 +1094,6 @@ final class KestrelEngine: NSObject {
       return
     }
     checkTimestamps(ahead: ahead)
-    let latency = self.latency
     // Far behind (a long dropout, the background): start over at live. Judged by what's in hand
     // (judged by the stream's timestamps, a channel with them half a minute off started over
     // every quarter second and never got going).
@@ -1102,8 +1101,12 @@ final class KestrelEngine: NSObject {
       restart()
       return
     }
+    // Steered by what's in hand alone, measured here, never by the stream's own clock (which some
+    // channels have off by seconds either way): how far from live it plays is what's in hand plus
+    // the video's delay on the way, and only the first part is the player's to change. The
+    // latency shown still comes from the clock (corrected when it's clearly off).
     let rate = catchUp.update(
-      buffer: ahead, latency: latency ?? ahead + 1, playing: true, position: Double(now) / Double(Self.clock),
+      buffer: ahead, latency: ahead + Self.deliveryDelay, playing: true, position: Double(now) / Double(Self.clock),
       maxRate: Self.maxRate)
     if speed != rate { setSpeed(rate) }
     syncClock()
