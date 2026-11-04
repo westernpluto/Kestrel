@@ -538,6 +538,9 @@ final class KestrelEngine: NSObject {
   /// (`trough`), not the reading of the moment: steered by the moment, every run-down looked like
   /// a hiccup, the margin kept growing and the stream drifted further and further behind.
   private(set) var wholeSegments = false
+  /// This stream has shown prefetch hints (it's on low latency), and playlists in a row without.
+  private var prefetchSeen = false
+  private var playlistsWithoutPrefetch = 0
   /// One segment's worth (Twitch's are two seconds).
   static let segmentLength = 2.0
   private var aheadHistory: [(at: Date, ahead: Double)] = []
@@ -553,9 +556,24 @@ final class KestrelEngine: NSObject {
   private func poll() async {
     while running, !Task.isCancelled {
       if let text = await playlist(rendition), running {
-        // No prefetch hints: a channel not on Twitch's low latency (or an ad served as is). Its
-        // video comes two seconds at a time, once each segment is finished.
-        if text.contains("#EXTINF") { wholeSegments = !text.contains("#EXT-X-TWITCH-PREFETCH:") }
+        // No prefetch hints: a channel not on Twitch's low latency. Its video comes two seconds at
+        // a time, once each segment is finished. A low-latency channel's playlist can lack them
+        // too, for a while (an ad break, served without them on purpose; a moment of Twitch's):
+        // judged by one playlist, a low-latency stream was taken for one that isn't and started
+        // further back, keeping more in hand. So only a channel that hasn't shown any in this
+        // session, over four playlists in a row (about three seconds), counts as not low latency.
+        if text.contains("#EXTINF") {
+          if text.contains("#EXT-X-TWITCH-PREFETCH:") {
+            prefetchSeen = true
+            playlistsWithoutPrefetch = 0
+            wholeSegments = false
+          } else if !text.contains(",Amazon") && !text.localizedCaseInsensitiveContains("stitched") {
+            // (A playlist with ad segments in it doesn't count: an ad at the start of a low-latency
+            // stream is served without the hints too.)
+            playlistsWithoutPrefetch += 1
+            if !prefetchSeen, playlistsWithoutPrefetch >= 4 { wholeSegments = true }
+          }
+        }
         let planned = planner.plan(text)
         for segment in planned { begin(segment) }
       }
