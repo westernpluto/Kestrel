@@ -359,6 +359,29 @@ final class KeyboardObserver: ObservableObject {
 
 // MARK: - Layout
 
+/// The window's size and insets from the last time the app was in front (see PlayerScreen).
+final class LayoutHold {
+  private var size: CGSize?
+  private var insets = EdgeInsets()
+  private var logged: String?
+
+  func take(_ measured: (size: CGSize, insets: EdgeInsets), active: Bool) -> (size: CGSize, insets: EdgeInsets) {
+    if active || size == nil {
+      size = measured.size
+      insets = measured.insets
+      return measured
+    }
+    if let size, size != measured.size {
+      let note = "\(Int(measured.size.width))x\(Int(measured.size.height))"
+      if note != logged {
+        logged = note
+        ActivityLog.shared.add("Player: window \(note) while away (kept \(Int(size.width))x\(Int(size.height)))")
+      }
+    }
+    return (size ?? measured.size, insets)
+  }
+}
+
 /// Where everything goes, in the coordinates of the safe area (frames can reach past it to the
 /// screen edges).
 struct PlayerLayout: Equatable {
@@ -1040,6 +1063,8 @@ struct PlayerScreen: View {
   @State private var folded: Bool
 
   static let spring = Animation.spring(response: 0.38, dampingFraction: 0.86)
+  @Environment(\.scenePhase) private var scenePhase
+  @State private var hold = LayoutHold()
 
   init(target: PlaybackTarget, key: String) {
     self.target = target
@@ -1052,10 +1077,15 @@ struct PlayerScreen: View {
 
   var body: some View {
     GeometryReader { geometry in
-      let insets = Self.insets(geometry)
-      let landscape = geometry.size.width > geometry.size.height
-      let screenWidth = geometry.size.width + insets.leading + insets.trailing
-      let screenHeight = geometry.size.height + insets.top + insets.bottom
+      // Laid out by the window as it was while the app was in front until it's in front again:
+      // coming back from Picture in Picture, iOS hands the app passing sizes, and the video
+      // jumped to full screen and bounced back beside chat.
+      let measured = (size: geometry.size, insets: Self.insets(geometry))
+      let held = hold.take(measured, active: scenePhase == .active)
+      let insets = held.insets
+      let landscape = held.size.width > held.size.height
+      let screenWidth = held.size.width + insets.leading + insets.trailing
+      let screenHeight = held.size.height + insets.top + insets.bottom
       let large = OrientationLock.isLarge(CGSize(width: screenWidth, height: screenHeight))
       let chatOpen = folded || (large ? !largeFullScreen : landscape && landscapeChat)
       // A large window held sideways hides the status bar while the player is open, and iPhone
@@ -1103,7 +1133,7 @@ struct PlayerScreen: View {
       ZStack(alignment: .topLeading) {
         // Backdrop: fades away as the player shrinks, revealing the app.
         Color.black
-          .frame(width: screenWidth, height: geometry.size.height + insets.top + insets.bottom)
+          .frame(width: screenWidth, height: screenHeight)
           .contentShape(Rectangle())
           // The black around the video (theater mode's bars) pulls the player down too.
           .gesture(
