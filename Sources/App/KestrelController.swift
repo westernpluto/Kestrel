@@ -70,7 +70,9 @@ final class KestrelController {
       let start = preferred ?? best
       model?.route = await session.route
       model?.qualities = videoIndices.map { PlayerModel.Quality(id: $0, label: found[$0].label) } + [PlayerModel.Quality(id: nil, label: "Auto")]
-      model?.selectedQuality = start
+      // Auto unless a quality was picked (it moves between them: showing the best as picked was
+      // wrong whenever it had stepped down).
+      model?.selectedQuality = preferred == nil ? nil : start
       // Always from the least margin, as on Apple TV (starting from what the channel needed last
       // time put the iPhone up to 0.4 s further back every start); hiccups raise it as they come.
       let margin: Double? = nil
@@ -215,6 +217,13 @@ final class KestrelController {
     let inAd = latency.map { adTimeline.covers(Date().addingTimeInterval(-$0)) } ?? adTimeline.isActive
     if inAd != model.coveringAd { model.coveringAd = inAd }
     engine.setMuted(inAd || userMuted)
+    // Auto says what it's playing now ("Auto · 720p60"), in the menu and on its button.
+    if engine.autoQuality, variants.indices.contains(engine.rendition), let last = model.qualities.last, last.id == nil {
+      let label = "Auto · \(variants[engine.rendition].label)"
+      if last.label != label {
+        model.qualities[model.qualities.count - 1] = PlayerModel.Quality(id: nil, label: label)
+      }
+    }
   }
 
   private var pendingMaxHeight: Int?
