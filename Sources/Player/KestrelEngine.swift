@@ -448,6 +448,8 @@ final class KestrelEngine: NSObject {
       playlistsWithoutPrefetch = 0
     } else {
       catchUp.resumeLearning()
+      // (The surplus shows once Twitch's own segments are coming in: looked for for a few seconds.)
+      jumpAfterAdUntil = Date().addingTimeInterval(10)
     }
   }
 
@@ -1200,13 +1202,38 @@ final class KestrelEngine: NSObject {
     // (Whole segments: a segment's worth on top, to last until the next one is listed.)
     let surplus = ahead - catchUp.targetBuffer - (wholeSegments ? Self.segmentLength : 0)
     guard surplus > 0.12, surplus < 4 else { return false }
-    let to = now + Int64(surplus * Double(Self.clock))
+    jump(by: surplus)
+    ActivityLog.shared.add(String(format: "Kestrel player: skipped %.2f s ahead after the start (no catching up)", surplus))
+    return true
+  }
+
+  /// Moves the playhead straight ahead (picture and sound together), instead of catching up by
+  /// playing faster.
+  private func jump(by seconds: Double) {
+    let to = now + Int64(seconds * Double(Self.clock))
     CMTimebaseSetTime(videoClock, time: CMTime(value: to, timescale: Self.clock))
     audio.flush()
     for (frame, time) in audioHistory where time >= to { enqueueAudio(frame, time: time, refill: true) }
     if speed > 0 { audio.play() }
-    ActivityLog.shared.add(String(format: "Kestrel player: skipped %.2f s ahead after the start (no catching up)", surplus))
-    return true
+    catchUp.hold(for: 2)
+  }
+
+  /// Just after an ad break: Twitch's own stream is back, further ahead than the ad-free copy
+  /// played during the break (it comes from a server far away). The ad's end is a cut anyway, so
+  /// the gap is jumped over there rather than caught up by playing faster for a while after.
+  private var jumpAfterAdUntil: Date?
+
+  private func jumpAfterAd(ahead: Double) {
+    guard let until = jumpAfterAdUntil else { return }
+    guard Date() < until else {
+      jumpAfterAdUntil = nil
+      return
+    }
+    let surplus = ahead - catchUp.targetBuffer - (wholeSegments ? Self.segmentLength : 0)
+    guard surplus > 0.5, surplus < 15 else { return }
+    jumpAfterAdUntil = nil
+    jump(by: surplus)
+    ActivityLog.shared.add(String(format: "Kestrel player: back from the ad, skipped %.2f s ahead to live (no catching up)", surplus))
   }
 
   /// The segment being made has sent what it already had: its video now comes in at about the
@@ -1332,6 +1359,7 @@ final class KestrelEngine: NSObject {
     learnDelivery(ahead: ahead)
     checkPace(ahead: ahead)
     let skipped = skipStartSurplus(ahead: ahead)
+    if !skipped, startSkipDone { jumpAfterAd(ahead: ahead) }
     if settling, startSkipDone {
       settling = false
       audio.setMuted(muted)
