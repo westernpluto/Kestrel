@@ -86,7 +86,9 @@ final class MultiviewModel: ObservableObject, Identifiable {
     player.pictureInPictureAllowed = channel.id == selectedID
     player.setMuted(!heard)
     if let volume = volumes[channel.id] { player.setVolume(volume) }
-    if hidden { player.setMaxHeight(Self.hiddenHeight) }
+    // Small until its place on screen is known (they all started at 1080p, six at once, before
+    // being fitted: a rush that crowded out chat's emotes); fitted to its size right after.
+    player.setMaxHeight(hidden ? Self.hiddenHeight : 480)
     return player
   }
 

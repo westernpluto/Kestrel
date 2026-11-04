@@ -224,6 +224,9 @@ final class PlayerModel: ObservableObject {
   private func startKestrel(_ channel: Channel) {
     let controller = KestrelController(login: channel.login, model: self)
     kestrel = controller
+    // (A cap set before it started, multi-view's above all, goes in from the start: it was lost,
+    // and every tile opened at 1080p.)
+    if let tileMaxHeight { controller.setMaxHeight(tileMaxHeight) }
     controller.start()
     if userMuted { controller.setMuted(true) }
     if volume < 1 { controller.setVolume(volume) }

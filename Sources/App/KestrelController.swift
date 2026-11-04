@@ -127,7 +127,7 @@ final class KestrelController {
       if let cap = pendingMaxHeight { setMaxHeight(cap) }
       model?.kestrelEngineReady()
       engine.start()
-      ActivityLog.shared.add("Kestrel player: \(login) at \(found[start].label)")
+      ActivityLog.shared.add("Kestrel player: \(login) at \(found.indices.contains(engine.rendition) ? found[engine.rendition].label : found[start].label)")
     } catch StreamSession.StartError.offline {
       model?.phase = .offline
     } catch {

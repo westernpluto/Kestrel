@@ -99,7 +99,7 @@ final class ChatController: ObservableObject {
     let channel = self.channel
     let replay = isReplay
     Task {
-      let http = URLSessionHTTPClient(timeout: 10)
+      let http = URLSessionHTTPClient(timeout: 25)
       async let history = replay ? [] : ThirdPartyEmotes.recentMessages(login: channel.login, http: http)
       async let badgeMap = TwitchAPI.shared.badges(channelID: channel.id)
       async let emoteSets = ThirdPartyEmotes.load(channelID: channel.id, http: http)
@@ -117,6 +117,7 @@ final class ChatController: ObservableObject {
       thirdParty = emotes.byName
       rebuildEmoteSections()
       onUpdate(true)
+      if !emotes.complete { retryEmotes(attempt: 1) }
       // The channel's own emotes' pictures fetched ahead (a few dozen), so the picker and chat
       // show them at once rather than filling in one by one.
       // (Only downloaded, not decoded: see `prefetch`.)
@@ -130,6 +131,30 @@ final class ChatController: ObservableObject {
     }
     loadTwitchEmotes()
     connect()
+  }
+
+  /// A list of emotes didn't come (a timeout, a server error): asked for again a little later,
+  /// a few times, and the chat redrawn with what it brings (until then those emotes show as words).
+  private func retryEmotes(attempt: Int) {
+    let channel = self.channel
+    Task { [weak self] in
+      try? await Task.sleep(nanoseconds: UInt64(6 * attempt) * 1_000_000_000)
+      guard let self, self.running else { return }
+      let emotes = await ThirdPartyEmotes.load(channelID: channel.id, http: URLSessionHTTPClient(timeout: 25))
+      guard self.running else { return }
+      if emotes.byName.count > self.thirdParty.count {
+        self.thirdPartySets = emotes
+        self.thirdParty = emotes.byName
+        self.rebuildEmoteSections()
+        self.onUpdate(true)
+        ActivityLog.shared.add("Chat (\(channel.name)): emotes that didn't load at first are in now")
+      }
+      if !emotes.complete, attempt < 4 {
+        self.retryEmotes(attempt: attempt + 1)
+      } else if !emotes.complete {
+        ActivityLog.shared.add("Chat (\(channel.name)): an emote list (7TV, BTTV or FFZ) couldn't be loaded")
+      }
+    }
   }
 
   // MARK: VOD chat replay

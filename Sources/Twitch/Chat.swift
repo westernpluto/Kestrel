@@ -530,6 +530,8 @@ struct ThirdPartyEmoteSets: Sendable {
   var channel: [Section] = []
   var global: [Section] = []
   var byName: [String: URL] = [:]
+  /// Every list came (else the chat tries again shortly for the rest).
+  var complete = true
 }
 
 /// Emote sets fetched lately, kept in memory: the global ones once a session (half an hour),
@@ -538,32 +540,34 @@ struct ThirdPartyEmoteSets: Sendable {
 actor EmoteSetCache {
   static let shared = EmoteSetCache()
   typealias Sets = (seventv: [String: URL], bttv: [String: URL], ffz: [String: URL])
+  /// The sets, and whether every one of them came (only complete ones are kept).
+  typealias Loaded = (sets: Sets, complete: Bool)
   private var globals: (sets: Sets, at: Date)?
-  private var globalsTask: Task<Sets, Never>?
+  private var globalsTask: Task<Loaded, Never>?
   private var channels: [String: (sets: Sets, at: Date)] = [:]
-  private var channelTasks: [String: Task<Sets, Never>] = [:]
+  private var channelTasks: [String: Task<Loaded, Never>] = [:]
 
-  func globals(_ load: @escaping @Sendable () async -> Sets) async -> Sets {
-    if let globals, Date().timeIntervalSince(globals.at) < 1800 { return globals.sets }
+  func globals(_ load: @escaping @Sendable () async -> Loaded) async -> Loaded {
+    if let globals, Date().timeIntervalSince(globals.at) < 1800 { return (globals.sets, true) }
     if let globalsTask { return await globalsTask.value }
     let task = Task { await load() }
     globalsTask = task
-    let sets = await task.value
+    let loaded = await task.value
     globalsTask = nil
-    // (Nothing at all came back: not kept, so the next chat tries again.)
-    if !(sets.seventv.isEmpty && sets.bttv.isEmpty && sets.ffz.isEmpty) { globals = (sets, Date()) }
-    return sets
+    // (Something didn't come: not kept, so the next try fetches it again.)
+    if loaded.complete { globals = (loaded.sets, Date()) }
+    return loaded
   }
 
-  func channel(_ id: String, _ load: @escaping @Sendable () async -> Sets) async -> Sets {
-    if let cached = channels[id], Date().timeIntervalSince(cached.at) < 600 { return cached.sets }
+  func channel(_ id: String, _ load: @escaping @Sendable () async -> Loaded) async -> Loaded {
+    if let cached = channels[id], Date().timeIntervalSince(cached.at) < 600 { return (cached.sets, true) }
     if let task = channelTasks[id] { return await task.value }
     let task = Task { await load() }
     channelTasks[id] = task
-    let sets = await task.value
+    let loaded = await task.value
     channelTasks[id] = nil
-    channels[id] = (sets, Date())
-    return sets
+    if loaded.complete { channels[id] = (loaded.sets, Date()) }
+    return loaded
   }
 }
 
@@ -573,13 +577,15 @@ enum ThirdPartyEmotes {
       async let seventv = fetch(URL(string: "https://7tv.io/v3/emote-sets/global")!, http) { parse7TV($0["emotes"]) }
       async let bttv = fetch(URL(string: "https://api.betterttv.net/3/cached/emotes/global")!, http) { parseBTTV($0.array) }
       async let ffz = fetch(URL(string: "https://api.frankerfacez.com/v1/set/global")!, http) { parseFFZ($0["sets"]) }
-      return await (seventv, bttv, ffz)
+      let (a, b, c) = await (seventv, bttv, ffz)
+      return ((a ?? [:], b ?? [:], c ?? [:]), a != nil && b != nil && c != nil)
     }
     var channel7TV: [String: URL] = [:]
     var channelBTTV: [String: URL] = [:]
     var channelFFZ: [String: URL] = [:]
+    var channelComplete = true
     if let channelID, !channelID.isEmpty {
-      (channel7TV, channelBTTV, channelFFZ) = await EmoteSetCache.shared.channel(channelID) {
+      let loaded = await EmoteSetCache.shared.channel(channelID) {
         async let a = fetch(URL(string: "https://7tv.io/v3/users/twitch/\(channelID)")!, http) {
           parse7TV($0["emote_set"]["emotes"])
         }
@@ -589,11 +595,16 @@ enum ThirdPartyEmotes {
         async let c = fetch(URL(string: "https://api.frankerfacez.com/v1/room/id/\(channelID)")!, http) {
           parseFFZ($0["sets"])
         }
-        return await (a, b, c)
+        let (x, y, z) = await (a, b, c)
+        return ((x ?? [:], y ?? [:], z ?? [:]), x != nil && y != nil && z != nil)
       }
+      (channel7TV, channelBTTV, channelFFZ) = loaded.sets
+      channelComplete = loaded.complete
     }
-    let globals = await globalSets
+    let globalLoaded = await globalSets
+    let globals = globalLoaded.sets
     var result = ThirdPartyEmoteSets()
+    result.complete = channelComplete && globalLoaded.complete
     // Lowest priority first; channel 7TV wins on name clashes.
     for map in [globals.2, globals.1, globals.0, channelFFZ, channelBTTV, channel7TV] {
       result.byName.merge(map) { _, new in new }
@@ -610,13 +621,23 @@ enum ThirdPartyEmotes {
     return result
   }
 
-  private static func fetch(_ url: URL, _ http: HTTPClient, _ parse: (JSONValue) -> [String: URL]) async -> [String: URL] {
-    var request = URLRequest(url: url)
-    request.timeoutInterval = 10
-    guard let (data, response) = try? await http.data(for: request), response.statusCode == 200,
-      let object = try? JSONSerialization.jsonObject(with: data)
-    else { return [:] }
-    return parse(JSONValue(object))
+  /// One emote list: its emotes, empty when the channel has none there (404), nil when it couldn't
+  /// be fetched (a timeout, a server error), tried twice. (A failed fetch counted as "no emotes",
+  /// was kept for ten minutes, and the channel's emotes showed as words, e.g. with six streams'
+  /// video filling the connection in multi-view.)
+  private static func fetch(_ url: URL, _ http: HTTPClient, _ parse: (JSONValue) -> [String: URL]) async -> [String: URL]? {
+    for attempt in 1...2 {
+      var request = URLRequest(url: url)
+      request.timeoutInterval = attempt == 1 ? 15 : 25
+      if let (data, response) = try? await http.data(for: request) {
+        if response.statusCode == 404 { return [:] }
+        if response.statusCode == 200, let object = try? JSONSerialization.jsonObject(with: data) {
+          return parse(JSONValue(object))
+        }
+      }
+      if attempt == 1 { try? await Task.sleep(nanoseconds: 1_500_000_000) }
+    }
+    return nil
   }
 
   static func parse7TV(_ emotes: JSONValue) -> [String: URL] {
