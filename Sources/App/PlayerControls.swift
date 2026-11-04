@@ -573,9 +573,9 @@ struct PlayerControls: View {
       // UIKit's AirPlay button takes touches whatever SwiftUI says: only there while the controls
       // show (hidden in the mini player, it caught taps meant for the app beside it).
       if visible {
-        AirPlayButton().frame(width: 40, height: 40)
+        AirPlayButton().frame(width: 44, height: 44)
       } else {
-        Color.clear.frame(width: 40, height: 40)
+        Color.clear.frame(width: 44, height: 44)
       }
       if AVPictureInPictureController.isPictureInPictureSupported() {
         button(model.pictureInPictureActive ? "pip.exit" : "pip.enter", label: "Picture in Picture") {
@@ -865,7 +865,7 @@ struct PlayerControls: View {
       Image(systemName: icon)
         .font(.system(size: 18, weight: .semibold))
         .foregroundColor(highlighted ? .accentTeal : .white)
-        .frame(width: 40, height: 40)
+        .frame(width: 44, height: 44)
         .contentShape(Rectangle())
     }
     .buttonStyle(PressableStyle(scale: 0.85))
@@ -929,17 +929,18 @@ struct SeekBar: View {
       let fraction = duration > 0 ? min(1, max(0, shown / duration)) : 0
       let active = dragTime != nil
       ZStack(alignment: .leading) {
-        Capsule().fill(Color.white.opacity(0.28)).frame(height: active ? 6 : 3)
-        Capsule().fill(Color.accentTeal).frame(width: max(0, width * fraction), height: active ? 6 : 3)
+        Capsule().fill(Color.white.opacity(0.28)).frame(height: active ? 8 : 4)
+        Capsule().fill(Color.accentTeal).frame(width: max(0, width * fraction), height: active ? 8 : 4)
         if duration > 0, !marks.isEmpty {
           MarkStrip(marks: marks, duration: duration)
-            .frame(width: width, height: active ? 6 : 3)
+            .frame(width: width, height: active ? 8 : 4)
             .allowsHitTesting(false)
         }
+        // Big enough to see and grab (the whole bar's height takes the touch).
         Circle().fill(Color.white)
-          .frame(width: active ? 16 : 11, height: active ? 16 : 11)
+          .frame(width: active ? 24 : 17, height: active ? 24 : 17)
           .shadow(color: .black.opacity(0.4), radius: 2)
-          .offset(x: width * fraction - (active ? 8 : 5.5))
+          .offset(x: width * fraction - (active ? 12 : 8.5))
       }
       .frame(width: width, height: geometry.size.height)
       .animation(active ? nil : .linear(duration: 0.5), value: position)
@@ -977,7 +978,7 @@ struct SeekBar: View {
         }
       }
     }
-    .frame(height: 40)
+    .frame(height: 46)
   }
 }
 
@@ -1347,7 +1348,7 @@ struct ChatModeMenu: View, Equatable {
       Image(systemName: current == .off ? "bubble.left" : "bubble.left.fill")
         .font(.system(size: 18, weight: .semibold))
         .foregroundColor(current == .off ? .white : .accentTeal)
-        .frame(width: 40, height: 40)
+        .frame(width: 44, height: 44)
         .contentShape(Rectangle())
     }
     .accessibilityLabel("Chat")
@@ -1478,7 +1479,7 @@ struct PlayerSettingsMenu: View, Equatable {
     } label: {
       Image(systemName: "gearshape.fill")
         .font(.system(size: 18, weight: .semibold))
-        .frame(width: 40, height: 40)
+        .frame(width: 44, height: 44)
         .contentShape(Rectangle())
     }
     .accessibilityLabel("Settings")

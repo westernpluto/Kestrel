@@ -1564,7 +1564,7 @@ struct MiniPlayerOverlay: View {
         } label: {
           Image(systemName: model.isPaused ? "play.fill" : "pause.fill")
             .font(.system(size: 17, weight: .bold))
-            .frame(width: 40, height: 36)
+            .frame(width: 46, height: 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableStyle(scale: 0.85))
@@ -1573,7 +1573,7 @@ struct MiniPlayerOverlay: View {
         Button(action: close) {
           Image(systemName: "xmark")
             .font(.system(size: 16, weight: .bold))
-            .frame(width: 40, height: 36)
+            .frame(width: 46, height: 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableStyle(scale: 0.85))

@@ -543,8 +543,13 @@ struct MultiviewScreen: View {
             setVolume: { model.setVolume($0, for: tile.id) },
             makeMain: {
               withAnimation(Self.spring) {
-                model.select(tile.id)
-                focus = true
+                // Double-tapping the big one goes back to equal sizes; any other becomes the big one.
+                if focus, tile.id == model.selectedID {
+                  focus = false
+                } else {
+                  model.select(tile.id)
+                  focus = true
+                }
               }
               showChrome()
             },
@@ -854,7 +859,7 @@ struct MultiviewScreen: View {
       Image(systemName: icon)
         .font(.system(size: 17, weight: .semibold))
         .foregroundColor(highlighted ? .accentTeal : .white)
-        .frame(width: 40, height: 36)
+        .frame(width: 44, height: 44)
         .contentShape(Rectangle())
         .shadow(color: .black.opacity(0.5), radius: 3)
     }
@@ -960,9 +965,20 @@ struct MultiviewDock: View {
         .font(.system(size: model.running ? 13 : 14, weight: .bold))
         .foregroundColor(model.running ? .white.opacity(0.8) : .accentTeal)
         .frame(width: 26, height: 40)
+      // Closes it in one tap (holding the dock or opening multi-view to close it was a chore).
+      Rectangle().fill(Color.white.opacity(0.18)).frame(width: 1, height: 26)
+      Button(action: close) {
+        Image(systemName: "xmark")
+          .font(.system(size: 14, weight: .bold))
+          .foregroundColor(.white.opacity(0.85))
+          .frame(width: 40, height: 44)
+          .contentShape(Rectangle())
+      }
+      .buttonStyle(PressableStyle(scale: 0.85))
+      .accessibilityLabel("Close multi-view")
     }
     .padding(.leading, 6)
-    .padding(.trailing, 4)
+    .padding(.trailing, 2)
     .padding(.vertical, 5)
     .background(.ultraThinMaterial, in: Capsule())
     .background(Color.black.opacity(0.45), in: Capsule())
@@ -983,7 +999,7 @@ struct MultiviewDock: View {
       Button(role: .destructive, action: close) { Label("Close multi-view", systemImage: "xmark") }
     }
     .animation(.spring(response: 0.35, dampingFraction: 0.85), value: model.tiles.map(\.id))
-    .accessibilityElement(children: .ignore)
+    .accessibilityElement(children: .contain)
     .accessibilityLabel("Multi-view: \(model.tiles.map(\.channel.name).joined(separator: ", "))")
     .accessibilityHint(model.running ? "Opens multi-view" : "Starts watching them together")
     .accessibilityAddTraits(.isButton)
@@ -1189,10 +1205,10 @@ struct MultiviewTileView: View {
       Text(player.channel?.name ?? channel.name).font(.caption.weight(.bold)).lineLimit(1)
       Button(action: toggleSound) {
         Image(systemName: heard ? (volume < 0.6 ? "speaker.wave.1.fill" : "speaker.wave.2.fill") : "speaker.slash.fill")
-          .font(.system(size: 11, weight: .bold))
+          .font(.system(size: 12, weight: .bold))
           .foregroundColor(heard ? .accentTeal : .white.opacity(0.65))
-          .frame(width: 30, height: 26)
-          .contentShape(Rectangle())
+          .frame(width: 32, height: 26)
+          .contentShape(Rectangle().inset(by: -8))
       }
       .buttonStyle(PressableStyle(scale: 0.8))
       .accessibilityLabel(heard ? "Mute \(channel.name)" : "Hear \(channel.name) too")

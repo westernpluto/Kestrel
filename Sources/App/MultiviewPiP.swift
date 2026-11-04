@@ -63,14 +63,13 @@
     /// grows out of it and shrinks back into it without anything moving), else one made for this
     /// many 16:9 pictures.
     func fit(count: Int) {
-      let size = grid.layoutSize.map(PictureGridView.contentSize(matching:)) ?? PictureGridView.contentSize(count)
+      // Always 16:9, the streams in the grid that fits it best.
+      let size = CGSize(width: 1920, height: 1080)
       if content.preferredContentSize != size { content.preferredContentSize = size }
     }
 
-    /// The pictures' places on the multi-view screen, to lay them out the same way in the window.
-    func setLayout(_ rects: [String: CGRect], in size: CGSize) {
-      grid.setLayout(rects, in: size)
-    }
+    /// (The window is 16:9 whatever the screen's layout: nothing taken from it.)
+    func setLayout(_ rects: [String: CGRect], in size: CGSize) {}
 
     func toggle() {
       guard let controller else { return }
@@ -236,18 +235,7 @@
     }
 
     private static func frames(count: Int, in bounds: CGRect) -> [CGRect] {
-      switch count {
-      case 0: return []
-      case 1: return [bounds]
-      case 2:
-        let height = (bounds.height - gap) / 2
-        return [
-          CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: height),
-          CGRect(x: bounds.minX, y: bounds.minY + height + gap, width: bounds.width, height: height),
-        ]
-      default:
-        return MultiviewLayout.grid(count: count, in: bounds.size, spacing: gap).map { $0.offsetBy(dx: bounds.minX, dy: bounds.minY) }
-      }
+      MultiviewLayout.grid(count: count, in: bounds.size, spacing: gap).map { $0.offsetBy(dx: bounds.minX, dy: bounds.minY) }
     }
   }
 #endif
