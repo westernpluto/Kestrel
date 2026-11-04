@@ -149,7 +149,8 @@ struct TVBrowseView: View {
           TVStreamGrid(streams: feed.streams) { Task { await feed.more() } }
         }
       }
-      .navigationTitle("Live")
+      // (No title: the tab bar names the page, and tvOS left it floating behind the cards.)
+      .toolbar(.hidden, for: .navigationBar)
     }
     .task { if feed.streams.isEmpty { await feed.refresh() } }
   }
@@ -201,7 +202,8 @@ struct TVFollowingView: View {
           TVStreamGrid(streams: following.live)
         }
       }
-      .navigationTitle("Following")
+      // (No title: the tab bar names the page, and tvOS left it floating behind the cards.)
+      .toolbar(.hidden, for: .navigationBar)
     }
     .task(id: store.session?.userID) { await following.refresh(force: true) }
     .onAppear { Task { await following.refresh() } }
@@ -243,7 +245,8 @@ struct TVCategoriesView: View {
           .padding(.vertical, 30)
         }
       }
-      .navigationTitle("Categories")
+      // (No title: the tab bar names the page, and tvOS left it floating behind the cards.)
+      .toolbar(.hidden, for: .navigationBar)
       .navigationDestination(for: Category.self) { TVCategoryStreamsView(category: $0) }
     }
     .task { if categories.isEmpty { await load() } }
@@ -273,6 +276,8 @@ struct TVCategoryStreamsView: View {
 
   var body: some View {
     ScrollView {
+      // The name as the page's first line (scrolls away with it).
+      Text(category.name).font(.title2.weight(.bold)).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 60)
       if feed.streams.isEmpty {
         TVStatus(loading: feed.loading, error: feed.error, empty: "No one is live in \(category.name)") {
           Task { await feed.refresh() }
@@ -281,7 +286,7 @@ struct TVCategoryStreamsView: View {
         TVStreamGrid(streams: feed.streams) { Task { await feed.more() } }
       }
     }
-    .navigationTitle(category.name)
+    .toolbar(.hidden, for: .navigationBar)
     .task { if feed.streams.isEmpty { await feed.refresh() } }
   }
 }
@@ -335,7 +340,8 @@ struct TVSearchView: View {
           .padding(.vertical, 30)
         }
       }
-      .navigationTitle("Search")
+      // (No title: the tab bar names the page, and tvOS left it floating behind the cards.)
+      .toolbar(.hidden, for: .navigationBar)
       .searchable(text: $text, prompt: "Channels")
     }
     .task(id: text) {
@@ -392,7 +398,8 @@ struct TVSettingsView: View {
           LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
         }
       }
-      .navigationTitle("Settings")
+      // (No title: the tab bar names the page, and tvOS left it floating behind the cards.)
+      .toolbar(.hidden, for: .navigationBar)
     }
     .fullScreenCover(isPresented: $signingIn) { TVSignInView().environmentObject(store) }
   }
@@ -430,6 +437,9 @@ struct TVSignInView: View {
       Button("Cancel") { dismiss() }
     }
     .padding(80)
+    // Opaque: the page behind showed through and the code was hard to read.
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .background(Color.black.ignoresSafeArea())
     .task { await run() }
   }
 

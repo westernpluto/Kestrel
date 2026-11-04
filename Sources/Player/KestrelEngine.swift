@@ -155,6 +155,8 @@ final class KestrelEngine: NSObject {
   private var lastHeard: Int64?
   private var playingSince: Date?
   private var startSkipDone = false
+  /// Started but not yet shown (see `startIfReady`).
+  private(set) var settling = false
   /// The segment being made, before the start: when its frames came in (see `backlogIn`).
   private var liveArrivals: [(at: Date, newest: Int64)] = []
   private var liveSince: Date?
@@ -336,6 +338,7 @@ final class KestrelEngine: NSObject {
     liveArrivals = []
     liveSince = nil
     startSkipDone = false
+    settling = false
     lastDecodeTime = nil
     grid.reset()
     videoFormat = nil
@@ -382,7 +385,7 @@ final class KestrelEngine: NSObject {
 
   func setMuted(_ mute: Bool) {
     muted = mute
-    audio.setMuted(mute)
+    audio.setMuted(mute || settling)
   }
 
   func setVolume(_ volume: Float) {
@@ -1069,7 +1072,7 @@ final class KestrelEngine: NSObject {
   private func skipStartSurplus(ahead: Double) -> Bool {
     guard !startSkipDone, let since = playingSince else { return false }
     let elapsed = Date().timeIntervalSince(since)
-    guard elapsed >= 0.9 else { return false }
+    guard elapsed >= 0.7 else { return false }
     startSkipDone = true
     let surplus = ahead - catchUp.targetBuffer
     guard surplus > 0.12, surplus < 4 else { return false }
@@ -1121,7 +1124,11 @@ final class KestrelEngine: NSObject {
     playingSince = Date()
     setSpeed(1)
     catchUp.restart()
-    state = .playing
+    // Settling: running, but not shown or heard yet (the app keeps its preview up) until the rest
+    // of the opening rush is in and any surplus is skipped (see `skipStartSurplus`): then it
+    // fades in already at the margin, with nothing to skip or catch up in view.
+    settling = true
+    audio.setMuted(true)
   }
 
   // MARK: Ticking: margin, stalls
@@ -1165,7 +1172,13 @@ final class KestrelEngine: NSObject {
       return
     }
     checkTimestamps(ahead: ahead)
-    if skipStartSurplus(ahead: ahead) { return }
+    let skipped = skipStartSurplus(ahead: ahead)
+    if settling, startSkipDone {
+      settling = false
+      audio.setMuted(muted)
+      state = .playing
+    }
+    if skipped { return }
     // Far behind (a long dropout, the background): start over at live. Judged by what's in hand
     // (judged by the stream's timestamps, a channel with them half a minute off started over
     // every quarter second and never got going).

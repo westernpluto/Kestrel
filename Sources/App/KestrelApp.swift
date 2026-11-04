@@ -246,7 +246,10 @@ struct MiniPlayerSpacer: View {
 
   var body: some View {
     Color.clear
-      .frame(height: app.playing != nil && app.playerMinimized ? PlayerLayout.miniInset : 1)
+      // The same height whether the player is open or in the mini player: changing it as the
+      // player shrank made every list re-lay out and animate, and lists take no touches while
+      // they do (taps froze for a second or two).
+      .frame(height: app.playing != nil ? PlayerLayout.miniInset : 1)
       // At once, not with the player's spring: the lists animated along with it, and UIKit takes
       // no touches on a view while it animates, so for a second or two after the player shrank
       // nothing behind it could be tapped.
