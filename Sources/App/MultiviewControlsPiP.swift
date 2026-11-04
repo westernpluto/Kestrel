@@ -29,7 +29,11 @@ final class PictureStore: @unchecked Sendable {
     lock.lock()
     var list = frames[id] ?? []
     list.append((image, time))
-    if list.count > 12 { list.removeFirst(list.count - 12) }
+    // Pictures are decoded as the video comes in, as far ahead of the one due as there's video in
+    // hand (a second or more): all of them are kept until they're due. (Keeping just the newest
+    // dozen threw away every one due: the window stood still, then ran a fifth of a second in a
+    // rush, over and over.) A limit all the same, in case a stream's clock stops.
+    if list.count > 240 { list.removeFirst(list.count - 240) }
     frames[id] = list
     lock.unlock()
   }
@@ -42,8 +46,13 @@ final class PictureStore: @unchecked Sendable {
     return order.map { id in
       guard let clock = clocks[id], var list = frames[id], !list.isEmpty else { return nil }
       let target = CMTimeAdd(CMTimebaseGetTime(clock), CMTime(seconds: ahead + 1.0 / 240, preferredTimescale: 90_000))
-      var pick = 0
-      for (index, frame) in list.enumerated() where CMTimeCompare(frame.time, target) <= 0 { pick = index }
+      // The newest one due (in order of showing: decoded in that order).
+      var pick = -1
+      for (index, frame) in list.enumerated() {
+        if CMTimeCompare(frame.time, target) <= 0 { pick = index } else { break }
+      }
+      // None due yet (just started, or after a jump back): the earliest, until its time comes.
+      guard pick >= 0 else { return list.first?.image }
       if pick > 0 { list.removeFirst(pick) }
       frames[id] = list
       return list.first?.image
@@ -223,6 +232,8 @@ final class MultiviewControlsPiP: NSObject, AVPictureInPictureControllerDelegate
     source.layer.insertSublayer(layer, at: 0)
     let pip = AVPictureInPictureController(contentSource: .init(sampleBufferDisplayLayer: layer, playbackDelegate: self))
     pip.canStartPictureInPictureAutomaticallyFromInline = true
+    // Live: no skipping back and forth (the window showed 10-second skip buttons).
+    pip.requiresLinearPlayback = true
     pip.delegate = self
     possibleObservation = pip.observe(\.isPictureInPicturePossible, options: [.new]) { [weak self] pip, _ in
       guard pip.isPictureInPicturePossible, let owner = self else { return }
@@ -309,6 +320,8 @@ final class MultiviewControlsPiP: NSObject, AVPictureInPictureControllerDelegate
         // (Streams whose player came up since: hooked in.)
         self.sync()
         if let source = self.source, self.layer.superlayer != nil { self.placeLayer(in: source) }
+        // The window's play/pause button kept showing Play while playing.
+        if self.isActive { self.controller?.invalidatePlaybackState() }
       }
     }
   }

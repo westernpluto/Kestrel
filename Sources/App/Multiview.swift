@@ -1051,8 +1051,69 @@ private struct SoundBadge: View {
   }
 }
 
-/// One stream in multi-view: the picture, who it is, and whether it's heard.
+/// A stream in multi-view, with its hold menu. The menu is put on here, where the player isn't
+/// watched: on the picture's own view (redrawn with every stats update) its text flickered.
 struct MultiviewTileView: View {
+  let player: PlayerModel
+  let channel: Channel
+  let heard: Bool
+  /// Its chat is showing (and it's the big one in focus).
+  let selected: Bool
+  let volume: Float
+  /// Another stream is heard too (the menu then offers "only this one").
+  let several: Bool
+  /// The name, sound button and outline show (they fade with the rest of the controls).
+  var chrome = true
+  var tap: () -> Void
+  var toggleSound: () -> Void
+  var listenOnly: () -> Void
+  var setVolume: (Float) -> Void
+  var makeMain: () -> Void
+  var openInPlayer: () -> Void
+  var remove: () -> Void
+  /// The other streams, to change places with.
+  var others: [Channel] = []
+  var swap: (String) -> Void = { _ in }
+
+  var body: some View {
+    MultiviewTileFace(
+      player: player, channel: channel, heard: heard, selected: selected, volume: volume, several: several, chrome: chrome,
+      tap: tap, toggleSound: toggleSound, listenOnly: listenOnly, setVolume: setVolume, makeMain: makeMain,
+      openInPlayer: openInPlayer, remove: remove, others: others, swap: swap
+    )
+    .contextMenu {
+      Button(action: toggleSound) {
+        Label(heard ? "Mute" : "Hear it too", systemImage: heard ? "speaker.slash" : "speaker.plus")
+      }
+      if several || !heard {
+        Button(action: listenOnly) { Label("Hear only this one", systemImage: "speaker.wave.2") }
+      }
+      Picker(selection: Binding(get: { volume }, set: setVolume)) {
+        ForEach(MultiviewModel.volumeSteps, id: \.self) { step in
+          Text("\(Int(step * 100))%").tag(step)
+        }
+      } label: {
+        Label("Volume", systemImage: "speaker.wave.1")
+      }
+      .pickerStyle(.menu)
+      Button(action: makeMain) { Label("Make it the big one", systemImage: "rectangle.inset.topleft.filled") }
+      if !others.isEmpty {
+        Menu {
+          ForEach(others, id: \.id) { other in
+            Button(other.name) { swap(other.id) }
+          }
+        } label: {
+          Label("Swap places with…", systemImage: "arrow.left.arrow.right")
+        }
+      }
+      Button(action: openInPlayer) { Label("Watch on its own", systemImage: "play.rectangle") }
+      Button(role: .destructive, action: remove) { Label("Remove", systemImage: "xmark") }
+    }
+  }
+}
+
+/// One stream in multi-view: the picture, who it is, and whether it's heard.
+struct MultiviewTileFace: View {
   @ObservedObject var player: PlayerModel
   let channel: Channel
   let heard: Bool
@@ -1122,34 +1183,6 @@ struct MultiviewTileView: View {
     .contentShape(Rectangle())
     .onTapGesture(count: 2, perform: makeMain)
     .onTapGesture(perform: tap)
-    .contextMenu {
-      Button(action: toggleSound) {
-        Label(heard ? "Mute" : "Hear it too", systemImage: heard ? "speaker.slash" : "speaker.plus")
-      }
-      if several || !heard {
-        Button(action: listenOnly) { Label("Hear only this one", systemImage: "speaker.wave.2") }
-      }
-      Picker(selection: Binding(get: { volume }, set: setVolume)) {
-        ForEach(MultiviewModel.volumeSteps, id: \.self) { step in
-          Text("\(Int(step * 100))%").tag(step)
-        }
-      } label: {
-        Label("Volume", systemImage: "speaker.wave.1")
-      }
-      .pickerStyle(.menu)
-      Button(action: makeMain) { Label("Make it the big one", systemImage: "rectangle.inset.topleft.filled") }
-      if !others.isEmpty {
-        Menu {
-          ForEach(others, id: \.id) { other in
-            Button(other.name) { swap(other.id) }
-          }
-        } label: {
-          Label("Swap places with…", systemImage: "arrow.left.arrow.right")
-        }
-      }
-      Button(action: openInPlayer) { Label("Watch on its own", systemImage: "play.rectangle") }
-      Button(role: .destructive, action: remove) { Label("Remove", systemImage: "xmark") }
-    }
     .accessibilityElement(children: .contain)
     .accessibilityLabel("\(player.channel?.name ?? channel.name)\(heard ? ", sound on" : "")")
   }
