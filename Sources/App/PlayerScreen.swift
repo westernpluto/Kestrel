@@ -1347,7 +1347,14 @@ struct PlayerScreen: View {
     // window (the hand-over happens behind it), then the video slides back to its place beside
     // chat, as other video apps do.
     .onChange(of: model.pictureInPictureReturning) { returning in
-      guard OrientationLock.largeWindow, !app.playerMinimized else { return }
+      // From the mini player: the player opens up for the window to land in (as video apps do; it
+      // landed on a spot where nothing was drawn, and the app showed black).
+      if returning, app.playerMinimized {
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        withTransaction(instant) { app.playerMinimized = false }
+      }
+      guard OrientationLock.largeWindow else { return }
       if returning, !largeFullScreen {
         var instant = Transaction()
         instant.disablesAnimations = true

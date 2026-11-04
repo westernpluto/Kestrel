@@ -431,12 +431,22 @@ struct KestrelVideoView: UIViewRepresentable {
       }
     }
 
-    /// The copy's view over this view's spot in the window.
+    /// The picture's shape, and whether it fills the view (cropped) or fits in it.
+    var aspect: () -> CGSize? = { nil }
+    var fills = false
+
+    /// The copy's view over the picture itself in the window: the picture's own rectangle (not the
+    /// view's, with the bars around the picture: the window grew to that shape, then snapped to
+    /// the picture's, a little zoom).
     func placeMirror() {
       guard let window, mirrorHost.superview === window else { return }
+      var local = bounds
+      if !fills, let size = aspect(), bounds.width > 0, bounds.height > 0 {
+        local = AVMakeRect(aspectRatio: size, insideRect: bounds)
+      }
       CATransaction.begin()
       CATransaction.setDisableActions(true)
-      mirrorHost.frame = convert(bounds, to: window)
+      mirrorHost.frame = convert(local, to: window)
       mirror?.frame = mirrorHost.bounds
       CATransaction.commit()
     }
@@ -530,6 +540,8 @@ struct KestrelVideoView: UIViewRepresentable {
   func updateUIView(_ view: LayerView, context: Context) {
     let engine = self.engine
     view.show(engine.displayLayer, retiring: engine.retiringLayer, cover: engine.coverLayer, mirror: engine.mirrorLayer)
+    view.aspect = { [weak engine] in engine?.videoAspect }
+    view.fills = fill
     view.placeMirror()
     engine.placeMirror = { [weak view] in view?.placeMirror() }
     engine.screenView = view
@@ -620,6 +632,8 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
       let started = Date()
       @MainActor func check() {
         if engine.screenDrawing || Date().timeIntervalSince(started) > 0.6 {
+          // Where the window lands: the picture as it is now (the player may have just opened up).
+          engine.placeMirror?()
           engine.screenNote(engine.screenDrawing ? "picture ready: window handed back" : "picture not ready in time: window handed back")
           completionHandler(true)
         } else {

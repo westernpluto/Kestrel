@@ -96,6 +96,13 @@ final class KestrelEngine: NSObject {
     }
   }
 
+  /// The picture's shape (width to height), once known.
+  var videoAspect: CGSize? {
+    guard let videoFormat else { return nil }
+    let size = CMVideoFormatDescriptionGetPresentationDimensions(videoFormat, usePixelAspectRatio: true, useCleanAperture: true)
+    return size.width > 0 && size.height > 0 ? size : nil
+  }
+
   /// Puts the Picture in Picture copy's view over the picture's spot again (set by the view).
   var placeMirror: (() -> Void)?
   /// The sound, decoded here and played through AVAudioEngine; it's also the clock (see `syncClock`).
