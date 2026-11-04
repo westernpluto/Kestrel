@@ -19,14 +19,48 @@ final class ImagePipeline: @unchecked Sendable {
   /// Cached as a first frame, with the whole animation still decoding.
   private var upgrading: Set<String> = []
   private var failuresLogged: Set<String> = []
-  /// Stills and first frames: what's on screen waits for these.
-  private let decodeQueue: OperationQueue = {
-    let queue = OperationQueue()
-    queue.name = "kestrel.images"
-    queue.qualityOfService = .userInitiated
-    queue.maxConcurrentOperationCount = max(2, ProcessInfo.processInfo.activeProcessorCount - 2)
-    return queue
-  }()
+  /// Stills and first frames: what's on screen waits for these. Newest first: in busy chat,
+  /// pictures for messages already scrolled away queued ahead of the ones just arriving (first in,
+  /// first out), and the emotes in view could wait for seconds or not show before they'd gone.
+  private var decodeStack: [(key: String, job: () -> Void)] = []
+  private var decoding = 0
+  private let decoders = max(2, ProcessInfo.processInfo.activeProcessorCount - 2)
+
+  private func scheduleDecode(key: String, _ job: @escaping () -> Void) {
+    lock.lock()
+    decodeStack.append((key, job))
+    // (Far behind: the oldest are dropped, their messages long gone. Nobody's left waiting on
+    // them: asked for again, they're fetched (from the disk cache) and decoded afresh.)
+    if decodeStack.count > 300 {
+      for dropped in decodeStack.prefix(decodeStack.count - 300) {
+        waiting.removeValue(forKey: dropped.key)
+        upgrading.remove(dropped.key)
+      }
+      decodeStack.removeFirst(decodeStack.count - 300)
+    }
+    lock.unlock()
+    runDecodes()
+  }
+
+  private func runDecodes() {
+    lock.lock()
+    var jobs: [() -> Void] = []
+    while decoding < decoders, let next = decodeStack.popLast() {
+      decoding += 1
+      jobs.append(next.job)
+    }
+    lock.unlock()
+    for job in jobs {
+      DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        job()
+        guard let self else { return }
+        self.lock.lock()
+        self.decoding -= 1
+        self.lock.unlock()
+        self.runDecodes()
+      }
+    }
+  }
   /// Whole animations, on their own two threads: opening the emote picker on a channel with
   /// hundreds of animated emotes used to fill every decoding thread with long animations, and the
   /// first frames of the emotes in view queued up behind them.
@@ -34,14 +68,14 @@ final class ImagePipeline: @unchecked Sendable {
     let queue = OperationQueue()
     queue.name = "kestrel.images.animations"
     queue.qualityOfService = .utility
-    queue.maxConcurrentOperationCount = 2
+    queue.maxConcurrentOperationCount = 3
     return queue
   }()
   private let session: URLSession = {
     let configuration = URLSessionConfiguration.default
     configuration.urlCache = URLCache(memoryCapacity: 24 << 20, diskCapacity: 250 << 20)
     configuration.requestCachePolicy = .useProtocolCachePolicy
-    configuration.httpMaximumConnectionsPerHost = 10
+    configuration.httpMaximumConnectionsPerHost = 16
     configuration.timeoutIntervalForRequest = 20
     configuration.httpAdditionalHeaders = [
       "User-Agent": Browser.userAgent,
@@ -51,7 +85,7 @@ final class ImagePipeline: @unchecked Sendable {
   }()
 
   init() {
-    cache.totalCostLimit = 180 << 20
+    cache.totalCostLimit = 256 << 20
   }
 
   private static func key(_ url: URL, _ maxPixels: CGFloat?) -> String {
@@ -154,7 +188,7 @@ final class ImagePipeline: @unchecked Sendable {
   }
 
   private func decode(_ data: Data, maxPixels: CGFloat?, key: String, url: URL, mimeType: String?) {
-    let first = BlockOperation { [weak self] in
+    scheduleDecode(key: key) { [weak self] in
       guard let self else { return }
       guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
         CGImageSourceGetCount(source) > 1
@@ -173,8 +207,6 @@ final class ImagePipeline: @unchecked Sendable {
       }
       self.animationQueue.addOperation(rest)
     }
-    first.queuePriority = .high
-    decodeQueue.addOperation(first)
   }
 
   /// One activity-log line per host, so a broken image source is visible without flooding.
@@ -218,7 +250,9 @@ final class ImagePipeline: @unchecked Sendable {
     // every second (or third…) frame, holding each for the ones skipped: at emote size that
     // looks the same and decodes several times faster.
     let limit = min(count, 400)
-    let step = max(1, Int((Double(limit) / 100).rounded(.up)))
+    // (At most 60 different frames: each is a whole picture in memory, and busy chat's animated
+    // emotes pushed each other out of the cache, to be fetched and decoded again and again.)
+    let step = max(1, Int((Double(limit) / 60).rounded(.up)))
     var frames: [UIImage] = []
     var total: Double = 0
     for index in stride(from: 0, to: limit, by: step) {
