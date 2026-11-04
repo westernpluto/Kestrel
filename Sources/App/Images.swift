@@ -274,6 +274,10 @@ final class ImagePipeline: @unchecked Sendable {
         self.fetch(fallback, maxPixels: maxPixels, fallback: nil, attempt: 1, key: key)
         return
       }
+      if let other = Self.otherFormat(url) {
+        self.fetch(other, maxPixels: maxPixels, fallback: nil, attempt: 1, key: key)
+        return
+      }
       self.logFailure(url, status == 0 ? (error?.localizedDescription ?? "no response") : "HTTP \(status)")
       self.deliver(key, nil, final: true)
     }
@@ -289,6 +293,11 @@ final class ImagePipeline: @unchecked Sendable {
         CGImageSourceGetCount(source) > 1
       else {
         let image = Self.decode(data, maxPixels: maxPixels)
+        if image == nil, let other = Self.otherFormat(url) {
+          // (A WebP this iPhone can't read: the same emote as a GIF or PNG.)
+          self.fetch(other, maxPixels: maxPixels, fallback: nil, attempt: 1, key: key)
+          return
+        }
         if image == nil { self.logFailure(url, "couldn't decode \(data.count) bytes (\(mimeType ?? "?"))") }
         self.deliver(key, image, final: true)
         return
@@ -298,19 +307,38 @@ final class ImagePipeline: @unchecked Sendable {
         self.deliver(key, UIImage(cgImage: frame, scale: 2, orientation: .up), final: false)
       }
       let rest = BlockOperation { [weak self] in
-        self?.deliver(key, Self.decode(data, maxPixels: maxPixels), final: true)
+        guard let self else { return }
+        let animation = Self.decode(data, maxPixels: maxPixels)
+        if animation == nil, self.cached(url, maxPixels: maxPixels) == nil, let other = Self.otherFormat(url) {
+          self.fetch(other, maxPixels: maxPixels, fallback: nil, attempt: 1, key: key)
+          return
+        }
+        self.deliver(key, animation, final: true)
       }
       self.animationQueue.addOperation(rest)
     }
   }
 
   /// One activity-log line per host, so a broken image source is visible without flooding.
+  /// The same emote in another format, when one didn't come or couldn't be read: 7TV has each as
+  /// WebP, GIF (animated ones) and PNG; BTTV's address without a format gives its original.
+  static func otherFormat(_ url: URL) -> URL? {
+    let address = url.absoluteString
+    if url.host == "cdn.7tv.app" {
+      if address.hasSuffix(".webp") { return URL(string: String(address.dropLast(5)) + ".gif") }
+      if address.hasSuffix(".gif") { return URL(string: String(address.dropLast(4)) + ".png") }
+    }
+    if url.host == "cdn.betterttv.net", address.hasSuffix(".webp") { return URL(string: String(address.dropLast(5))) }
+    return nil
+  }
+
+  /// Every picture that couldn't be shown, with why (up to 40 a session: one per host hid all but
+  /// the first).
   private func logFailure(_ url: URL, _ reason: String) {
-    let host = url.host ?? "?"
     lock.lock()
-    let first = failuresLogged.insert(host).inserted
+    let first = failuresLogged.count < 40 && failuresLogged.insert(url.absoluteString).inserted
     lock.unlock()
-    if first { ActivityLog.shared.add("Images from \(host) failed: \(reason) (\(url.absoluteString))") }
+    if first { ActivityLog.shared.add("Image didn't load: \(reason) (\(url.absoluteString))") }
   }
 
   private static func cost(_ image: UIImage) -> Int {
