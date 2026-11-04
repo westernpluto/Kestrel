@@ -403,11 +403,10 @@ struct KestrelVideoView: UIViewRepresentable {
   }
 
   final class LayerView: UIView {
-    /// The Picture in Picture copy lives outside this view altogether: in a view at the very back
-    /// of the window, kept over the same spot (the window grows out of it and goes back into it).
-    /// As the system hands the window back it blanks what's around the copy for a few frames; with
-    /// the copy in here (even in a view of its own) the picture went black then, though it had a
-    /// frame up the whole time (only for single streams: multi-view's window works another way).
+    /// The Picture in Picture copy, in a view of its own right behind the picture (over the
+    /// picture's own rectangle). It was kept at the very back of the window for a while, behind the
+    /// app; iOS then didn't land the window on it but full size (and from the mini player the app
+    /// showed black after).
     private let mirrorHost = UIView()
     /// The screen's layers, bottom to top: a retiring layer, a still of the last frame (back from
     /// Picture in Picture), the screen's layer.
@@ -421,20 +420,13 @@ struct KestrelVideoView: UIViewRepresentable {
         host.isUserInteractionEnabled = false
         host.backgroundColor = .clear
       }
+      addSubview(mirrorHost)
       addSubview(screenHost)
-    }
-
-    deinit {
-      let host = mirrorHost
-      DispatchQueue.main.async { host.removeFromSuperview() }
     }
 
     override func didMoveToWindow() {
       super.didMoveToWindow()
-      if let window {
-        if mirrorHost.superview !== window { window.insertSubview(mirrorHost, at: 0) }
-        placeMirror()
-      }
+      if window != nil { placeMirror() }
     }
 
     /// The picture's shape, and whether it fills the view (cropped) or fits in it.
@@ -449,21 +441,17 @@ struct KestrelVideoView: UIViewRepresentable {
     var mirrorDescription: String {
       func r(_ rect: CGRect) -> String { String(format: "%.0f,%.0f %.0fx%.0f", rect.minX, rect.minY, rect.width, rect.height) }
       guard let window else { return "view not in a window; copy at \(r(mirrorHost.frame))" }
-      return "copy \(r(mirrorHost.frame)) in \(mirrorHost.superview === window ? "window" : "elsewhere") \(r(window.bounds)); view \(r(convert(bounds, to: window)))\(mirror?.isHidden == true ? ", copy hidden" : "")"
+      return "copy \(r(convert(mirrorHost.frame, to: window))) in window \(r(window.bounds)); view \(r(convert(bounds, to: window)))\(mirror?.isHidden == true ? ", copy hidden" : "")"
     }
 
     func placeMirror() {
-      guard let window, mirrorHost.superview === window else {
-        ActivityLog.shared.add("PiP copy not placed: \(window == nil ? "view not in a window" : "copy's view not in the window")")
-        return
-      }
       var local = bounds
       if !fills, let size = aspect(), bounds.width > 0, bounds.height > 0 {
         local = AVMakeRect(aspectRatio: size, insideRect: bounds)
       }
       CATransaction.begin()
       CATransaction.setDisableActions(true)
-      mirrorHost.frame = convert(local, to: window)
+      mirrorHost.frame = local
       mirror?.frame = mirrorHost.bounds
       CATransaction.commit()
     }
@@ -493,7 +481,7 @@ struct KestrelVideoView: UIViewRepresentable {
       CATransaction.setDisableActions(true)
       screenHost.removeFromSuperview()
       screenHost.translatesAutoresizingMaskIntoConstraints = true
-      addSubview(screenHost)
+      addSubview(screenHost)  // (above the copy's view)
       screenHost.frame = bounds
       for layer in shown { layer.frame = bounds }
       CATransaction.commit()
