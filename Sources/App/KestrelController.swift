@@ -182,10 +182,12 @@ final class KestrelController {
   private func apply(_ update: LowLatencyUpdate) {
     adTimeline = update.ads
     model?.adState = update.state
-    // (An ad being replaced, looked for or covered: the player isn't on Twitch's own stream.)
+    // Any ad break: replaced, looked for or covered (an ad-free copy, or hidden), and also one
+    // Twitch sends only to its own player ("skipped": its prefetch hints are held back meanwhile,
+    // so the video comes in whole segments).
     switch update.state {
-    case .replaced, .searching, .covering: engine?.setAdBreak(true)
-    case .none, .skipped: engine?.setAdBreak(false)
+    case .replaced, .searching, .covering, .skipped: engine?.setAdBreak(true)
+    case .none: engine?.setAdBreak(false)
     }
   }
 
