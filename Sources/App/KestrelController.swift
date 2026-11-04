@@ -633,15 +633,6 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
       }
       ignorePausesUntil = Date().addingTimeInterval(3)
       engine.screenHiddenForPictureInPicture = false
-      // iPhone Duo's inner screen held sideways, the mini player: its home screen stays upright, and
-      // iOS lands the window as if the app were upright too (full size, then black while it turns
-      // the app back). No landing there: the window just goes, the mini player carrying on.
-      let bounds = AppWindow.current?.bounds ?? .zero
-      if AppModel.shared.playerMinimized, OrientationLock.largeWindow, bounds.width > bounds.height {
-        engine.screenNote("mini player, large window sideways: window goes without landing")
-        completionHandler(false)
-        return
-      }
       // The player goes to the whole window for the window to land in (it's moved back after).
       controller?.pictureInPictureReturning()
       engine.screenNote("window asks for the picture")
