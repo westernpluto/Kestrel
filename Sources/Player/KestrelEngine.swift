@@ -1227,22 +1227,28 @@ final class KestrelEngine: NSObject {
     catchUp.hold(for: 2)
   }
 
-  /// Just after an ad break: Twitch's own stream is back, further ahead than the ad-free copy
-  /// played during the break (it comes from a server far away). The ad's end is a cut anyway, so
-  /// the gap is jumped over there rather than caught up by playing faster for a while after.
+  /// During an ad break and for a little while after it, falling behind isn't caught up by playing
+  /// faster: the playhead jumps straight back to the margin. The ad-free copy played during a
+  /// blocked ad comes from a server far away and falls further behind as it goes (it reached six
+  /// seconds), and Twitch's own stream after it is ahead again; the break's video is a cut anyway.
+  /// At most one jump every few seconds.
   private var jumpAfterAdUntil: Date?
+  private var lastAdJump = Date.distantPast
 
   private func jumpAfterAd(ahead: Double) {
-    guard let until = jumpAfterAdUntil else { return }
-    guard Date() < until else {
+    let now = Date()
+    let after = jumpAfterAdUntil.map { now < $0 } ?? false
+    guard inAdBreak || after else {
       jumpAfterAdUntil = nil
       return
     }
+    guard now.timeIntervalSince(lastAdJump) >= 3 else { return }
     let surplus = ahead - catchUp.targetBuffer - (deliversWhole ? Self.segmentLength : 0)
-    guard surplus > 0.5, surplus < 15 else { return }
-    jumpAfterAdUntil = nil
+    guard surplus > 0.6, surplus < 20 else { return }
+    lastAdJump = now
     jump(by: surplus)
-    ActivityLog.shared.add(String(format: "Kestrel player: back from the ad, skipped %.2f s ahead to live (no catching up)", surplus))
+    ActivityLog.shared.add(
+      String(format: "Kestrel player: %@, skipped %.2f s ahead to live (no catching up)", inAdBreak ? "ad break" : "back from the ad", surplus))
   }
 
   /// The segment being made has sent what it already had: its video now comes in at about the
