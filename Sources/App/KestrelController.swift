@@ -347,6 +347,19 @@ struct KestrelVideoView: UIViewRepresentable {
 
   /// The screen's layer on top, the Picture in Picture copy right behind it (see
   /// `KestrelEngine.makeMirror`).
+  /// Keeps its layers the size of itself (wherever it is: in the player, or in the Picture in
+  /// Picture window, whose size isn't known yet when the picture moves in: left at the size they
+  /// went in with, zero, the window was black).
+  final class LayerHost: UIView {
+    override func layoutSubviews() {
+      super.layoutSubviews()
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      for sublayer in layer.sublayers ?? [] { sublayer.frame = bounds }
+      CATransaction.commit()
+    }
+  }
+
   final class LayerView: UIView {
     /// The Picture in Picture copy lives outside this view altogether: in a view at the very back
     /// of the window, kept over the same spot (the window grows out of it and goes back into it).
@@ -356,7 +369,7 @@ struct KestrelVideoView: UIViewRepresentable {
     private let mirrorHost = UIView()
     /// The screen's layers, bottom to top: a retiring layer, a still of the last frame (back from
     /// Picture in Picture), the screen's layer.
-    private let screenHost = UIView()
+    private let screenHost = LayerHost()
     private var shown: [CALayer] = []
     private weak var mirror: CALayer?
 
@@ -400,17 +413,24 @@ struct KestrelVideoView: UIViewRepresentable {
       CATransaction.begin()
       CATransaction.setDisableActions(true)
       container.addSubview(screenHost)
-      screenHost.frame = container.bounds
-      screenHost.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      screenHost.translatesAutoresizingMaskIntoConstraints = false
+      NSLayoutConstraint.activate([
+        screenHost.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+        screenHost.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+        screenHost.topAnchor.constraint(equalTo: container.topAnchor),
+        screenHost.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+      ])
       for layer in shown { layer.frame = screenHost.bounds }
       CATransaction.commit()
+      screenHost.setNeedsLayout()
     }
 
     func takeScreenBack() {
       CATransaction.begin()
       CATransaction.setDisableActions(true)
+      screenHost.removeFromSuperview()
+      screenHost.translatesAutoresizingMaskIntoConstraints = true
       addSubview(screenHost)
-      screenHost.autoresizingMask = []
       screenHost.frame = bounds
       for layer in shown { layer.frame = bounds }
       CATransaction.commit()
