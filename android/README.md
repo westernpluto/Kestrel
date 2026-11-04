@@ -4,10 +4,10 @@ The same ad-free, low-latency Twitch client as the iPhone app, for phones runnin
 
 ## Install and share
 
-1. Open the latest run under **Actions → Build IPA and APK** and download the **Kestrel-apk** artifact (GitHub delivers it as a zip; `Kestrel.apk` is inside).
-2. Open `Kestrel.apk` on the phone. Android asks once to allow installing apps from that source (the browser or Files app); allow it, then tap **Install**.
+1. Download `Kestrel-<version>.apk` from the [latest release](../../../releases/latest).
+2. Open it on the phone. Android asks once to allow installing apps from that source (the browser or Files app); allow it, then tap **Install**.
 
-Anyone can install that same `Kestrel.apk`: send it to them in any messenger or share it from Google Drive. Newer builds install over older ones and keep the login and settings, because every build is signed with the same key (see "Signing" below).
+Anyone can install that same APK: send it to them in any messenger or share it from Google Drive. Newer builds install over older ones and keep the login and settings, because every build is signed with the same key (see "Signing" below).
 
 ## What's the same as on iPhone
 
