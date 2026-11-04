@@ -162,6 +162,7 @@ final class GifKeyboardModel: ObservableObject {
           done()
           return
         }
+        ActivityLog.shared.add("GIF not sent: \(result.error ?? "no error, no message") (wait \(result.secondsUntilCanSend) s)")
         switch result.error {
         case "TEMPORARILY_UNAVAILABLE": notice = "GIFs are unavailable right now. Try again later."
         case .some(let error): notice = "Twitch didn't take that GIF (\(error.lowercased().replacingOccurrences(of: "_", with: " ")))."
@@ -169,6 +170,7 @@ final class GifKeyboardModel: ObservableObject {
         }
       } catch {
         notice = "Couldn't send the GIF: \(error.localizedDescription)"
+        ActivityLog.shared.add("GIF not sent: \(error.localizedDescription)")
       }
     }
   }

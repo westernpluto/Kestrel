@@ -152,6 +152,12 @@ struct KeyboardDismisser: UIViewRepresentable {
     }
 
     @objc private func tapped(_ recognizer: UITapGestureRecognizer) {
+      // The emote picker open (no keyboard): a tap outside it and the message box closes it, as
+      // a tap outside puts the keyboard away.
+      if let window = installedOn, let picker = EmotePickerArea.frame, FirstResponder.current == nil {
+        if !picker.contains(recognizer.location(in: window)) { EmotePickerArea.close() }
+        return
+      }
       guard let window = installedOn, let editor = FirstResponder.current as? UIView, editor.window === window else { return }
       let point = recognizer.location(in: window)
       let field = editor.convert(editor.bounds, to: window)
@@ -169,6 +175,7 @@ struct KeyboardDismisser: UIViewRepresentable {
       // Only while typing, and not on the text itself (moving the cursor). Not for a search
       // field: putting its keyboard away under a tap on a result shifted the list mid-tap and the
       // result often didn't open (search's keyboard goes away by scrolling, or with the result).
+      if EmotePickerArea.frame != nil, FirstResponder.current == nil { return true }
       guard let editor = FirstResponder.current as? UIView, !(editor is UISearchTextField) else { return false }
       var view = touch.view
       while let current = view {
@@ -177,6 +184,18 @@ struct KeyboardDismisser: UIViewRepresentable {
       }
       return true
     }
+  }
+}
+
+/// Where the open emote picker is (with the message box above it), in window coordinates, and how
+/// to close it: a tap anywhere else closes it (see KeyboardDismisser).
+@MainActor
+enum EmotePickerArea {
+  static var frame: CGRect?
+  static let closeNotification = Notification.Name("KestrelCloseEmotePicker")
+
+  static func close() {
+    NotificationCenter.default.post(name: closeNotification, object: nil)
   }
 }
 

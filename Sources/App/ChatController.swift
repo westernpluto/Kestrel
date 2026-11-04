@@ -1366,30 +1366,46 @@ struct ChatPanel: View {
         suggestionStrip
           .transition(.move(edge: .bottom).combined(with: .opacity))
       }
-      inputBar
-      if pickerOpen {
-        VStack(spacing: 0) {
-          // Emotes, or Twitch's GIF keyboard (signed in, in a channel).
-          if account.session != nil, !chat.channel.id.isEmpty {
-            Picker("Picker", selection: $pickerTab) {
-              Text("Emotes").tag(0)
-              Text("GIFs").tag(1)
+      VStack(spacing: 0) {
+        inputBar
+        if pickerOpen {
+          VStack(spacing: 0) {
+            // Emotes, or Twitch's GIF keyboard (signed in, in a channel).
+            if account.session != nil, !chat.channel.id.isEmpty {
+              Picker("Picker", selection: $pickerTab) {
+                Text("Emotes").tag(0)
+                Text("GIFs").tag(1)
+              }
+              .pickerStyle(.segmented)
+              .padding(.horizontal, 10)
+              .padding(.top, 6)
+              .onChange(of: pickerTab) { tab in if tab == 1 { gifKeyboard.prepare(channelID: chat.channel.id) } }
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 10)
-            .padding(.top, 6)
-            .onChange(of: pickerTab) { tab in if tab == 1 { gifKeyboard.prepare(channelID: chat.channel.id) } }
-          }
-          if pickerTab == 1 {
-            GifKeyboard(model: gifKeyboard) {
-              withAnimation(Self.spring) { pickerOpen = false }
+            if pickerTab == 1 {
+              GifKeyboard(model: gifKeyboard) {
+                withAnimation(Self.spring) { pickerOpen = false }
+              }
+            } else {
+              EmotePicker(sections: chat.emoteSections) { insert($0.name) }
             }
-          } else {
-            EmotePicker(sections: chat.emoteSections) { insert($0.name) }
           }
+          .frame(height: pickerHeight)
+          .transition(.move(edge: .bottom).combined(with: .opacity))
         }
-        .frame(height: pickerHeight)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
+      }
+      // The open picker and the box: a tap anywhere else closes the picker (as for the keyboard).
+      .background(
+        GeometryReader { proxy in
+          Color.clear
+            .onAppear { if pickerOpen { EmotePickerArea.frame = proxy.frame(in: .global) } }
+            .onChange(of: proxy.frame(in: .global)) { frame in if pickerOpen { EmotePickerArea.frame = frame } }
+            .onChange(of: pickerOpen) { open in EmotePickerArea.frame = open ? proxy.frame(in: .global) : nil }
+        }
+      )
+      .onDisappear { if pickerOpen { EmotePickerArea.frame = nil } }
+      .onReceive(NotificationCenter.default.publisher(for: EmotePickerArea.closeNotification)) { _ in
+        guard pickerOpen else { return }
+        withAnimation(Self.spring) { pickerOpen = false }
       }
     }
     // While the keyboard comes or goes behind the open picker, the box stays on top of whichever

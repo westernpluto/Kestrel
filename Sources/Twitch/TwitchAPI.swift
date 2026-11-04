@@ -715,7 +715,19 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
       request.setValue("https://www.twitch.tv", forHTTPHeaderField: "Origin")
       request.setValue("https://www.twitch.tv/", forHTTPHeaderField: "Referer")
     }
-    let result = try await perform(request)["sendGifMessage"]
+    // Twitch answers a refusal (an integrity check, say) with the error beside an empty result,
+    // not instead of one: read both (only the result was read, so the integrity retry never came
+    // and the send ended as "couldn't tell").
+    let (data, response) = try await http.data(for: request)
+    guard let object = try? JSONSerialization.jsonObject(with: data) else {
+      throw response.statusCode == 200 ? TwitchAPIError.decoding : TwitchAPIError.http(response.statusCode)
+    }
+    let json = JSONValue(object)
+    let result = json["data"]["sendGifMessage"]
+    if result.isNull {
+      let message = json["errors"][0]["message"].string ?? json["message"].string ?? "Twitch sent no answer (HTTP \(response.statusCode))"
+      throw TwitchAPIError.gql(message)
+    }
     let error = result["error"].string.flatMap { $0.isEmpty ? nil : $0 }
     return GifSendResult(
       sent: error == nil && result["message"]["id"].string != nil, error: error,
