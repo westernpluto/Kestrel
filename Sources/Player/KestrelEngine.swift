@@ -66,8 +66,6 @@ final class KestrelEngine: NSObject {
     didSet { if let screenView, screenView !== oldValue { onScreenView?(screenView) } }
   }
   var onScreenView: ((UIView) -> Void)?
-  /// The screen's layer was replaced by a fresh one (Picture in Picture is set up on the new one).
-  var onDisplayLayerReplaced: (() -> Void)?
   /// The screen's layer has a frame on screen and is caught up (nothing hidden).
   var screenDrawing: Bool {
     guard !screenBehind, !inBackground, !displayLayer.isHidden, displayLayer.status == .rendering,
@@ -759,8 +757,7 @@ final class KestrelEngine: NSObject {
       displayLayer.flush()
       return false
     }
-    // (Never while the window is up: it plays this very layer.)
-    if onScreenLayers != nil, !windowUp, !screenInWindow {
+    if onScreenLayers != nil {
       // A fresh layer on top: empty, it's see-through, so whatever picture is up stays until the
       // new one has the frame playing now. A layer on screen is never flushed (that went black
       // for a moment): the one showing a picture stays underneath, an empty one is let go.
@@ -784,7 +781,6 @@ final class KestrelEngine: NSObject {
         coverLayer?.isHidden = screenHiddenForPictureInPicture
       }
       onScreenLayers?()
-      onDisplayLayerReplaced?()
       screenNote("caught up on a fresh layer")
     } else {
       displayLayer.flush()

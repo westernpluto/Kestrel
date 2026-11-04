@@ -176,17 +176,11 @@ final class KestrelController {
   private var pipObservation: NSKeyValueObservation?
   private var pipWanted = false
 
-  /// The window plays the picture's own layer, as Apple's player does: one layer for the app and
-  /// the window, fed all the while the window is up, so there's nothing to hand over or catch up
-  /// when it comes back (a copy for the window, swapped back for the screen's layer on return,
-  /// was where the black flash came from).
   private func setUpPictureInPicture(_ engine: KestrelEngine) {
     guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
-    pip?.delegate = nil
-    pipObservation = nil
-    let delegate = pipDelegate ?? KestrelPictureInPicture(controller: self)
+    let delegate = KestrelPictureInPicture(controller: self)
     let controller = AVPictureInPictureController(
-      contentSource: .init(sampleBufferDisplayLayer: engine.displayLayer, playbackDelegate: delegate))
+      contentSource: .init(sampleBufferDisplayLayer: engine.makeMirror(), playbackDelegate: delegate))
     controller.canStartPictureInPictureAutomaticallyFromInline = true
     controller.delegate = delegate
     pipObservation = controller.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
@@ -195,20 +189,31 @@ final class KestrelController {
         self?.pictureInPictureActive = active
         self?.engine?.screenNote(active ? "window up" : "window gone")
         self?.engine?.windowUp = active
-        // Fed in the background all the while it's in the window.
-        self?.engine?.screenInWindow = active
+        if !active { self?.mirrorMaybeNotNeeded() }
+
       }
     }
     pip = controller
     pipDelegate = delegate
-    // The screen's layer replaced (after the background without the window): the window's set up
-    // on the new one.
-    engine.onDisplayLayerReplaced = { [weak self, weak engine] in
-      guard let self, let engine, self.pip?.isPictureInPictureActive != true else { return }
-      self.setUpPictureInPicture(engine)
+    // A picture in the copy from the start (fed until it's had a few seconds of video, then held):
+    // without one, swiping home right after opening a stream didn't start Picture in Picture.
+    engine.feedMirror(true)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+      MainActor.assumeIsolated { self?.mirrorMaybeNotNeeded() }
     }
+    // The copy for the window is only decoded when it may be needed: from the moment the app
+    // starts to go (Picture in Picture starts on its own then) until it's back and the window's
+    // gone. Decoding it all the time doubled the video decoding (1440p60 twice over).
+    let center = NotificationCenter.default
+    mirrorTokens.append(
+      center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.engine?.feedMirror(true) }
+      })
+    mirrorTokens.append(
+      center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.mirrorMaybeNotNeeded() }
+      })
   }
-
 
   private var mirrorTokens: [NSObjectProtocol] = []
 
@@ -266,6 +271,7 @@ final class KestrelController {
 
   func togglePictureInPicture() {
     guard let pip else { return }
+    engine?.feedMirror(true)
     if pip.isPictureInPictureActive {
       pip.stopPictureInPicture()
     } else if pip.isPictureInPicturePossible {
@@ -587,14 +593,16 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
   // playing at once looked like a second video), and is back as the window heads home.
   func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
     MainActor.assumeIsolated {
-      controller?.engine?.screenInWindow = true
-      controller?.engine?.screenNote("window opening (the screen's own layer)")
+      controller?.engine?.placeMirror?()
+      controller?.engine?.screenNote("opens from: \(controller?.engine?.describeMirror?() ?? "?")\(AppModel.shared.playerMinimized ? " (mini player)" : "")")
+      controller?.engine?.screenHiddenForPictureInPicture = true
     }
   }
 
   func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
     MainActor.assumeIsolated {
       ignorePausesUntil = Date().addingTimeInterval(2)
+      controller?.engine?.screenHiddenForPictureInPicture = false
     }
   }
 
@@ -624,13 +632,17 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
         return
       }
       ignorePausesUntil = Date().addingTimeInterval(3)
+      engine.screenHiddenForPictureInPicture = false
       // The player goes to the whole window for the window to land in (it's moved back after).
       controller?.pictureInPictureReturning()
       engine.screenNote("window asks for the picture")
       let started = Date()
       @MainActor func check() {
         if engine.screenDrawing || Date().timeIntervalSince(started) > 0.6 {
+          // Where the window lands: the picture as it is now (the player may have just opened up).
+          engine.placeMirror?()
           engine.screenNote(engine.screenDrawing ? "picture ready: window handed back" : "picture not ready in time: window handed back")
+          engine.screenNote("lands on: \(engine.describeMirror?() ?? "?")\(AppModel.shared.playerMinimized ? " (mini player)" : "")")
           completionHandler(true)
         } else {
           DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) { MainActor.assumeIsolated { check() } }
