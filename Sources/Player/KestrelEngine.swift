@@ -385,24 +385,44 @@ final class KestrelEngine: NSObject {
 
   /// Seconds behind live: now, less when the frame showing was captured.
   var latency: Double? {
-    guard let raw = rawLatency else { return nil }
+    guard let raw = streamClockLatency else { return nil }
     return max(0, raw - timestampSkew)
   }
 
   /// From the stream's own timestamps (Twitch's program date-time), which some channels have well
   /// off (one read 33 s behind with 2.5 s in hand): see `timestampSkew`.
   var rawLatency: Double? {
+    streamClockLatency
+  }
+
+  /// By the stream's own clock, unclamped (a channel whose clock runs ahead reads below zero).
+  private var streamClockLatency: Double? {
     guard clockRunning, let anchor else { return nil }
     let shown = anchor.date.addingTimeInterval(Double(now - anchor.time) / Double(Self.clock))
     let value = Date().timeIntervalSince(shown)
-    return value.isFinite && value > -1 ? max(0, value) : nil
+    return value.isFinite ? value : nil
   }
+
 
   /// How far the stream's timestamps are off, when they're clearly off: checked once a few
   /// seconds in, against what's in hand (the player is never much further behind live than that
   /// plus a second or two on the way).
   private func checkTimestamps(ahead: Double) {
-    guard !timestampsChecked, let raw = rawLatency, let since = playingSince, Date().timeIntervalSince(since) > 3 else { return }
+    guard let raw = streamClockLatency, let since = playingSince, Date().timeIntervalSince(since) > 3 else { return }
+    // The player can't be closer to live than what it has in hand ahead of what's showing, plus
+    // the newest video's own delay on the way (Twitch's low latency: about 0.8 s). A clock that
+    // says less runs ahead (one read 0.00 s with 1.5 s in hand): measured and taken off, and again
+    // whenever it drifts below that.
+    let floor = ahead + Self.deliveryDelay
+    if raw - timestampSkew < floor - 0.25 {
+      timestampSkew = raw - floor
+      if !timestampsChecked {
+        ActivityLog.shared.add(String(format: "Kestrel player: this stream's clock runs %.1f s ahead; latency shown corrected", -timestampSkew))
+      }
+      timestampsChecked = true
+      return
+    }
+    guard !timestampsChecked else { return }
     timestampsChecked = true
     let expected = ahead + 2
     if raw > expected + 4 {
@@ -410,6 +430,9 @@ final class KestrelEngine: NSObject {
       ActivityLog.shared.add(String(format: "Kestrel player: this stream's timestamps are about %.0f s off; latency shown corrected", timestampSkew))
     }
   }
+
+  /// How far behind the broadcast the newest video usually arrives (Twitch low latency).
+  static let deliveryDelay = 0.8
 
   var rate: Float { speed }
 
