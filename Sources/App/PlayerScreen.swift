@@ -1347,20 +1347,20 @@ struct PlayerScreen: View {
     // window (the hand-over happens behind it), then the video slides back to its place beside
     // chat, as other video apps do.
     .onChange(of: model.pictureInPictureReturning) { returning in
-      // From the mini player: the player opens up for the window to land in (as video apps do; it
-      // landed on a spot where nothing was drawn, and the app showed black).
-      if returning, app.playerMinimized {
-        var instant = Transaction()
-        instant.disablesAnimations = true
-        withTransaction(instant) { app.playerMinimized = false }
-      }
-      guard OrientationLock.largeWindow else { return }
+      // (From the mini player the window goes back into the mini player as it is.)
+      guard OrientationLock.largeWindow, !app.playerMinimized else { return }
       if returning, !largeFullScreen {
         var instant = Transaction()
         instant.disablesAnimations = true
         withTransaction(instant) {
           largeFullScreen = true
           fullForReturn = true
+        }
+        // Whatever the window does, back beside chat shortly (it could be left filling the window).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+          guard fullForReturn else { return }
+          fullForReturn = false
+          withAnimation(.spring(response: 0.5, dampingFraction: 0.9)) { largeFullScreen = false }
         }
       } else if !returning, fullForReturn {
         fullForReturn = false
