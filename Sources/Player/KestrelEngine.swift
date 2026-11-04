@@ -230,6 +230,29 @@ final class KestrelEngine: NSObject {
   /// Picture in Picture and the background, where our own decoding session is shut down. If the
   /// layer keeps failing on a stream, decoding moves here (VideoToolbox) for the rest of it.
   private(set) var decodeInLayer = true
+  /// Decoding here by request (see `setDecodeHere`), not because the layer kept failing.
+  private var decodingHereByRequest = false
+  /// Every decoded picture and when it's shown, while decoding here (multi-view's Picture in
+  /// Picture with controls draws all the streams into one picture from these).
+  var onPicture: ((CVImageBuffer, CMTime) -> Void)?
+
+  /// Decodes with VideoToolbox here (pictures handed to the screen's layer and `onPicture`)
+  /// instead of in the layer, or back. From the next keyframe.
+  func setDecodeHere(_ on: Bool) {
+    if on, decodeInLayer {
+      decodeInLayer = false
+      decodingHereByRequest = true
+      waitingForKeyframe = true
+    } else if !on, decodingHereByRequest {
+      decodingHereByRequest = false
+      decodeInLayer = true
+      displayLayer.flush()
+      waitingForKeyframe = true
+    }
+  }
+
+  /// The stream's clock: what's showing now.
+  var clockTime: CMTime { CMTimebaseGetTime(videoClock) }
   private var layerFailures: [Date] = []
 
   // Quality: the best that plays smoothly (ConnectionFit), unless one is picked by hand.
@@ -674,6 +697,12 @@ final class KestrelEngine: NSObject {
     } else {
       guard let session = decoderSession(for: format), let sample = entry.sample(hidden: false) else {
         waitingForKeyframe = true
+        if decodingHereByRequest {
+          // (VideoToolbox can't take this stream here, e.g. AV1: back to the layer.)
+          decodingHereByRequest = false
+          decodeInLayer = true
+          ActivityLog.shared.add("Kestrel player: can't decode this stream here; left to the layer")
+        }
         return
       }
       waitingForKeyframe = false
@@ -954,6 +983,7 @@ final class KestrelEngine: NSObject {
     CMSampleBufferCreateReadyWithImageBuffer(
       allocator: kCFAllocatorDefault, imageBuffer: image, formatDescription: format, sampleTiming: &timing, sampleBufferOut: &sample)
     guard let sample else { return }
+    onPicture?(image, pts)
     // (A picture layer that stopped in the background just needs flushing.)
     if !inBackground {
       if displayLayer.status == .failed || displayLayer.requiresFlushToResumeDecoding { displayLayer.flush() }

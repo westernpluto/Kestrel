@@ -460,6 +460,10 @@ struct KestrelVideoView: UIViewRepresentable {
 
     override init(frame: CGRect) {
       super.init(frame: frame)
+      // Only a picture: touches go to what's over it (the mini player's buttons, the gestures).
+      // Left on, this UIKit view under the mini player's buttons took some of their taps (only
+      // Kestrel's player uses it, so only live streams had it).
+      isUserInteractionEnabled = false
       for host in [mirrorHost, screenHost] {
         host.isUserInteractionEnabled = false
         host.backgroundColor = .clear

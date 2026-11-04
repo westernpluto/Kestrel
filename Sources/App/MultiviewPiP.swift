@@ -246,17 +246,7 @@
           CGRect(x: bounds.minX, y: bounds.minY + height + gap, width: bounds.width, height: height),
         ]
       default:
-        let width = (bounds.width - gap) / 2
-        let height = (bounds.height - gap) / 2
-        var out: [CGRect] = []
-        for index in 0..<min(count, 4) {
-          let row = index / 2
-          let column = index % 2
-          // A third picture on its own goes in the middle of the bottom row.
-          let x = count == 3 && index == 2 ? bounds.minX + (bounds.width - width) / 2 : bounds.minX + CGFloat(column) * (width + gap)
-          out.append(CGRect(x: x, y: bounds.minY + CGFloat(row) * (height + gap), width: width, height: height))
-        }
-        return out
+        return MultiviewLayout.grid(count: count, in: bounds.size, spacing: gap).map { $0.offsetBy(dx: bounds.minX, dy: bounds.minY) }
       }
     }
   }

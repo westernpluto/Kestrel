@@ -35,6 +35,8 @@ struct ApplePlayerSurface: UIViewRepresentable {
   func makeUIView(context: Context) -> PlayerLayerView {
     let view = PlayerLayerView()
     view.backgroundColor = .black
+    // A picture only: touches go to the controls and gestures over it.
+    view.isUserInteractionEnabled = false
     view.playerLayer.player = player
     view.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
     context.coordinator.view = view
@@ -1220,7 +1222,7 @@ struct PlayerScreen: View {
           .allowsHitTesting(false)
 
         PlayerVideoArea(
-          model: model, landscape: layout.fullScreen, chatOpen: chatOpen, controlInsets: layout.controls,
+          model: model, landscape: layout.fullScreen, chatOpen: chatOpen, controlInsets: progress == 0 ? layout.controls : EdgeInsets(),
           pictureInsets: progress == 0 ? layout.pictureInsets : EdgeInsets(),
           topBarExtra: layout.topBarExtra, bottomRowExtra: layout.bottomRowExtra,
           chromeVisible: progress == 0, minimized: app.playerMinimized, chatOnLeft: layout.chatOnLeft,

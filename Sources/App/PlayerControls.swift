@@ -570,7 +570,13 @@ struct PlayerControls: View {
         // This stream and others at once.
         button("rectangle.split.2x2", label: "Multi-view: watch with other streams") { app.openMultiview([channel]) }
       }
-      AirPlayButton().frame(width: 40, height: 40)
+      // UIKit's AirPlay button takes touches whatever SwiftUI says: only there while the controls
+      // show (hidden in the mini player, it caught taps meant for the app beside it).
+      if visible {
+        AirPlayButton().frame(width: 40, height: 40)
+      } else {
+        Color.clear.frame(width: 40, height: 40)
+      }
       if AVPictureInPictureController.isPictureInPictureSupported() {
         button(model.pictureInPictureActive ? "pip.exit" : "pip.enter", label: "Picture in Picture") {
           model.togglePictureInPicture()
@@ -826,27 +832,20 @@ struct PlayerControls: View {
   }
 
   /// Where chat goes, in one place (it used to be two look-alike buttons).
+  /// Where chat goes, in one place (it used to be two look-alike buttons). Built from plain
+  /// values so it only redraws when they change: rebuilt with every stats update while open, its
+  /// text flickered.
   private func chatMenu(_ current: ChatMode) -> some View {
-    Menu {
-      Picker("Chat", selection: Binding(get: { current }, set: { mode in
+    ChatModeMenu(
+      current: current, modes: chatModes,
+      pick: { [setChatMode, interacted] mode in
         setChatMode(mode)
-        show(mode.hint)
         interacted(3.5)
-      })) {
-        ForEach(chatModes, id: \.self) { mode in
-          Label(mode.title, systemImage: mode.systemImage).tag(mode)
-        }
-      }
-    } label: {
-      Image(systemName: current == .off ? "bubble.left" : "bubble.left.fill")
-        .font(.system(size: 18, weight: .semibold))
-        .foregroundColor(current == .off ? .white : .accentTeal)
-        .frame(width: 40, height: 40)
-        .contentShape(Rectangle())
-    }
-    .accessibilityLabel("Chat")
-    .accessibilityValue(current.title)
-    .simultaneousGesture(TapGesture().onEnded { interacted(12) })
+      },
+      picked: { show($0.hint) },
+      opened: { [interacted] in interacted(12) }
+    )
+    .equatable()
   }
 
   private func show(_ text: String) {
@@ -1323,6 +1322,38 @@ struct LayoutToggle: Equatable {
   var isOn: Bool
   /// It's chat over the video (offered in the chat menu instead of as its own button).
   var chatOverVideo = false
+}
+
+struct ChatModeMenu: View, Equatable {
+  var current: ChatMode
+  var modes: [ChatMode]
+  var pick: (ChatMode) -> Void
+  var picked: (ChatMode) -> Void
+  var opened: () -> Void
+
+  static func == (a: Self, b: Self) -> Bool { a.current == b.current && a.modes == b.modes }
+
+  var body: some View {
+    Menu {
+      Picker("Chat", selection: Binding(get: { current }, set: { mode in
+        pick(mode)
+        picked(mode)
+      })) {
+        ForEach(modes, id: \.self) { mode in
+          Label(mode.title, systemImage: mode.systemImage).tag(mode)
+        }
+      }
+    } label: {
+      Image(systemName: current == .off ? "bubble.left" : "bubble.left.fill")
+        .font(.system(size: 18, weight: .semibold))
+        .foregroundColor(current == .off ? .white : .accentTeal)
+        .frame(width: 40, height: 40)
+        .contentShape(Rectangle())
+    }
+    .accessibilityLabel("Chat")
+    .accessibilityValue(current.title)
+    .simultaneousGesture(TapGesture().onEnded { opened() })
+  }
 }
 
 /// Where chat goes in full screen.

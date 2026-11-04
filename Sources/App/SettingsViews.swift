@@ -214,11 +214,13 @@ struct PictureInPictureSettingsView: View {
       } footer: {
         Text("On: the regular window with play and pause; the picture can show black for a moment when you come back to the app. Off: no buttons in the window, but the stream comes back without the black (pause from the lock screen, Control Center or headphones). For both players (the low-latency one and Kestrel's own). Applies from the next stream you open.")
       }
-      if PlayerEngine.isLowLatencyBuilt {
+      if PlayerEngine.isLowLatencyBuilt || settings.kestrelPlayer {
         Section {
           Toggle("Multi-view: all streams together", isOn: $settings.multiviewPiPAll)
         } footer: {
-          Text("Multi-view's Picture in Picture shows every stream at once, laid out as on screen (experimental). Off, it shows the picked stream.")
+          Text(
+            "Multi-view's Picture in Picture shows every stream at once, laid out as on screen (experimental). Off, it shows the picked stream. With Kestrel's player and Playback controls on, the window has play and pause too."
+          )
         }
       }
       Section { MiniPlayerSpacer() }

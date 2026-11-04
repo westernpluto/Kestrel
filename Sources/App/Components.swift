@@ -411,6 +411,7 @@ struct StreamRow: View {
             .padding(5)
           }
           .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+          .overlay(alignment: .topTrailing) { MultiviewQuickAdd(channel: stream.channel, compact: true).padding(4) }
 
         VStack(alignment: .leading, spacing: 3) {
           HStack(spacing: 6) {
@@ -441,6 +442,38 @@ struct StreamRow: View {
         MultiviewMenuButton(channel: stream.channel)
         Button { app.push(.channel(stream.channel)) } label: { Label("Open channel", systemImage: "person.crop.circle") }
       }
+    }
+  }
+}
+
+/// With multi-view open (or tucked away), a + on each live stream's picture adds it in one tap
+/// (holding every card for its menu was slow); a tick once it's in.
+struct MultiviewQuickAdd: View {
+  let channel: Channel
+  var compact = false
+  @EnvironmentObject private var app: AppModel
+
+  var body: some View {
+    if let multiview = app.multiview {
+      let added = multiview.contains(channel)
+      Button {
+        guard !added else { return }
+        Haptics.tap()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { app.addToMultiview(channel) }
+      } label: {
+        Image(systemName: added ? "checkmark" : "plus")
+          .font(.system(size: compact ? 12 : 14, weight: .bold))
+          .foregroundColor(added ? .black : .white)
+          .frame(width: compact ? 26 : 32, height: compact ? 26 : 32)
+          .background(added ? Color.accentTeal : Color.black.opacity(0.65), in: Circle())
+          .overlay(Circle().stroke(Color.white.opacity(added ? 0 : 0.35), lineWidth: 1))
+          .contentShape(Circle().inset(by: -6))
+      }
+      .buttonStyle(PressableStyle(scale: 0.85))
+      .disabled(!added && multiview.isFull)
+      .opacity(!added && multiview.isFull ? 0.4 : 1)
+      .transition(.scale.combined(with: .opacity))
+      .accessibilityLabel(added ? "In multi-view" : "Add to multi-view")
     }
   }
 }
@@ -533,6 +566,7 @@ struct StreamCard: View {
             }
           }
           .clipShape(RoundedRectangle(cornerRadius: 10))
+          .overlay(alignment: .topTrailing) { MultiviewQuickAdd(channel: stream.channel).padding(6) }
         VStack(alignment: .leading, spacing: 4) {
           if showChannel {
             HStack(spacing: 6) {

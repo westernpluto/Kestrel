@@ -1308,6 +1308,7 @@
       let slot = PictureSlot()
       slot.backgroundColor = .black
       slot.clipsToBounds = true
+      slot.isUserInteractionEnabled = false
       controller.setFill(fill)
       slot.onWindow = { [weak controller] slot in controller?.attach(slot) }
       return slot

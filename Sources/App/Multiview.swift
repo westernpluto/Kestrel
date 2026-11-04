@@ -23,6 +23,9 @@ final class MultiviewModel: ObservableObject, Identifiable {
 
   /// Nine at most (3×3): every one is fetched only as sharp as it's shown, so a full grid stays light.
   static let maxTiles = 9
+  /// Between one stream starting and the next (see `start`).
+  private static let startSpacing: UInt64 = 450_000_000
+  private var startTask: Task<Void, Never>?
   static let volumeSteps: [Float] = [1, 0.75, 0.5, 0.25]
   /// Tucked away (or waiting to start): nothing's on screen, so nothing sharper than this is fetched.
   static let hiddenHeight = 160
@@ -51,6 +54,14 @@ final class MultiviewModel: ObservableObject, Identifiable {
   #if canImport(AmazonIVSPlayer)
     private lazy var sharedPiP = MultiviewPictureInPicture(model: self)
   #endif
+  /// All the streams in one window with play and pause (Kestrel's player, Playback controls on).
+  private lazy var controlsPiP = MultiviewControlsPiP(model: self)
+
+  /// Every stream is on Kestrel's player and Picture in Picture has controls: the window with
+  /// controls (see MultiviewControlsPiP) rather than the one that moves the pictures in.
+  var usesControlsPiP: Bool {
+    AppSettings.shared.pipControls && AppSettings.shared.kestrelPlayer && !tiles.isEmpty
+  }
 
   nonisolated init() {}
 
@@ -127,7 +138,20 @@ final class MultiviewModel: ObservableObject, Identifiable {
     running = true
     paused = false
     NowPlaying.shared.attach(multiview: self)
-    for tile in tiles { Task { await tile.player.start() } }
+    // One after another, the one picked first: all at once (nine connections, nine decoders and
+    // nine sound engines starting together), every stream stuttered for a while before they
+    // settled.
+    let featured = tiles.filter { $0.id == selectedID || heardIDs.contains($0.id) }
+    let order = (featured + tiles.filter { tile in !featured.contains { $0.id == tile.id } }).map(\.player)
+    startTask?.cancel()
+    startTask = Task { [weak self] in
+      for (index, player) in order.enumerated() {
+        if index > 0 { try? await Task.sleep(nanoseconds: Self.startSpacing) }
+        guard !Task.isCancelled, let self, self.running else { return }
+        guard self.tiles.contains(where: { $0.player === player }) else { continue }
+        Task { await player.start() }
+      }
+    }
     applySound()
     if let selectedID { startChat(for: selectedID) }
     updatePictureInPicture()
@@ -137,6 +161,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
   /// on the dock starts them again.
   func park() {
     guard running else { return }
+    startTask?.cancel()
     stopPictureInPicture()
     NowPlaying.shared.detach(multiview: self)
     running = false
@@ -186,6 +211,11 @@ final class MultiviewModel: ObservableObject, Identifiable {
   /// Picture in Picture: every stream together (Settings › Playback, experimental), or the picked
   /// one (the others carry on: heard ones keep their sound).
   func togglePictureInPicture() {
+    if picturesTogether, usesControlsPiP || controlsPiP.isActive {
+      updatePictureInPicture()
+      controlsPiP.toggle()
+      return
+    }
     #if canImport(AmazonIVSPlayer)
       if picturesTogether || sharedPiP.isActive {
         updatePictureInPicture()
@@ -223,7 +253,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
     #if canImport(AmazonIVSPlayer)
       return AppSettings.shared.multiviewPiPAll && tiles.count > 1
     #else
-      return false
+      return AppSettings.shared.multiviewPiPAll && tiles.count > 1 && usesControlsPiP
     #endif
   }
 
@@ -233,6 +263,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
   func setPictureLayout(_ rects: [String: CGRect], in size: CGSize) {
     guard size.width > 0, size.height > 0 else { return }
     pictureLayout = (rects, size)
+    controlsPiP.setLayout(rects, in: size)
     #if canImport(AmazonIVSPlayer)
       sharedPiP.setLayout(rects, in: size)
       sharedPiP.fit(count: tiles.count)
@@ -242,11 +273,15 @@ final class MultiviewModel: ObservableObject, Identifiable {
   /// Sets up whichever Picture in Picture applies now.
   func updatePictureInPicture() {
     let together = picturesTogether
+    let withControls = usesControlsPiP
     for tile in tiles { tile.player.pictureInPictureAllowed = !together && tile.id == selectedID }
+    if let pictureLayout { controlsPiP.setLayout(pictureLayout.rects, in: pictureLayout.size) }
+    controlsPiP.setEnabled(together && withControls && running && !hidden, source: pictureSource)
+    controlsPiP.sync()
     #if canImport(AmazonIVSPlayer)
       if let pictureLayout { sharedPiP.setLayout(pictureLayout.rects, in: pictureLayout.size) }
       sharedPiP.fit(count: tiles.count)
-      sharedPiP.setEnabled(together && running && !hidden, source: pictureSource)
+      sharedPiP.setEnabled(together && !withControls && running && !hidden, source: pictureSource)
       sharedPiP.sync()
     #endif
   }
@@ -287,15 +322,17 @@ final class MultiviewModel: ObservableObject, Identifiable {
   /// Paused or played from the lock screen, Control Center or headphones. Pausing stops every
   /// stream and closes the Picture in Picture window (it has no buttons of its own); playing picks
   /// them up at live again: in the background just the ones heard, the others with the app.
-  func setPaused(_ pause: Bool) {
+  func setPaused(_ pause: Bool, keepWindow: Bool = false) {
     guard running else { return }
     paused = pause
+    controlsPiP.playbackChanged()
     if pause {
-      stopPictureInPicture()
+      // (The window with controls stays up, paused; the other kind has no play button.)
+      if !keepWindow, !controlsPiP.isActive { stopPictureInPicture() }
       for tile in tiles { tile.player.setPaused(true) }
     } else {
       let background = UIApplication.shared.applicationState == .background
-      for tile in tiles where !background || heardIDs.contains(tile.id) { tile.player.setPaused(false) }
+      for tile in tiles where !background || heardIDs.contains(tile.id) || controlsPiP.isActive { tile.player.setPaused(false) }
     }
     NowPlaying.shared.update(multiview: self)
   }
@@ -309,6 +346,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
   }
 
   private func stopPictureInPicture() {
+    controlsPiP.stop()
     #if canImport(AmazonIVSPlayer)
       sharedPiP.stop()
     #endif
@@ -326,6 +364,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
   }
 
   func stopAll() {
+    startTask?.cancel()
     stopPictureInPicture()
     NowPlaying.shared.detach(multiview: self)
     for tile in tiles { tile.player.stop() }
@@ -511,7 +550,7 @@ struct MultiviewScreen: View {
             others: model.tiles.filter { $0.id != tile.id }.map(\.channel),
             swap: { other in
               Haptics.tap()
-              withAnimation(Self.spring) { model.swap(tile.id, other) }
+              withAnimation(Self.spring) { swapTiles(tile.id, other) }
             }
           )
           .frame(width: rect.width, height: rect.height)
@@ -531,7 +570,7 @@ struct MultiviewScreen: View {
               guard let dragged = item as? String else { return }
               Task { @MainActor in
                 Haptics.tap()
-                withAnimation(Self.spring) { model.swap(dragged, tile.id) }
+                withAnimation(Self.spring) { swapTiles(dragged, tile.id) }
               }
             }
             return true
@@ -742,6 +781,16 @@ struct MultiviewScreen: View {
       return MultiviewLayout.focus(count: count, main: main, in: size)
     }
     return MultiviewLayout.grid(count: count, in: size)
+  }
+
+  /// Two pictures change places. With one big picture, whichever lands in the big one's place
+  /// becomes the big one (the big one is the picked stream, wherever it sits in the order).
+  private func swapTiles(_ a: String, _ b: String) {
+    guard a != b else { return }
+    if focus, model.tiles.count > 1, let big = model.selectedID, big == a || big == b {
+      model.select(big == a ? b : a)
+    }
+    model.swap(a, b)
   }
 
   private func layoutKey(_ rects: [CGRect], in size: CGSize) -> String {
