@@ -21,8 +21,9 @@ final class MultiviewModel: ObservableObject, Identifiable {
     var id: String { channel.id }
   }
 
-  /// Nine at most (3×3): every one is fetched only as sharp as it's shown, so a full grid stays light.
-  static let maxTiles = 9
+  /// Six at most: with nine, the phone ran out of memory (the app quit, or the phone restarted its
+  /// home screen).
+  static let maxTiles = 6
   /// Between one stream starting and the next (see `start`).
   private static let startSpacing: UInt64 = 450_000_000
   private var startTask: Task<Void, Never>?
@@ -138,8 +139,8 @@ final class MultiviewModel: ObservableObject, Identifiable {
     running = true
     paused = false
     NowPlaying.shared.attach(multiview: self)
-    // One after another, the one picked first: all at once (nine connections, nine decoders and
-    // nine sound engines starting together), every stream stuttered for a while before they
+    // One after another, the one picked first: all at once (six connections, six decoders and
+    // six sound engines starting together), every stream stuttered for a while before they
     // settled.
     let featured = tiles.filter { $0.id == selectedID || heardIDs.contains($0.id) }
     let order = (featured + tiles.filter { tile in !featured.contains { $0.id == tile.id } }).map(\.player)
@@ -303,7 +304,9 @@ final class MultiviewModel: ObservableObject, Identifiable {
       Task { [weak self] in
         try? await Task.sleep(nanoseconds: 4_000_000_000)
         guard let self, self.pictureInPictureActive else { return }
-        let cap = self.tiles.count <= 2 ? 480 : 360
+        // The window with controls plays at 60 frames a second: Twitch's 60 fps starts at 720p
+        // (lower ones are 30), so up to four streams keep it there.
+        let cap = self.controlsPiP.isActive ? (self.tiles.count <= 4 ? 720 : 480) : (self.tiles.count <= 2 ? 480 : 360)
         for tile in self.tiles { tile.player.setMaxHeight(cap) }
       }
     } else if !hidden {

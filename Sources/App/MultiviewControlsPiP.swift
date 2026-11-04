@@ -1,7 +1,7 @@
 // Every multi-view stream in one Picture in Picture window, with the window's own play and pause
 // (Kestrel's player, Settings › Playback › Playback controls on). The video-call kind of window
 // that moves the streams' own pictures in has no controls, so here each stream's decoded
-// pictures are drawn together into one picture, laid out as on the multi-view screen, about 30
+// pictures are drawn together into one picture, laid out as on the multi-view screen, about 60
 // times a second, and that is what the window plays.
 
 import AVKit
@@ -156,7 +156,7 @@ final class MultiviewControlsPiP: NSObject, AVPictureInPictureControllerDelegate
     guard timer == nil else { return }
     // A dispatch timer, not a display link: it keeps going in the background, where the window is.
     let timer = DispatchSource.makeTimerSource(queue: .main)
-    timer.schedule(deadline: .now(), repeating: .milliseconds(33), leeway: .milliseconds(4))
+    timer.schedule(deadline: .now(), repeating: .nanoseconds(16_666_667), leeway: .milliseconds(2))
     timer.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.draw() } }
     timer.resume()
     self.timer = timer
@@ -170,7 +170,7 @@ final class MultiviewControlsPiP: NSObject, AVPictureInPictureControllerDelegate
   /// The picture each stream shows now: its newest one due by its clock.
   private func current(_ id: String) -> CVImageBuffer? {
     guard var list = frames[id], !list.isEmpty, let engine = hooked[id] else { return nil }
-    let now = CMTimeAdd(engine.clockTime, CMTime(value: 1, timescale: 60))
+    let now = CMTimeAdd(engine.clockTime, CMTime(value: 1, timescale: 120))
     var pick = 0
     for (index, frame) in list.enumerated() where CMTimeCompare(frame.time, now) <= 0 { pick = index }
     if pick > 0 { list.removeFirst(pick) }
@@ -184,7 +184,7 @@ final class MultiviewControlsPiP: NSObject, AVPictureInPictureControllerDelegate
   private func draw() {
     ticks += 1
     // (Streams whose player came up since: hooked in.)
-    if ticks % 30 == 0 { sync() }
+    if ticks % 60 == 0 { sync() }
     guard let source else { return }
     if layer.superlayer != nil, layer.frame != source.bounds {
       CATransaction.begin()
@@ -212,11 +212,11 @@ final class MultiviewControlsPiP: NSObject, AVPictureInPictureControllerDelegate
     // Nothing new to show: drawn again only now and then (the window keeps its last picture).
     if lastDrawn == previous {
       idleTicks += 1
-      if idleTicks % 15 != 0 { return }
+      if idleTicks % 30 != 0 { return }
     } else {
       idleTicks = 0
     }
-    guard anything || idleTicks % 15 == 0, let buffer = makeBuffer(size) else { return }
+    guard anything || idleTicks % 30 == 0, let buffer = makeBuffer(size) else { return }
     context.render(picture, to: buffer, bounds: extent, colorSpace: CGColorSpaceCreateDeviceRGB())
     enqueue(buffer)
   }
@@ -246,7 +246,7 @@ final class MultiviewControlsPiP: NSObject, AVPictureInPictureControllerDelegate
     }
     guard let format else { return }
     var timing = CMSampleTimingInfo(
-      duration: CMTime(value: 1, timescale: 30), presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+      duration: CMTime(value: 1, timescale: 60), presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
       decodeTimeStamp: .invalid)
     var sample: CMSampleBuffer?
     CMSampleBufferCreateReadyWithImageBuffer(
