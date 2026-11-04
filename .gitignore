@@ -3,3 +3,7 @@ build/
 *.ipa
 vendor/
 build-tv/
+
+# Signing keys never go in the repository.
+*.jks
+*.keystore

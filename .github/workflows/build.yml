@@ -122,8 +122,24 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Signing key
+        # The release key, from the repository's KESTREL_KEYSTORE_BASE64 and KESTREL_KEYSTORE_PASSWORD
+        # secrets (never in the repository). Without them the APK is signed with a debug key and
+        # won't install over an official build.
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KESTREL_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/kestrel-release.jks"
+            echo "KESTREL_KEYSTORE=$RUNNER_TEMP/kestrel-release.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No KESTREL_KEYSTORE_BASE64 secret: the APK is signed with a debug key and won't install over an official build."
+          fi
+
       - name: Build APK
         run: gradle assembleRelease --no-daemon --stacktrace
+        env:
+          KESTREL_KEYSTORE_PASSWORD: ${{ secrets.KESTREL_KEYSTORE_PASSWORD }}
 
       - name: Name the APK
         run: cp app/build/outputs/apk/release/app-release.apk Kestrel.apk

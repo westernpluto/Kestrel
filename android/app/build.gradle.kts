@@ -17,23 +17,26 @@ android {
         versionName = System.getenv("VERSION") ?: "1.0.0"
     }
 
-    // One fixed key, so new builds install as updates (see android/README.md).
+    // The release key comes from outside the repository (GitHub Actions decodes it from the
+    // KESTREL_KEYSTORE_BASE64 secret into a file and points KESTREL_KEYSTORE at it), so every
+    // official build signs the same way and installs as an update, and nobody else can sign one
+    // that would. Without it (a local build, a fork): the debug key, fine for trying it out.
+    val releaseKeystore = System.getenv("KESTREL_KEYSTORE")?.let { file(it) }?.takeIf { it.exists() }
     signingConfigs {
-        create("kestrel") {
-            storeFile = file("../keystore/kestrel.jks")
-            storePassword = "kestrel-android"
-            keyAlias = "kestrel"
-            keyPassword = "kestrel-android"
+        if (releaseKeystore != null) {
+            create("kestrel") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("KESTREL_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KESTREL_KEY_ALIAS") ?: "kestrel"
+                keyPassword = System.getenv("KESTREL_KEYSTORE_PASSWORD")
+            }
         }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("kestrel")
-        }
-        debug {
-            signingConfig = signingConfigs.getByName("kestrel")
+            signingConfig = if (releaseKeystore != null) signingConfigs.getByName("kestrel") else signingConfigs.getByName("debug")
         }
     }
 

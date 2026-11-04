@@ -38,7 +38,7 @@ Locally: install Android Studio (or the command-line SDK with platform 34 and JD
 
 ## Signing
 
-The APK is signed with `keystore/kestrel.jks` (password `kestrel-android`), which is committed so every build signs the same way and installs as an update. Anyone with access to this repository can sign an APK that installs over yours, so keep the repository private. To use your own key instead, replace the keystore and the passwords in `app/build.gradle.kts` (existing installs then need to be uninstalled once).
+Official builds are signed with a release key kept out of the repository: GitHub Actions takes it from the repository's `KESTREL_KEYSTORE_BASE64` (the keystore, base64) and `KESTREL_KEYSTORE_PASSWORD` secrets, so every build installs as an update over the last and nobody else can sign one that would. A build without them (locally, or in a fork) is signed with the debug key: it installs, but not over an official build. To sign with your own key, set `KESTREL_KEYSTORE` (the keystore's path), `KESTREL_KEYSTORE_PASSWORD` and optionally `KESTREL_KEY_ALIAS` (default `kestrel`) when building.
 
 ## Layout
 
