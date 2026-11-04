@@ -79,6 +79,9 @@ struct IRCMessage: Equatable {
 enum ChatFragment: Equatable {
   case text(String)
   case emote(name: String, url: URL)
+  /// A GIF from Twitch's GIF keyboard (Tier 2 and 3 subs): its name (the placeholder text) and
+  /// picture.
+  case gif(name: String, url: URL)
 }
 
 struct ChatMessage: Identifiable, Equatable {
@@ -94,6 +97,9 @@ struct ChatMessage: Identifiable, Equatable {
   var systemText: String?
   /// Twitch emotes: id and Unicode-scalar ranges into `text`.
   var emotes: [(id: String, range: ClosedRange<Int>)]
+  /// GIFs from Twitch's GIF keyboard: id, picture, and the Unicode-scalar range of the
+  /// placeholder text they stand for (the IRC `gifs` tag).
+  var gifs: [(id: String, url: URL, range: ClosedRange<Int>)] = []
   var timestamp: Date
   var isDeleted = false
 
@@ -118,6 +124,7 @@ struct ChatMessage: Identifiable, Equatable {
       self.text = text
       systemText = irc.command == "USERNOTICE" ? tags["system-msg"] : nil
       emotes = Self.parseEmotes(tags["emotes"] ?? "")
+      if irc.command == "PRIVMSG" { gifs = Self.parseGifs(tags["gifs"] ?? "") }
       timestamp = tags["tmi-sent-ts"].flatMap(Double.init).map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date()
       if kind == .system, systemText == nil, text.isEmpty { return nil }
     case "NOTICE":
@@ -217,6 +224,50 @@ struct ChatMessage: Identifiable, Equatable {
     return result.sorted { $0.1.lowerBound < $1.1.lowerBound }
   }
 
+  /// The `gifs` tag: `start-end|id|url`, comma-separated. Commas aren't escaped (a URL can hold
+  /// one), so it's split only at a comma followed by the next `digits-digits|`.
+  static func parseGifs(_ tag: String) -> [(id: String, url: URL, range: ClosedRange<Int>)] {
+    guard !tag.isEmpty else { return [] }
+    var entries: [Substring] = []
+    var start = tag.startIndex
+    var index = tag.startIndex
+    while index < tag.endIndex {
+      if tag[index] == ",", Self.startsEntry(tag[tag.index(after: index)...]) {
+        entries.append(tag[start..<index])
+        start = tag.index(after: index)
+      }
+      index = tag.index(after: index)
+    }
+    entries.append(tag[start...])
+    var result: [(String, URL, ClosedRange<Int>)] = []
+    for entry in entries {
+      let parts = entry.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+      guard parts.count == 3 else { continue }
+      let bounds = parts[0].split(separator: "-")
+      guard bounds.count == 2, let a = Int(bounds[0]), let b = Int(bounds[1]), a <= b, !parts[1].isEmpty,
+        let url = URL(string: String(parts[2])), url.scheme == "https"
+      else { continue }
+      result.append((String(parts[1]), url, a...b))
+    }
+    return result.sorted { $0.2.lowerBound < $1.2.lowerBound }
+  }
+
+  private static func startsEntry(_ text: Substring) -> Bool {
+    var sawDigit = false
+    var sawDash = false
+    for character in text {
+      if character.isASCII, character.isNumber {
+        sawDigit = true
+      } else if character == "-", sawDigit, !sawDash {
+        sawDash = true
+        sawDigit = false
+      } else {
+        return character == "|" && sawDash && sawDigit
+      }
+    }
+    return false
+  }
+
   static func twitchEmoteURL(_ id: String) -> URL? {
     URL(string: "https://static-cdn.jtvnw.net/emoticons/v2/\(id)/default/dark/2.0")
   }
@@ -232,14 +283,18 @@ struct ChatMessage: Identifiable, Equatable {
       s.append(contentsOf: scalars[from..<to])
       pieces.append(contentsOf: Self.splitThirdParty(String(s), thirdParty))
     }
-    for emote in emotes {
-      let start = emote.range.lowerBound
-      let end = emote.range.upperBound + 1
-      guard start >= cursor, end <= scalars.count, let url = Self.twitchEmoteURL(emote.id) else { continue }
+    // Twitch emotes and GIFs, in order.
+    let placed: [(range: ClosedRange<Int>, url: URL?, gif: Bool)] =
+      (emotes.map { ($0.range, Self.twitchEmoteURL($0.id), false) } + gifs.map { ($0.range, Optional($0.url), true) })
+      .sorted { $0.range.lowerBound < $1.range.lowerBound }
+    for item in placed {
+      let start = item.range.lowerBound
+      let end = item.range.upperBound + 1
+      guard start >= cursor, end <= scalars.count, let url = item.url else { continue }
       appendText(cursor, start)
       var name = String.UnicodeScalarView()
       name.append(contentsOf: scalars[start..<end])
-      pieces.append(.emote(name: String(name), url: url))
+      pieces.append(item.gif ? .gif(name: String(name), url: url) : .emote(name: String(name), url: url))
       cursor = end
     }
     appendText(cursor, scalars.count)

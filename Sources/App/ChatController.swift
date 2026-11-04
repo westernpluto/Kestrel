@@ -545,6 +545,8 @@ struct RenderedMessage {
     var range: NSRange
     var url: URL
     var size: CGSize
+    /// How sharp to load it (a GIF is bigger than an emote).
+    var maxPixels: CGFloat = 112
   }
   var text: NSAttributedString
   var slots: [Slot]
@@ -590,6 +592,22 @@ enum ChatRenderer {
     attachment.image = UIImage()
     attachment.bounds = CGRect(x: 0, y: (font.capHeight - height) / 2, width: size.width, height: size.height)
     slots.append(RenderedMessage.Slot(range: NSRange(location: text.length, length: 1), url: url, size: size))
+    text.append(NSAttributedString(attachment: attachment))
+  }
+
+  /// A GIF from Twitch's GIF keyboard: on a line of its own, in a fixed box (its shape isn't known
+  /// before it loads, and a fixed box keeps the line from jumping when it does).
+  private static func gifSlot(
+    _ url: URL, fontSize: CGFloat, font: UIFont, into text: NSMutableAttributedString, slots: inout [RenderedMessage.Slot],
+    attributes: [NSAttributedString.Key: Any]
+  ) {
+    let height = (fontSize * 7).rounded()
+    let size = CGSize(width: (height * 4 / 3).rounded(), height: height)
+    if text.length > 0, !text.string.hasSuffix("\n") { text.append(NSAttributedString(string: "\n", attributes: attributes)) }
+    let attachment = NSTextAttachment()
+    attachment.image = UIImage()
+    attachment.bounds = CGRect(origin: .zero, size: size)
+    slots.append(RenderedMessage.Slot(range: NSRange(location: text.length, length: 1), url: url, size: size, maxPixels: 360))
     text.append(NSAttributedString(attachment: attachment))
   }
 
@@ -654,6 +672,7 @@ enum ChatRenderer {
       switch fragment {
       case .text(let t): text.append(NSAttributedString(string: t, attributes: body))
       case .emote(_, let url): slot(url, height: (fontSize * 1.75).rounded(), font: font, into: text, slots: &slots, waiting: &waiting)
+      case .gif(_, let url): gifSlot(url, fontSize: fontSize, font: font, into: text, slots: &slots, attributes: body)
       }
     }
     let highlighted = message.systemText != nil || (me.map { message.mentions($0) } ?? false)
@@ -710,7 +729,7 @@ final class ChatMessageView: UIView {
     }
     for (index, view) in imageViews.enumerated() {
       view.isHidden = index >= slots.count
-      if index < slots.count { view.load(slots[index].url, maxPixels: 112, fallback: nil) }
+      if index < slots.count { view.load(slots[index].url, maxPixels: slots[index].maxPixels, fallback: nil) }
     }
     setNeedsLayout()
     setNeedsDisplay()
@@ -1326,6 +1345,9 @@ struct ChatPanel: View {
   @State private var pickerSwap = 0
   @State private var focused = false
   @State private var warning: String? = nil
+  /// The picker's tab: emotes (0) or GIFs (1).
+  @State private var pickerTab = 0
+  @StateObject private var gifKeyboard = GifKeyboardModel()
 
   private static let spring = Animation.spring(response: 0.32, dampingFraction: 0.86)
   private var pickerPad: CGFloat { min(safeBottom, 24) }
@@ -1346,9 +1368,28 @@ struct ChatPanel: View {
       }
       inputBar
       if pickerOpen {
-        EmotePicker(sections: chat.emoteSections) { insert($0.name) }
-          .frame(height: pickerHeight)
-          .transition(.move(edge: .bottom).combined(with: .opacity))
+        VStack(spacing: 0) {
+          // Emotes, or Twitch's GIF keyboard (signed in, in a channel).
+          if account.session != nil, !chat.channel.id.isEmpty {
+            Picker("Picker", selection: $pickerTab) {
+              Text("Emotes").tag(0)
+              Text("GIFs").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 10)
+            .padding(.top, 6)
+            .onChange(of: pickerTab) { tab in if tab == 1 { gifKeyboard.prepare(channelID: chat.channel.id) } }
+          }
+          if pickerTab == 1 {
+            GifKeyboard(model: gifKeyboard) {
+              withAnimation(Self.spring) { pickerOpen = false }
+            }
+          } else {
+            EmotePicker(sections: chat.emoteSections) { insert($0.name) }
+          }
+        }
+        .frame(height: pickerHeight)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
       }
     }
     // While the keyboard comes or goes behind the open picker, the box stays on top of whichever

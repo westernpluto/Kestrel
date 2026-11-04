@@ -713,9 +713,18 @@ func testIRC() {
     switch f {
     case .text(let t): return "t(\(t))"
     case .emote(let n, _): return "e(\(n))"
+    case .gif(let n, _): return "g(\(n))"
     }
   }
   check(kinds == ["e(Kappa)", "t( )", "e(Keepo)", "t( )", "e(Kappa)", "t( )", "e(catJAM)", "t( 😀 ok)"], "fragments \(kinds)")
+
+  // GIFs from Twitch's GIF keyboard: the `gifs` tag (a comma inside a URL doesn't split it).
+  let gifRaw = "@gifs=0-12|joSNxe|https://media.giphy.com/media/joSNxe/giphy.gif?cid=a,b&rid=giphy.gif,14-18|k2|https://media.giphy.com/media/k2/giphy.gif;id=g1;login=a :a!a@a PRIVMSG #c :happy dancing Hello"
+  let gifMessage = ChatMessage(irc: IRCMessage.parse(gifRaw)!)!
+  check(gifMessage.gifs.count == 2 && gifMessage.gifs[0].id == "joSNxe" && gifMessage.gifs[0].url.absoluteString.hasSuffix("cid=a,b&rid=giphy.gif"), "gifs tag: \(gifMessage.gifs)")
+  let gifFragments = gifMessage.fragments(thirdParty: [:])
+  check(gifFragments.count == 3 && gifFragments[0] == .gif(name: "happy dancing", url: gifMessage.gifs[0].url) && gifFragments[1] == .text(" "), "gif fragments: \(gifFragments)")
+  check(ChatMessage.parseGifs("x|y").isEmpty && ChatMessage.parseGifs("0-3|id|http://insecure").isEmpty, "bad gifs ignored")
 
   // Emote positions count Unicode scalars (emoji before an emote).
   let emoji = IRCMessage.parse("@emotes=25:2-6;id=x :a!a@a PRIVMSG #c :😀 Kappa")!

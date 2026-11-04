@@ -646,6 +646,82 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     if follow, result["follow"].isNull { throw TwitchAPIError.gql("Twitch didn't confirm the follow") }
   }
 
+  // MARK: GIFs in chat
+
+  /// Twitch's GIF keyboard in a channel (Tier 2 and 3 subs): on or off, and the GIPHY key and
+  /// content rating Twitch hands out for it. GIFs Twitch accepts are ones found with this key at
+  /// this rating, sent with the address GIPHY gave (it carries the key's search).
+  struct GifPickerConfig: Sendable {
+    var isEnabled: Bool
+    var apiKey: String
+    /// Twitch's rating ("G", "PG", "PG_13"…).
+    var contentRating: String
+
+    /// GIPHY's name for it.
+    var giphyRating: String {
+      let rating = contentRating.uppercased()
+      if rating.contains("PG_13") || rating.contains("PG-13") { return "pg-13" }
+      if rating == "G" { return "g" }
+      return "pg"
+    }
+  }
+
+  func gifPickerConfig(channelID: String) async throws -> GifPickerConfig? {
+    guard TwitchAuth.shared.session != nil else { return nil }
+    let data = try await query(
+      """
+      query getGifPickerConfig($channelID: ID!) {
+        gifPickerConfig(channelID: $channelID) { isEnabled isAllowlisted apiKey contentRating }
+      }
+      """, variables: ["channelID": channelID], authenticated: true)
+    let config = data["gifPickerConfig"]
+    guard !config.isNull, let key = config["apiKey"].string, !key.isEmpty else { return nil }
+    return GifPickerConfig(
+      isEnabled: config["isEnabled"].bool ?? false, apiKey: key, contentRating: config["contentRating"].string ?? "PG")
+  }
+
+  /// Your sub tier in a channel (0 without one).
+  func subscriptionTier(channelID: String) async -> Int {
+    guard TwitchAuth.shared.session != nil,
+      let data = try? await query(
+        "query ownSubscriptionTier($channelID: ID!) { user(id: $channelID) { self { subscriptionBenefit { tier } } } }",
+        variables: ["channelID": channelID], authenticated: true)
+    else { return 0 }
+    return (data["user"]["self"]["subscriptionBenefit"]["tier"].string.flatMap(Int.init) ?? 0) / 1000
+  }
+
+  struct GifSendResult: Sendable {
+    var sent: Bool
+    var error: String?
+    var secondsUntilCanSend: Int
+  }
+
+  /// Sends a GIF from Twitch's GIF keyboard. `headers`: an integrity token for a website sign-in
+  /// (Twitch checks it, as for following).
+  func sendGif(channelID: String, gifID: String, gifURL: String, searchTerm: String, headers: [String: String]) async throws
+    -> GifSendResult
+  {
+    var input: [String: Any] = ["channelID": channelID, "gifID": gifID, "gifURL": gifURL]
+    let term = searchTerm.trimmingCharacters(in: .whitespaces)
+    if !term.isEmpty { input["searchTerm"] = String(term.prefix(100)) }
+    let body: [String: Any] = [
+      "query":
+        "mutation sendGifMessage($input: SendGifMessageInput!) { sendGifMessage(input: $input) { error secondsUntilCanSend message { id } } }",
+      "variables": ["input": input],
+    ]
+    var request = try request(body: body)
+    for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
+    if !headers.isEmpty {
+      request.setValue("https://www.twitch.tv", forHTTPHeaderField: "Origin")
+      request.setValue("https://www.twitch.tv/", forHTTPHeaderField: "Referer")
+    }
+    let result = try await perform(request)["sendGifMessage"]
+    let error = result["error"].string.flatMap { $0.isEmpty ? nil : $0 }
+    return GifSendResult(
+      sent: error == nil && result["message"]["id"].string != nil, error: error,
+      secondsUntilCanSend: result["secondsUntilCanSend"].int ?? 0)
+  }
+
   static func describeFollowError(_ code: String) -> String {
     switch code {
     case "TOO_MANY_FOLLOWS": return "You follow the most channels Twitch allows"
