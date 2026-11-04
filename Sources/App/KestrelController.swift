@@ -87,11 +87,12 @@ final class KestrelController {
       // (Picture in Picture first: its copy of the picture goes in with the player's view.) With
       // controls: the window takes a copy of the picture. Without: the picture itself moves into
       // the window and back, as multi-view's does (no black on the way back).
-      if AppSettings.shared.pipControls {
-        setUpPictureInPicture(engine)
-      } else {
-        engine.onScreenView = { [weak self] view in self?.setUpCallPictureInPicture(on: view) }
-      }
+      // With controls, the window with play and pause while the player is full size; the kind
+      // that moves the picture itself in and out whenever it's the mini player (iOS wouldn't
+      // land the other kind on a picture that small: it came back full size, then black) and
+      // throughout without controls.
+      if AppSettings.shared.pipControls { setUpPictureInPicture(engine) }
+      engine.onScreenView = { [weak self] view in self?.setUpCallPictureInPicture(on: view) }
       model?.kestrelEngineReady()
       engine.start()
       ActivityLog.shared.add("Kestrel player: \(login) at \(found[start].label)")
@@ -125,8 +126,11 @@ final class KestrelController {
   func stop() {
     stopped = true
     pip?.stopPictureInPicture()
+    callPip?.stopPictureInPicture()
     pipObservation = nil
+    callObservation = nil
     pip = nil
+    callPip = nil
     pipDelegate = nil
     callDelegate = nil
     mirrorTokens.forEach(NotificationCenter.default.removeObserver)
@@ -201,7 +205,8 @@ final class KestrelController {
     let center = NotificationCenter.default
     mirrorTokens.append(
       center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
-        MainActor.assumeIsolated { self?.engine?.feedMirror(true) }
+        // (Only for the window with controls; the mini player's moves the picture itself.)
+        MainActor.assumeIsolated { if self?.minimized == false { self?.engine?.feedMirror(true) } }
       })
     mirrorTokens.append(
       center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -227,20 +232,39 @@ final class KestrelController {
   private var callDelegate: KestrelCallPictureInPicture?
   private weak var callSource: UIView?
 
+  private var callPip: AVPictureInPictureController?
+  private var callObservation: NSKeyValueObservation?
+  private var minimized = false
+
+  /// The window used now (see `load`).
+  private var activePip: AVPictureInPictureController? {
+    (minimized || pip == nil) ? callPip : pip
+  }
+
+  /// The player became the mini player or full size again: which window opens on its own.
+  func setMinimized(_ value: Bool) {
+    minimized = value
+    pip?.canStartPictureInPictureAutomaticallyFromInline = !value
+    callPip?.canStartPictureInPictureAutomaticallyFromInline = value || pip == nil
+  }
+
   private func setUpCallPictureInPicture(on view: UIView) {
-    guard AVPictureInPictureController.isPictureInPictureSupported(), view !== callSource, pip?.isPictureInPictureActive != true else { return }
+    guard AVPictureInPictureController.isPictureInPictureSupported(), view !== callSource, callPip?.isPictureInPictureActive != true else { return }
     callSource = view
     callContent.preferredContentSize = CGSize(width: 1920, height: 1080)
     callContent.view.backgroundColor = .black
     let delegate = KestrelCallPictureInPicture(controller: self)
     let controller = AVPictureInPictureController(contentSource: .init(activeVideoCallSourceView: view, contentViewController: callContent))
-    controller.canStartPictureInPictureAutomaticallyFromInline = true
+    controller.canStartPictureInPictureAutomaticallyFromInline = minimized || pip == nil
     controller.delegate = delegate
-    pipObservation = controller.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
+    callObservation = controller.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
       let active = pip.isPictureInPictureActive
-      Task { @MainActor in self?.pictureInPictureActive = active }
+      Task { @MainActor in
+        self?.pictureInPictureActive = active
+        self?.engine?.screenNote(active ? "window up (moved picture)" : "window gone (moved picture)")
+      }
     }
-    pip = controller
+    callPip = controller
     callDelegate = delegate
   }
 
@@ -264,8 +288,8 @@ final class KestrelController {
   }
 
   func togglePictureInPicture() {
-    guard let pip else { return }
-    engine?.feedMirror(true)
+    guard let pip = activePip else { return }
+    if pip === self.pip { engine?.feedMirror(true) }
     if pip.isPictureInPictureActive {
       pip.stopPictureInPicture()
     } else if pip.isPictureInPicturePossible {
@@ -275,7 +299,7 @@ final class KestrelController {
       Task { [weak self] in
         for _ in 0..<10 {
           try? await Task.sleep(nanoseconds: 250_000_000)
-          guard let self, self.pipWanted, let pip = self.pip else { return }
+          guard let self, self.pipWanted, let pip = self.activePip else { return }
           if pip.isPictureInPicturePossible {
             self.pipWanted = false
             pip.startPictureInPicture()

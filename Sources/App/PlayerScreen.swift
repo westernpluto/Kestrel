@@ -1375,6 +1375,7 @@ struct PlayerScreen: View {
       // The mini player is small: on Auto, nothing sharper than it shows is fetched or decoded
       // (less data and battery); full size again on the way back.
       model.setMaxHeight(minimized ? 480 : nil)
+      model.setMinimized(minimized)
       if minimized {
         // (Full screen stays as it was: back from the mini player, chat stays away if it was.)
         dismissKeyboard()
