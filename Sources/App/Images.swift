@@ -28,16 +28,9 @@ final class ImagePipeline: @unchecked Sendable {
 
   private func scheduleDecode(key: String, _ job: @escaping () -> Void) {
     lock.lock()
+    // (None is ever dropped: one dropped while a picture on screen waited for it left that emote
+    // blank for good. Newest first is enough to keep what's arriving in front.)
     decodeStack.append((key, job))
-    // (Far behind: the oldest are dropped, their messages long gone. Nobody's left waiting on
-    // them: asked for again, they're fetched (from the disk cache) and decoded afresh.)
-    if decodeStack.count > 300 {
-      for dropped in decodeStack.prefix(decodeStack.count - 300) {
-        waiting.removeValue(forKey: dropped.key)
-        upgrading.remove(dropped.key)
-      }
-      decodeStack.removeFirst(decodeStack.count - 300)
-    }
     lock.unlock()
     runDecodes()
   }
@@ -110,6 +103,17 @@ final class ImagePipeline: @unchecked Sendable {
     lock.lock()
     failuresLogged = []
     lock.unlock()
+  }
+
+  /// Fetches a picture into the disk cache only (no decoding, at low priority), so it shows at
+  /// once when it's wanted: for the emote picker's channel emotes. (Decoding them all ahead, for
+  /// six chats at once in multi-view, queued hundreds of pictures nobody was looking at.)
+  func prefetch(_ url: URL) {
+    var request = URLRequest(url: url)
+    request.cachePolicy = .returnCacheDataElseLoad
+    let task = session.dataTask(with: request) { _, _, _ in }
+    task.priority = URLSessionTask.lowPriority
+    task.resume()
   }
 
   /// - Parameters:

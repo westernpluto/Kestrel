@@ -119,8 +119,9 @@ final class ChatController: ObservableObject {
       onUpdate(true)
       // The channel's own emotes' pictures fetched ahead (a few dozen), so the picker and chat
       // show them at once rather than filling in one by one.
+      // (Only downloaded, not decoded: see `prefetch`.)
       for url in emotes.channel.flatMap(\.emotes).prefix(60).map(\.url) where ImagePipeline.shared.cached(url, maxPixels: 112) == nil {
-        ImagePipeline.shared.load(url, maxPixels: 112) { _ in }
+        ImagePipeline.shared.prefetch(url)
       }
     }
     if isReplay {
