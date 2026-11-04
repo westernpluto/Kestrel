@@ -252,6 +252,7 @@ final class PlayerModel: ObservableObject {
   func setMaxHeight(_ height: Int?) {
     guard height != tileMaxHeight else { return }
     tileMaxHeight = height
+    kestrel?.setMaxHeight(height)
     #if canImport(AmazonIVSPlayer)
       lowLatency?.setMaxHeight(height)
     #endif
@@ -297,14 +298,11 @@ final class PlayerModel: ObservableObject {
       lastInfoRefresh = Date()
       Task { await refreshInfo() }
       if engine == .kestrel {
-        if isTile {
-          // Multi-view keeps the regular player (its tiles lean on its sizing and PiP).
-          engine = PlayerEngine.isLowLatencyBuilt ? .lowLatency : .standard
-        } else {
-          startKestrel(channel)
-          startTimer()
-          return
-        }
+        // (Multi-view's tiles too: their pictures move into its all-streams Picture in Picture
+        // window, see showPicture.)
+        startKestrel(channel)
+        startTimer()
+        return
       }
       #if canImport(AmazonIVSPlayer)
         if engine == .lowLatency {
@@ -1552,6 +1550,18 @@ final class PlayerModel: ObservableObject {
 
     func showPicture(in view: UIView?) {
       sharedPictureView = view
+      if let engine = kestrelEngine, let surface = engine.screenView as? KestrelVideoView.LayerView {
+        // Kestrel's player: its own picture moves into the window's cell and back, fed in the
+        // background meanwhile.
+        if let view {
+          engine.screenInWindow = true
+          surface.lendScreen(to: view)
+        } else {
+          surface.takeScreenBack()
+          engine.screenInWindow = false
+        }
+        return
+      }
       if let view { lowLatency?.show(in: view) } else { lowLatency?.showInTile() }
     }
 

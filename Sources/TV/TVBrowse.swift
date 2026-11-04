@@ -390,6 +390,11 @@ struct TVSettingsView: View {
           Text("Kestrel's own player keeps streams about a second behind live. Off, or if it can't play a stream, the Apple player plays it (about 4–5 seconds behind).")
         }
         Section {
+          Toggle("Audio compressor", isOn: $store.audioCompressor)
+        } footer: {
+          Text("Evens out the volume in Kestrel's player: loud moments come down and quiet ones up.")
+        }
+        Section {
           Toggle("Chat beside the video", isOn: $store.chatShown)
         } footer: {
           Text("In the player, press left or right on the remote to show or hide chat.")

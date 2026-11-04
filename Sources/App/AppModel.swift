@@ -127,6 +127,13 @@ final class AppSettings: ObservableObject {
   @Published var pipControls: Bool { didSet { defaults.set(pipControls, forKey: "pipControls") } }
   /// Live streams play in Kestrel's own low-latency player (experimental) instead of Amazon's.
   @Published var kestrelPlayer: Bool { didSet { defaults.set(kestrelPlayer, forKey: "kestrelPlayer") } }
+  /// Kestrel's player: the audio compressor (see AudioOutput).
+  @Published var audioCompressor: Bool {
+    didSet {
+      defaults.set(audioCompressor, forKey: AudioOutput.compressorKey)
+      NotificationCenter.default.post(name: AudioOutput.compressorChanged, object: nil)
+    }
+  }
   // The user's own HTTP proxy (AdBlocking.customProxy).
   @Published var proxyHost: String { didSet { defaults.set(proxyHost, forKey: "proxyHost"); applyProxy() } }
   @Published var proxyPort: String { didSet { defaults.set(proxyPort, forKey: "proxyPort"); applyProxy() } }
@@ -162,6 +169,7 @@ final class AppSettings: ObservableObject {
     raidMode = RaidMode(rawValue: defaults.string(forKey: "raidMode") ?? "") ?? .follow
     pipControls = defaults.bool(forKey: "pipControls")
     kestrelPlayer = defaults.bool(forKey: "kestrelPlayer")
+    audioCompressor = defaults.bool(forKey: AudioOutput.compressorKey)
     proxyHost = defaults.string(forKey: "proxyHost") ?? ""
     proxyPort = defaults.string(forKey: "proxyPort") ?? ""
     proxyUsername = defaults.string(forKey: "proxyUsername") ?? ""
@@ -297,7 +305,7 @@ enum PlaybackTarget: Identifiable, Hashable {
 }
 
 /// The app's sections (not `Tab`: that's a SwiftUI type in newer SDKs).
-enum AppTab: Hashable {
+enum AppTab: String, Hashable {
   case following, browse, search, settings
 }
 
@@ -319,7 +327,10 @@ enum Route: Hashable {
 
 /// The app's section and each section's pages (see `AppModel.navigation`).
 final class AppNavigation: ObservableObject {
-  @Published var tab: AppTab = .following
+  /// Opens where it was left (Settings excepted: back to Following).
+  @Published var tab: AppTab = AppTab(rawValue: UserDefaults.standard.string(forKey: "lastTab") ?? "").flatMap { $0 == .settings ? nil : $0 } ?? .following {
+    didSet { UserDefaults.standard.set(tab.rawValue, forKey: "lastTab") }
+  }
   @Published var followingPath: [Route] = []
   @Published var browsePath: [Route] = []
   @Published var searchPath: [Route] = []

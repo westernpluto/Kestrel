@@ -87,11 +87,14 @@ final class KestrelController {
       // (Picture in Picture first: its copy of the picture goes in with the player's view.) With
       // controls: the window takes a copy of the picture. Without: the picture itself moves into
       // the window and back, as multi-view's does (no black on the way back).
-      if AppSettings.shared.pipControls {
+      // (None for multi-view's tiles: multi-view has its own window.)
+      if model?.isTile == true {
+      } else if AppSettings.shared.pipControls {
         setUpPictureInPicture(engine)
       } else {
         engine.onScreenView = { [weak self] view in self?.setUpCallPictureInPicture(on: view) }
       }
+      if let cap = pendingMaxHeight { setMaxHeight(cap) }
       model?.kestrelEngineReady()
       engine.start()
       ActivityLog.shared.add("Kestrel player: \(login) at \(found[start].label)")
@@ -153,6 +156,21 @@ final class KestrelController {
     let inAd = latency.map { adTimeline.covers(Date().addingTimeInterval(-$0)) } ?? adTimeline.isActive
     if inAd != model.coveringAd { model.coveringAd = inAd }
     engine.setMuted(inAd || userMuted)
+  }
+
+  private var pendingMaxHeight: Int?
+
+  /// Multi-view sizes each tile's quality to its picture (and lower while it's out of sight): the
+  /// best that's no taller than this; nil, the best that plays smoothly again.
+  func setMaxHeight(_ height: Int?) {
+    pendingMaxHeight = height
+    guard let engine else { return }
+    guard let height else {
+      engine.setAuto()
+      return
+    }
+    let pick = videoIndices.first { variants[$0].height <= height } ?? videoIndices.last
+    if let pick { engine.setRendition(pick, byHand: false) }
   }
 
   func select(_ id: Int?) {

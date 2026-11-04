@@ -70,12 +70,20 @@ final class TVStore: ObservableObject {
   @Published var chatShown: Bool { didSet { UserDefaults.standard.set(chatShown, forKey: "tv.chatShown") } }
   /// Kestrel's own low-latency player (about a second behind live); off, the Apple player.
   @Published var lowLatencyPlayer: Bool { didSet { UserDefaults.standard.set(lowLatencyPlayer, forKey: "tv.lowLatencyPlayer") } }
+  /// The audio compressor in Kestrel's player (see AudioOutput).
+  @Published var audioCompressor: Bool {
+    didSet {
+      UserDefaults.standard.set(audioCompressor, forKey: AudioOutput.compressorKey)
+      NotificationCenter.default.post(name: AudioOutput.compressorChanged, object: nil)
+    }
+  }
 
   private init() {
     UserDefaults.standard.register(defaults: ["tv.adBlocking": true, "tv.chatShown": true, "tv.lowLatencyPlayer": true])
     adBlocking = UserDefaults.standard.bool(forKey: "tv.adBlocking")
     chatShown = UserDefaults.standard.bool(forKey: "tv.chatShown")
     lowLatencyPlayer = UserDefaults.standard.bool(forKey: "tv.lowLatencyPlayer")
+    audioCompressor = UserDefaults.standard.bool(forKey: AudioOutput.compressorKey)
     if let data = TVKeychain.get("session"), let saved = try? JSONDecoder().decode(TwitchAuth.Session.self, from: data) {
       session = saved
       TwitchAuth.shared.update(saved)

@@ -1033,13 +1033,19 @@ struct MultiviewTileView: View {
   @ViewBuilder
   private var surface: some View {
     #if canImport(AmazonIVSPlayer)
-      if let controller = player.lowLatency {
+      if let engine = player.kestrelEngine {
+        KestrelVideoView(engine: engine, fill: false)
+      } else if let controller = player.lowLatency {
         LowLatencyVideoView(controller: controller, fill: false)
       } else {
         ApplePlayerSurface(model: player, fill: false, pictureInPicture: false)
       }
     #else
-      ApplePlayerSurface(model: player, fill: false, pictureInPicture: false)
+      if let engine = player.kestrelEngine {
+        KestrelVideoView(engine: engine, fill: false)
+      } else {
+        ApplePlayerSurface(model: player, fill: false, pictureInPicture: false)
+      }
     #endif
   }
 

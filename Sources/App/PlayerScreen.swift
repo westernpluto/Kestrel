@@ -1028,8 +1028,6 @@ struct PlayerScreen: View {
   /// Full screen in a large window (iPhone Duo's inner display): the video takes the whole window
   /// instead of the phone being turned.
   @State private var largeFullScreen = false
-  /// Full screen only for Picture in Picture's window to land in (undone after).
-  @State private var fullForReturn = false
   /// The channel is offline: just chat, the video folded into a strip until they're live again.
   @State private var folded: Bool
 
@@ -1342,32 +1340,6 @@ struct PlayerScreen: View {
       let fold = model.isLive && (phase == .offline || (phase == .loading && expects))
       guard fold != folded else { return }
       withAnimation(.spring(response: 0.55, dampingFraction: 0.88)) { folded = fold }
-    }
-    // Back from Picture in Picture in a large window: the window lands on the video filling the
-    // window (the hand-over happens behind it), then the video slides back to its place beside
-    // chat, as other video apps do.
-    .onChange(of: model.pictureInPictureReturning) { returning in
-      // (From the mini player the window goes back into the mini player as it is.)
-      guard OrientationLock.largeWindow, !app.playerMinimized else { return }
-      if returning, !largeFullScreen {
-        var instant = Transaction()
-        instant.disablesAnimations = true
-        withTransaction(instant) {
-          largeFullScreen = true
-          fullForReturn = true
-        }
-        // Whatever the window does, back beside chat shortly (it could be left filling the window).
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-          guard fullForReturn else { return }
-          fullForReturn = false
-          withAnimation(.spring(response: 0.5, dampingFraction: 0.9)) { largeFullScreen = false }
-        }
-      } else if !returning, fullForReturn {
-        fullForReturn = false
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-          withAnimation(.spring(response: 0.5, dampingFraction: 0.9)) { largeFullScreen = false }
-        }
-      }
     }
     .onChange(of: app.playerMinimized) { minimized in
       // The app is portrait; only the full-screen player turns.

@@ -15,6 +15,16 @@ final class AudioOutput {
   private let engine = AVAudioEngine()
   private let player = AVAudioPlayerNode()
   private let pitch = AVAudioUnitTimePitch()
+  /// The audio compressor (like FrankerFaceZ's): loud moments brought down, quiet ones up, so a
+  /// streamer's shouting and whispering come out at about the same level. Off: passed through.
+  private let compressor = AVAudioUnitEffect(
+    audioComponentDescription: AudioComponentDescription(
+      componentType: kAudioUnitType_Effect, componentSubType: kAudioUnitSubType_DynamicsProcessor,
+      componentManufacturer: kAudioUnitManufacturer_Apple, componentFlags: 0, componentFlagsMask: 0))
+
+  /// UserDefaults key for the compressor setting, and the notice sent when it changes.
+  static let compressorKey = "audioCompressor"
+  static let compressorChanged = Notification.Name("KestrelAudioCompressorChanged")
   private var converter: AVAudioConverter?
   private var inputFormat: AVAudioFormat?
   private var config: ADTS.Config?
@@ -39,10 +49,16 @@ final class AudioOutput {
   init() {
     engine.attach(player)
     engine.attach(pitch)
+    engine.attach(compressor)
+    configureCompressor()
     let center = NotificationCenter.default
     observers.append(
       center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
         MainActor.assumeIsolated { self?.restartAfterSystemStop() }
+      })
+    observers.append(
+      center.addObserver(forName: Self.compressorChanged, object: nil, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.configureCompressor() }
       })
     #if os(iOS) || os(tvOS)
       observers.append(
@@ -127,12 +143,32 @@ final class AudioOutput {
       stopPlayer()
       engine.disconnectNodeOutput(player)
       engine.disconnectNodeOutput(pitch)
+      engine.disconnectNodeOutput(compressor)
       engine.connect(player, to: pitch, format: output)
-      engine.connect(pitch, to: engine.mainMixerNode, format: output)
+      engine.connect(pitch, to: compressor, format: output)
+      engine.connect(compressor, to: engine.mainMixerNode, format: output)
       outputFormat = output
       if wasPlaying { play() }
     }
     return true
+  }
+
+  // MARK: Compressor
+
+  /// On or off from the setting; settings near FrankerFaceZ's: from -30 dB, a firm ratio, fast
+  /// attack, quarter-second release, and the level made up after.
+  private func configureCompressor() {
+    let on = UserDefaults.standard.bool(forKey: Self.compressorKey)
+    compressor.bypass = !on
+    let unit = compressor.audioUnit
+    func set(_ parameter: AudioUnitParameterID, _ value: AudioUnitParameterValue) {
+      AudioUnitSetParameter(unit, parameter, kAudioUnitScope_Global, 0, value, 0)
+    }
+    set(kDynamicsProcessorParam_Threshold, -30)
+    set(kDynamicsProcessorParam_HeadRoom, 4)
+    set(kDynamicsProcessorParam_AttackTime, 0.003)
+    set(kDynamicsProcessorParam_ReleaseTime, 0.25)
+    set(kDynamicsProcessorParam_OverallGain, 6)
   }
 
   // MARK: Playing
@@ -257,8 +293,10 @@ final class AudioOutput {
     if let format = outputFormat {
       engine.disconnectNodeOutput(player)
       engine.disconnectNodeOutput(pitch)
+      engine.disconnectNodeOutput(compressor)
       engine.connect(player, to: pitch, format: format)
-      engine.connect(pitch, to: engine.mainMixerNode, format: format)
+      engine.connect(pitch, to: compressor, format: format)
+      engine.connect(compressor, to: engine.mainMixerNode, format: format)
     }
     ActivityLog.shared.add("Kestrel player: the sound was stopped by the system; started again")
     onReset?()
