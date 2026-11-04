@@ -120,8 +120,11 @@ final class ChatController: ObservableObject {
       if !emotes.complete { retryEmotes(attempt: 1) }
       // The channel's own emotes' pictures fetched ahead (a few dozen), so the picker and chat
       // show them at once rather than filling in one by one.
-      // (Only downloaded, not decoded: see `prefetch`.)
-      for url in emotes.channel.flatMap(\.emotes).prefix(60).map(\.url) where ImagePipeline.shared.cached(url, maxPixels: 112) == nil {
+      // (Only downloaded, not decoded: see `prefetch`. They stay on disk, so this is mostly once
+      // per channel: 7TV's pictures take up to a second or more each to start arriving, and the
+      // emote picker filled in slowly. More on Wi-Fi, a few dozen on cellular.)
+      let ahead = NetworkWatch.shared.kind == .cellular || NetworkWatch.shared.constrained ? 60 : 300
+      for url in emotes.channel.flatMap(\.emotes).prefix(ahead).map(\.url) where ImagePipeline.shared.cached(url, maxPixels: 112) == nil {
         ImagePipeline.shared.prefetch(url)
       }
     }

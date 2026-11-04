@@ -547,27 +547,98 @@ actor EmoteSetCache {
   private var channels: [String: (sets: Sets, at: Date)] = [:]
   private var channelTasks: [String: Task<Loaded, Never>] = [:]
 
+  /// Fresh enough to use as is; older (up to `diskKeep`), used at once from disk and fetched
+  /// again behind it. 7TV's lists are big and slow to come (a couple of seconds on Wi-Fi, far more
+  /// on cellular with streams playing): a chat used to wait for them, its 7TV emotes showing as
+  /// words meanwhile, every time it opened.
+  private static let fresh: TimeInterval = 600
+  private static let diskKeep: TimeInterval = 7 * 24 * 3600
+
   func globals(_ load: @escaping @Sendable () async -> Loaded) async -> Loaded {
-    if let globals, Date().timeIntervalSince(globals.at) < 1800 { return (globals.sets, true) }
+    if globals == nil, let stored = Self.read("global") { globals = stored }
+    if let globals {
+      if Date().timeIntervalSince(globals.at) >= Self.fresh { refreshGlobals(load) }
+      return (globals.sets, true)
+    }
+    return await fetchGlobals(load)
+  }
+
+  private func refreshGlobals(_ load: @escaping @Sendable () async -> Loaded) {
+    guard globalsTask == nil else { return }
+    Task { _ = await fetchGlobals(load) }
+  }
+
+  private func fetchGlobals(_ load: @escaping @Sendable () async -> Loaded) async -> Loaded {
     if let globalsTask { return await globalsTask.value }
     let task = Task { await load() }
     globalsTask = task
     let loaded = await task.value
     globalsTask = nil
     // (Something didn't come: not kept, so the next try fetches it again.)
-    if loaded.complete { globals = (loaded.sets, Date()) }
+    if loaded.complete {
+      globals = (loaded.sets, Date())
+      Self.write("global", loaded.sets)
+    }
     return loaded
   }
 
   func channel(_ id: String, _ load: @escaping @Sendable () async -> Loaded) async -> Loaded {
-    if let cached = channels[id], Date().timeIntervalSince(cached.at) < 600 { return (cached.sets, true) }
+    if channels[id] == nil, let stored = Self.read("channel-\(id)") { channels[id] = stored }
+    if let cached = channels[id] {
+      if Date().timeIntervalSince(cached.at) >= Self.fresh { refreshChannel(id, load) }
+      return (cached.sets, true)
+    }
+    return await fetchChannel(id, load)
+  }
+
+  private func refreshChannel(_ id: String, _ load: @escaping @Sendable () async -> Loaded) {
+    guard channelTasks[id] == nil else { return }
+    Task { _ = await fetchChannel(id, load) }
+  }
+
+  private func fetchChannel(_ id: String, _ load: @escaping @Sendable () async -> Loaded) async -> Loaded {
     if let task = channelTasks[id] { return await task.value }
     let task = Task { await load() }
     channelTasks[id] = task
     let loaded = await task.value
     channelTasks[id] = nil
-    if loaded.complete { channels[id] = (loaded.sets, Date()) }
+    if loaded.complete {
+      channels[id] = (loaded.sets, Date())
+      Self.write("channel-\(id)", loaded.sets)
+    }
     return loaded
+  }
+
+  // MARK: On disk (the caches folder: iOS may clear it, and then they're fetched again)
+
+  private struct Stored: Codable {
+    var at: Date
+    var seventv: [String: String]
+    var bttv: [String: String]
+    var ffz: [String: String]
+  }
+
+  private static var folder: URL? {
+    guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+    let folder = caches.appendingPathComponent("EmoteSets", isDirectory: true)
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    return folder
+  }
+
+  private static func read(_ name: String) -> (sets: Sets, at: Date)? {
+    guard let file = folder?.appendingPathComponent(name + ".json"), let data = try? Data(contentsOf: file),
+      let stored = try? JSONDecoder().decode(Stored.self, from: data), Date().timeIntervalSince(stored.at) < diskKeep
+    else { return nil }
+    func urls(_ map: [String: String]) -> [String: URL] { map.compactMapValues(URL.init(string:)) }
+    return ((urls(stored.seventv), urls(stored.bttv), urls(stored.ffz)), stored.at)
+  }
+
+  private static func write(_ name: String, _ sets: Sets) {
+    guard let file = folder?.appendingPathComponent(name + ".json") else { return }
+    let stored = Stored(
+      at: Date(), seventv: sets.seventv.mapValues(\.absoluteString), bttv: sets.bttv.mapValues(\.absoluteString),
+      ffz: sets.ffz.mapValues(\.absoluteString))
+    try? JSONEncoder().encode(stored).write(to: file, options: .atomic)
   }
 }
 
