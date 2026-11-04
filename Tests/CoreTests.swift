@@ -1500,6 +1500,60 @@ func testMutedParts() {
   check(VODPlaylists.mutedParts("#EXTM3U\n#EXTINF:10,\n0.ts\n").isEmpty, "none")
 }
 
+func testWholeSegmentSteering() {
+  // A channel off low latency: two seconds of video at a time, listed every two seconds (seen up to
+  // 0.7 s late by the playlist poll). Started a segment plus the margin behind the newest frame
+  // and steered by the low point of what's in hand over 3 s (as the player does), the margin stays
+  // small and the speed barely moves. (Started just the margin behind, as before, it ran dry
+  // before every next segment: each stall raised the margin, up to its 3.5 s limit.)
+  var catchUp = LiveCatchUp(noise: 0.35)
+  let t0 = Date(timeIntervalSince1970: 3_000_000)
+  var position = 0.0
+  var newest = 2.6  // started a segment plus the margin behind
+  var nextListing = 2.0
+  var history: [(Double, Double)] = []
+  var changes = 0
+  var lastRate: Float = 1
+  var t = 0.0
+  while t < 600 {
+    if t >= nextListing {
+      newest += 2
+      nextListing += 2 + Double(Int(t * 7) % 7) / 10
+    }
+    let ahead = max(0, newest - position)
+    history.append((t, ahead))
+    history.removeAll { t - $0.0 > 3 }
+    let trough = history.map(\.1).min() ?? ahead
+    let rate = catchUp.update(buffer: trough, latency: trough + 0.8, playing: true, position: position, now: t0.addingTimeInterval(t))
+    if rate != lastRate { changes += 1; lastRate = rate }
+    position += Double(rate) * 0.1
+    t += 0.1
+  }
+  check(catchUp.targetBuffer < 1.3, "whole segments: margin stays small (\(catchUp.targetBuffer))")
+  check(changes <= 12, "whole segments: few speed changes (\(changes))")
+
+  var old = LiveCatchUp(noise: 0.35)
+  var oldPosition = 0.0
+  var oldNewest = 0.6
+  var oldListing = 2.0
+  var u = 0.0
+  while u < 300 {
+    if u >= oldListing {
+      oldNewest += 2
+      oldListing += 2 + Double(Int(u * 7) % 7) / 10
+    }
+    let ahead = max(0, oldNewest - oldPosition)
+    var rate = old.update(buffer: ahead, latency: ahead + 0.8, playing: true, position: oldPosition, now: t0.addingTimeInterval(u))
+    if ahead < 0.03 {
+      old.stalled(now: t0.addingTimeInterval(u))
+      rate = 0
+    }
+    oldPosition += Double(rate) * 0.1
+    u += 0.1
+  }
+  check(old.targetBuffer > 2, "started just the margin behind: the margin grows (\(old.targetBuffer))")
+}
+
 func testRecordingJoin() {
   let first = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PROGRAM-DATE-TIME:2026-11-04T01:00:00.000Z\n#EXT-X-MAP:URI=\"init0.mp4\"\n#EXTINF:2.000,\nseg0.m4s\n#EXTINF:2.000,\nseg1.m4s\n#EXT-X-ENDLIST\n"
   let second = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-START:TIME-OFFSET=0\n#EXTINF:2.500,\nseg0.ts\n"
@@ -2159,6 +2213,7 @@ testRecordingPlaylist()
 testMutedParts()
 testMultiviewLayout()
 testRecordingJoin()
+testWholeSegmentSteering()
 testStreamArrival()
 testMediaParsing()
 testFrameGrid()

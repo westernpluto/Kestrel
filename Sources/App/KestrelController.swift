@@ -383,7 +383,11 @@ final class KestrelController {
       StatLine(
         label: "Speed",
         value: rate > 1.001 ? String(format: "%.2f× (catching up)", rate) : rate < 0.999 && rate > 0 ? String(format: "%.2f× (building margin)", rate) : "1.00×"))
-    lines.append(StatLine(label: "Margin", value: String(format: "%.1f s", engine.catchUp.targetBuffer)))
+    lines.append(
+      StatLine(
+        label: "Margin",
+        value: String(format: "%.1f s", engine.catchUp.targetBuffer)
+          + (engine.wholeSegments ? " (channel not on low latency: video in 2 s pieces)" : "")))
     lines.append(StatLine(label: "Stalls", value: "\(engine.stalls)"))
     lines.append(
       StatLine(

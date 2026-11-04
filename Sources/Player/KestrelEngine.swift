@@ -365,7 +365,9 @@ final class KestrelEngine: NSObject {
   /// Starts over at the live edge (after a pause, a long dropout, a failure).
   func restart() {
     stop()
-    planner = LiveSegmentPlanner(startBack: 0)
+    // (Whole segments: one more back, to have a segment's worth on top of the margin.)
+    planner = LiveSegmentPlanner(startBack: wholeSegments ? 1 : 0)
+    aheadHistory = []
     timeline = StreamTimeline()
     heldVideo = []
     heldAudio = []
@@ -455,7 +457,8 @@ final class KestrelEngine: NSObject {
   /// own clock (some channels have it seconds off) only nudges the second, within sense.
   var latency: Double? {
     guard clockRunning, let ahead = bufferAhead else { return nil }
-    return (catchUp.level ?? ahead) + delivery
+    // (Whole segments: steered by the low point, so half a segment more is in hand on average.)
+    return (catchUp.level ?? ahead) + (wholeSegments ? Self.segmentLength / 2 : 0) + delivery
   }
 
   /// From the stream's own timestamps (Twitch's program date-time), which some channels have well
@@ -492,9 +495,29 @@ final class KestrelEngine: NSObject {
 
   // MARK: Playlist
 
+  /// The stream's video comes in whole segments (see `poll`): what's in hand jumps up by a
+  /// segment each time one is listed and runs down in between. Steered by the low point of that
+  /// (`trough`), not the reading of the moment: steered by the moment, every run-down looked like
+  /// a hiccup, the margin kept growing and the stream drifted further and further behind.
+  private(set) var wholeSegments = false
+  /// One segment's worth (Twitch's are two seconds).
+  static let segmentLength = 2.0
+  private var aheadHistory: [(at: Date, ahead: Double)] = []
+
+  /// The least in hand over the last few seconds (longer than the gap between segments).
+  private func trough(_ ahead: Double) -> Double {
+    let now = Date()
+    aheadHistory.append((now, ahead))
+    aheadHistory.removeAll { now.timeIntervalSince($0.at) > 3 }
+    return aheadHistory.map(\.ahead).min() ?? ahead
+  }
+
   private func poll() async {
     while running, !Task.isCancelled {
       if let text = await playlist(rendition), running {
+        // No prefetch hints: a channel not on Twitch's low latency (or an ad served as is). Its
+        // video comes two seconds at a time, once each segment is finished.
+        if text.contains("#EXTINF") { wholeSegments = !text.contains("#EXT-X-TWITCH-PREFETCH:") }
         let planned = planner.plan(text)
         for segment in planned { begin(segment) }
       }
@@ -1103,7 +1126,8 @@ final class KestrelEngine: NSObject {
     let elapsed = Date().timeIntervalSince(since)
     guard elapsed >= 0.7 else { return false }
     startSkipDone = true
-    let surplus = ahead - catchUp.targetBuffer
+    // (Whole segments: a segment's worth on top, to last until the next one is listed.)
+    let surplus = ahead - catchUp.targetBuffer - (wholeSegments ? Self.segmentLength : 0)
     guard surplus > 0.12, surplus < 4 else { return false }
     let to = now + Int64(surplus * Double(Self.clock))
     CMTimebaseSetTime(videoClock, time: CMTime(value: to, timescale: Self.clock))
@@ -1131,12 +1155,16 @@ final class KestrelEngine: NSObject {
 
   private func startIfReady() {
     guard !clockRunning, !paused, let first = heldVideo.first?.pts, let last = newestPlayable else { return }
-    let margin = Int64(max(catchUp.targetBuffer, 0.5) * Double(Self.clock))
+    // Whole segments: a segment's worth more, to last until the next one is listed (started at
+    // the margin alone, it ran dry before the next one came, every start).
+    let margin = Int64((max(catchUp.targetBuffer, 0.5) + (wholeSegments ? Self.segmentLength : 0)) * Double(Self.clock))
     // Only once what's being unpacked is the segment still being made (everything before it is
-    // in): starting earlier put the start seconds back, with all of that to catch up.
+    // in): starting earlier put the start seconds back, with all of that to catch up. (A stream
+    // in whole segments has none being made: it starts once the newest is in.)
     let atLive = loads.first?.planned.live ?? true
+    if wholeSegments, loads.contains(where: { !$0.downloaded }) { return }
     let waited = Date().timeIntervalSince(startedLoading)
-    guard atLive || waited > 6, last - first >= Int64(0.3 * Double(Self.clock)) else { return }
+    guard atLive || wholeSegments || waited > 6, last - first >= Int64(0.3 * Double(Self.clock)) else { return }
     let start = max(first, last - margin)
     // From the last keyframe at or before the start; frames before the start are decoded (later
     // ones need them) but not shown, so it opens on a clean picture at the start.
@@ -1219,8 +1247,10 @@ final class KestrelEngine: NSObject {
     // channels have off by seconds either way): how far from live it plays is what's in hand plus
     // the video's delay on the way, and only the first part is the player's to change. The
     // latency shown still comes from the clock (corrected when it's clearly off).
+    let steering = wholeSegments ? trough(ahead) : ahead
+    if !wholeSegments { aheadHistory = [] }
     let rate = catchUp.update(
-      buffer: ahead, latency: ahead + Self.deliveryDelay, playing: true, position: Double(now) / Double(Self.clock),
+      buffer: steering, latency: steering + Self.deliveryDelay, playing: true, position: Double(now) / Double(Self.clock),
       maxRate: Self.maxRate)
     if speed != rate { setSpeed(rate) }
     syncClock()
