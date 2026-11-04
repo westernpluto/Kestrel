@@ -90,6 +90,20 @@ final class ImagePipeline: @unchecked Sendable {
     cache.object(forKey: Self.key(url, maxPixels) as NSString)
   }
 
+  /// A picture's first frame, decoded ahead while chat was quiet (see `prefetch`): shown at once
+  /// when the emote first appears, while the whole picture is decoded.
+  func still(_ url: URL, maxPixels: CGFloat? = nil) -> UIImage? {
+    stills.object(forKey: Self.key(url, maxPixels) as NSString)
+  }
+
+  private let stills: NSCache<NSString, UIImage> = {
+    let cache = NSCache<NSString, UIImage>()
+    cache.totalCostLimit = 48 << 20
+    return cache
+  }()
+  /// First frames decoded ahead, one at a time, at background priority.
+  private let stillQueue = DispatchQueue(label: "kestrel.images.stills", qos: .utility)
+
   /// Only the first frame is in memory so far; `load` hands out the whole animation when it's ready.
   func isUpgrading(_ url: URL, maxPixels: CGFloat? = nil) -> Bool {
     lock.lock()
@@ -110,14 +124,17 @@ final class ImagePipeline: @unchecked Sendable {
   /// hundreds queued at once on the pictures' own connection made the emotes in view wait behind
   /// them (7TV takes up to a second or more to answer each), which is slower than not fetching
   /// ahead at all.
-  func prefetch(_ url: URL) {
+  /// - Parameter stillPixels: also decode its first frame at this size ahead (see `still`).
+  func prefetch(_ url: URL, stillPixels: CGFloat? = nil) {
     lock.lock()
+    if let stillPixels { stillSizes[url] = stillPixels }
     prefetchQueue.append(url)
     lock.unlock()
     runPrefetches()
   }
 
   private var prefetchQueue: [URL] = []
+  private var stillSizes: [URL: CGFloat] = [:]
   private var prefetching = 0
   private lazy var prefetchSession: URLSession = {
     let configuration = URLSessionConfiguration.default
@@ -138,12 +155,26 @@ final class ImagePipeline: @unchecked Sendable {
     }
     lock.unlock()
     for url in next {
-      let task = prefetchSession.dataTask(with: url) { [weak self] _, _, _ in
+      let task = prefetchSession.dataTask(with: url) { [weak self] data, response, _ in
         guard let self else { return }
         self.lock.lock()
         self.prefetching -= 1
+        let pixels = self.stillSizes.removeValue(forKey: url)
         self.lock.unlock()
         self.runPrefetches()
+        // Its first frame decoded ahead, so the emote's first showing doesn't wait for decoding
+        // (only the frame: whole animations for hundreds of emotes would be far too much memory).
+        if let pixels, let data, ((response as? HTTPURLResponse)?.statusCode ?? 0) == 200 {
+          self.stillQueue.async {
+            let key = Self.key(url, pixels)
+            guard self.cache.object(forKey: key as NSString) == nil, self.stills.object(forKey: key as NSString) == nil,
+              let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let frame = Self.frame(source, 0, maxPixels: pixels)
+            else { return }
+            let image = UIImage(cgImage: frame, scale: 2, orientation: .up)
+            self.stills.setObject(image, forKey: key as NSString, cost: Self.cost(image))
+          }
+        }
       }
       task.priority = URLSessionTask.lowPriority
       task.resume()
@@ -408,6 +439,7 @@ final class LoadingImageView: UIImageView {
   func load(_ url: URL?, maxPixels: CGFloat?, fallback: URL?) {
     guard url != current else { return }
     current = url
+    showingStill = false
     guard let url else {
       show(nil)
       return
@@ -422,23 +454,33 @@ final class LoadingImageView: UIImageView {
       }
       return
     }
-    show(nil)
+    // A first frame decoded ahead: up at once while the whole picture comes.
+    if let still = ImagePipeline.shared.still(url, maxPixels: maxPixels) {
+      show(still)
+      showingStill = true
+    } else {
+      show(nil)
+    }
     request(url, maxPixels: maxPixels, fallback: fallback, attempt: 1)
   }
+
+  /// What's shown is only a first frame decoded ahead (the picture itself is still to come).
+  private var showingStill = false
 
   /// Asks for the picture; if nothing came (the network gave up), asks again a little later while
   /// it's still the one wanted here, rather than staying blank.
   private func request(_ url: URL, maxPixels: CGFloat?, fallback: URL?, attempt: Int) {
     ImagePipeline.shared.load(url, maxPixels: maxPixels, fallback: fallback) { [weak self] image in
       guard let self, self.current == url else { return }
-      if image == nil, self.shownPicture == nil, attempt < 4 {
+      if image == nil, self.shownPicture == nil || self.showingStill, attempt < 4 {
         DispatchQueue.main.asyncAfter(deadline: .now() + 5 * Double(attempt)) { [weak self] in
-          guard let self, self.current == url, self.shownPicture == nil else { return }
+          guard let self, self.current == url, self.shownPicture == nil || self.showingStill else { return }
           self.request(url, maxPixels: maxPixels, fallback: fallback, attempt: attempt + 1)
         }
         return
       }
       guard image == nil || image !== self.shownPicture else { return }
+      if image != nil { self.showingStill = false }
       if self.shownPicture == nil {
         UIView.transition(with: self, duration: 0.15, options: .transitionCrossDissolve) { self.show(image) }
       } else if let image {

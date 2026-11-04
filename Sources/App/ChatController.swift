@@ -125,7 +125,7 @@ final class ChatController: ObservableObject {
       // emote picker filled in slowly. More on Wi-Fi, a few dozen on cellular.)
       let ahead = NetworkWatch.shared.kind == .cellular || NetworkWatch.shared.constrained ? 60 : 300
       for url in emotes.channel.flatMap(\.emotes).prefix(ahead).map(\.url) where ImagePipeline.shared.cached(url, maxPixels: 112) == nil {
-        ImagePipeline.shared.prefetch(url)
+        ImagePipeline.shared.prefetch(url, stillPixels: 112)
       }
     }
     if isReplay {
@@ -625,7 +625,9 @@ enum ChatRenderer {
       waiting.append(url)
       ImagePipeline.shared.load(url, maxPixels: 112) { _ in ChatImageEvents.imageArrived() }
     }
-    let ratio = image.map { $0.size.height > 0 ? min(4, $0.size.width / $0.size.height) : 1 } ?? 1
+    // (Its shape from a first frame decoded ahead if the picture isn't in yet: no re-layout when it comes.)
+    let shape = image ?? ImagePipeline.shared.still(url, maxPixels: 112)
+    let ratio = shape.map { $0.size.height > 0 ? min(4, $0.size.width / $0.size.height) : 1 } ?? 1
     let size = CGSize(width: (height * ratio).rounded(), height: height)
     let attachment = NSTextAttachment()
     attachment.image = UIImage()
