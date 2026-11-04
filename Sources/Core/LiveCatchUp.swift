@@ -227,7 +227,7 @@ struct LiveCatchUp: Sendable {
     } else if excess < -(rate < 1 ? Self.settle : Self.slowDownBand), !wellBehind {
       // Less in hand than needed: slower in proportion, building it back up.
       next = max(Double(Self.rates.slow), 1 + min(-Self.minStep, excess * Self.gain))
-    } else if excess > (rate > 1 ? Self.settle : starting ? Self.deadband : Self.speedUpBand),
+    } else if excess > (rate > 1 ? Self.settle : Self.speedUpBand),
       // Sticky like the surplus: it starts 0.3 s over and goes on until 0.1 s over. Without that it
       // flipped on and off with each wobble while latency hovered right at the line, and each speed
       // change briefly held the picture (a judder every second or so on 60 fps streams).

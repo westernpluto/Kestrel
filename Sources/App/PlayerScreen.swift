@@ -1079,7 +1079,8 @@ struct PlayerScreen: View {
             title: "Chat over video", systemImage: "rectangle.righthalf.inset.filled",
             onImage: "rectangle.righthalf.inset.filled", isOn: chatOverVideo))
         : nil
-      let progress = layout.fullScreen ? 0 : (dragProgress ?? (app.playerMinimized ? 1 : 0))
+      // (Phone landscape can't shrink; a large window's full screen can, under the finger.)
+      let progress = layout.fullScreen && !layout.large ? 0 : (dragProgress ?? (app.playerMinimized ? 1 : 0))
       // In window coordinates, moved into the safe area's.
       let mini = MiniCorner.frame(
         window: CGSize(width: screenWidth, height: screenHeight),
@@ -1095,9 +1096,29 @@ struct PlayerScreen: View {
         // Backdrop: fades away as the player shrinks, revealing the app.
         Color.black
           .frame(width: screenWidth, height: geometry.size.height + insets.top + insets.bottom)
+          .contentShape(Rectangle())
+          // The black around the video (theater mode's bars) pulls the player down too.
+          .gesture(
+            DragGesture(minimumDistance: 14, coordinateSpace: .global)
+              .onChanged { value in
+                let dx = value.translation.width, dy = value.translation.height
+                guard dragProgress != nil || (dy > 8 && dy > abs(dx) * 1.2) else { return }
+                if dragProgress == nil { dismissKeyboard() }
+                dragProgress = min(1, max(0, dy / pullDistance))
+              }
+              .onEnded { value in
+                guard dragProgress != nil else { return }
+                let finish = (dragProgress ?? 0) > 0.5 || value.predictedEndTranslation.height / pullDistance > 0.55
+                if finish { Haptics.tap() }
+                withAnimation(Self.spring) {
+                  app.playerMinimized = finish
+                  dragProgress = nil
+                }
+              }
+          )
           .offset(x: -insets.leading, y: -insets.top)
           .opacity(Double(1 - progress))
-          .allowsHitTesting(progress < 0.01)
+          .allowsHitTesting(progress < 0.01 || dragProgress != nil)
 
         if let info = layout.info {
           StreamInfoBar(model: model, target: target, showsTitle: layout.details == nil)
@@ -1196,8 +1217,6 @@ struct PlayerScreen: View {
             if finish { Haptics.tap() }
             withAnimation(Self.spring) {
               app.playerMinimized = finish
-              // Back from the mini player: as it was before (chat beside the video).
-              if finish { largeFullScreen = false }
               dragProgress = nil
             }
           }
@@ -1329,8 +1348,8 @@ struct PlayerScreen: View {
       // (less data and battery); full size again on the way back.
       model.setMaxHeight(minimized ? 480 : nil)
       if minimized {
+        // (Full screen stays as it was: back from the mini player, chat stays away if it was.)
         dismissKeyboard()
-        largeFullScreen = false
       }
     }
     .onDisappear {

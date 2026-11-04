@@ -132,6 +132,7 @@ final class KestrelEngine: NSObject {
   private var lastAudioResync = Date.distantPast
   private var lastHeard: Int64?
   private var playingSince: Date?
+  private var startSkipDone = false
   /// The segment being made, before the start: when its frames came in (see `backlogIn`).
   private var liveArrivals: [(at: Date, newest: Int64)] = []
   private var liveSince: Date?
@@ -312,6 +313,7 @@ final class KestrelEngine: NSObject {
     heldAudio = []
     liveArrivals = []
     liveSince = nil
+    startSkipDone = false
     lastDecodeTime = nil
     grid.reset()
     videoFormat = nil
@@ -1038,6 +1040,26 @@ final class KestrelEngine: NSObject {
 
   /// Starts the clock once there's video: just behind the newest frame in hand (the stream's
   /// margin), so it opens close to live instead of at the start of the first segment.
+  /// Right after the start, video still comes in fast for a moment (Twitch first sends all of the
+  /// segment being made so far), so there's more in hand than the margin. Catching that up at
+  /// 1.1x took a few seconds on every start; instead, once, about a second in, the playhead moves
+  /// straight to the margin (a fraction of a second, as the picture has only just come up).
+  private func skipStartSurplus(ahead: Double) -> Bool {
+    guard !startSkipDone, let since = playingSince else { return false }
+    let elapsed = Date().timeIntervalSince(since)
+    guard elapsed >= 0.9 else { return false }
+    startSkipDone = true
+    let surplus = ahead - catchUp.targetBuffer
+    guard surplus > 0.12, surplus < 4 else { return false }
+    let to = now + Int64(surplus * Double(Self.clock))
+    CMTimebaseSetTime(videoClock, time: CMTime(value: to, timescale: Self.clock))
+    audio.flush()
+    for (frame, time) in audioHistory where time >= to { enqueueAudio(frame, time: time, refill: true) }
+    if speed > 0 { audio.play() }
+    ActivityLog.shared.add(String(format: "Kestrel player: skipped %.2f s ahead after the start (no catching up)", surplus))
+    return true
+  }
+
   /// The segment being made has sent what it already had: its video now comes in at about the
   /// pace it's made. Asked for mid-way, the server first sends all of it made so far in one
   /// rush; starting during that rush put the start behind live by however much was still to
@@ -1055,7 +1077,6 @@ final class KestrelEngine: NSObject {
 
   private func startIfReady() {
     guard !clockRunning, !paused, let first = heldVideo.first?.pts, let last = newestPlayable else { return }
-    guard backlogIn || Date().timeIntervalSince(startedLoading) > 6 else { return }
     let margin = Int64(max(catchUp.targetBuffer, 0.5) * Double(Self.clock))
     // Only once what's being unpacked is the segment still being made (everything before it is
     // in): starting earlier put the start seconds back, with all of that to catch up.
@@ -1122,6 +1143,7 @@ final class KestrelEngine: NSObject {
       return
     }
     checkTimestamps(ahead: ahead)
+    if skipStartSurplus(ahead: ahead) { return }
     // Far behind (a long dropout, the background): start over at live. Judged by what's in hand
     // (judged by the stream's timestamps, a channel with them half a minute off started over
     // every quarter second and never got going).

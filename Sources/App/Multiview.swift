@@ -397,7 +397,17 @@ struct MultiviewScreen: View {
         pull = max(0, dy)
       }
       .onEnded { value in
-        guard pull > 0 else { return }
+        guard pull > 0 else {
+          // Landscape, sideways: chat in from the side (toward the middle) or away (toward its edge).
+          let dx = value.translation.width, dy = value.translation.height
+          let bounds = AppWindow.current?.bounds ?? .zero
+          guard bounds.width > bounds.height, model.chat != nil, abs(dx) > 80, abs(dx) > abs(dy) * 1.5 else { return }
+          let show = dx < 0
+          guard show != chatShown else { return }
+          Haptics.tap()
+          withAnimation(Self.spring) { chatShown = show }
+          return
+        }
         if pull > 110 || value.predictedEndTranslation.height > 260 {
           minimize()
         } else {
@@ -516,6 +526,16 @@ struct MultiviewScreen: View {
         // of the home indicator and the keyboard by padding.
         chatColumn(chat, bottomInset: keyboard.overlap > 0 ? keyboard.overlap + 14 : safeBottom, safeBottom: safeBottom)
           .frame(width: areas.chat.width, height: areas.chat.height)
+          // Beside the pictures: swiped toward its edge, chat goes and the pictures take the room.
+          .simultaneousGesture(
+            DragGesture(minimumDistance: 24, coordinateSpace: .global).onEnded { value in
+              guard landscape, keyboard.overlap == 0 else { return }
+              let dx = value.translation.width, dy = value.translation.height
+              guard dx > 80, dx > abs(dy) * 1.5 else { return }
+              Haptics.tap()
+              withAnimation(Self.spring) { chatShown = false }
+            }
+          )
           .offset(x: areas.chat.minX, y: areas.chat.minY)
           .transition(.move(edge: landscape ? .trailing : .bottom).combined(with: .opacity))
         if landscape {
@@ -608,10 +628,13 @@ struct MultiviewScreen: View {
     if landscape {
       var chatWidth = chat ? min(max(preferred, minChat), maxChat(size.width)).rounded() : 0
       var gridWidth = size.width - chatWidth - (chat ? 1 : 0)
+      // Down to the window's bottom edge, the pictures centred in all of it (stopping at the home
+      // indicator's band left them high, with black under them).
+      let gridHeight = size.height + safeBottom
       if chat, !fold, count > 0 {
         // Width the pictures can't use (they're as tall as the window allows already) goes to
         // chat instead of black bars beside them.
-        let probe = CGSize(width: gridWidth, height: size.height)
+        let probe = CGSize(width: gridWidth, height: gridHeight)
         let rects = focus && count > 1 ? MultiviewLayout.focus(count: count, main: 0, in: probe) : MultiviewLayout.grid(count: count, in: probe)
         let used = (rects.map(\.maxX).max() ?? gridWidth) - (rects.map(\.minX).min() ?? 0)
         let spare = (gridWidth - used).rounded(.down)
@@ -621,7 +644,7 @@ struct MultiviewScreen: View {
         }
       }
       return Areas(
-        grid: CGRect(x: 0, y: 0, width: gridWidth, height: size.height),
+        grid: CGRect(x: 0, y: 0, width: gridWidth, height: gridHeight),
         chat: CGRect(x: size.width - chatWidth, y: 0, width: chatWidth, height: size.height + safeBottom))
     }
     guard chat else {
