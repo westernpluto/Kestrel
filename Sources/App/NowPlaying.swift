@@ -270,7 +270,27 @@ enum AudioRouteWatch {
     token = NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { note in
       let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
       guard raw.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:)) == .oldDeviceUnavailable else { return }
-      MainActor.assumeIsolated { NowPlaying.shared.pauseForLostRoute() }
+      let previous = note.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription
+      MainActor.assumeIsolated { lostRoute(previous: previous) }
     }
+  }
+
+  @MainActor private static var lastPause = Date.distantPast
+
+  /// Only when the sound would now come out of the phone itself, from headphones, a headset, a
+  /// car or AirPlay: Bluetooth headphones switching profiles (or flickering in and out) also say
+  /// "old device unavailable", and paused playback again and again while they stayed on.
+  @MainActor private static func lostRoute(previous: AVAudioSessionRouteDescription?) {
+    let personal: Set<AVAudioSession.Port> = [
+      .headphones, .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .airPlay, .carAudio, .usbAudio, .lineOut,
+    ]
+    let wasPersonal = previous?.outputs.contains { personal.contains($0.portType) } ?? true
+    let now = AVAudioSession.sharedInstance().currentRoute.outputs
+    let outLoud = now.isEmpty || now.contains { $0.portType == .builtInSpeaker || $0.portType == .builtInReceiver }
+    guard wasPersonal, outLoud else { return }
+    // One pause for one disconnect.
+    guard Date().timeIntervalSince(lastPause) > 3 else { return }
+    lastPause = Date()
+    NowPlaying.shared.pauseForLostRoute()
   }
 }

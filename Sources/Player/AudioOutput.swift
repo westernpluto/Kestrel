@@ -178,22 +178,61 @@ final class AudioOutput {
 
   /// Starts (or resumes) the sound at the current speed.
   func play() {
+    wantsPlaying = true
     guard outputFormat != nil else { return }
     activateSession()
     if !engine.isRunning {
       engine.prepare()
       do { try engine.start() } catch {
-        ActivityLog.shared.add("Kestrel player: the sound didn't start (\(error.localizedDescription))")
+        // Usually the system still switching the sound somewhere (Bluetooth connecting, a call
+        // ending): it was left silent until the next pause and play. Tried again shortly.
+        if startRetries == 0 {
+          ActivityLog.shared.add("Kestrel player: the sound didn't start (\(error.localizedDescription)); trying again")
+        }
+        retryStart()
         return
       }
     }
+    if startRetries > 0 {
+      ActivityLog.shared.add("Kestrel player: the sound started on try \(startRetries + 1)")
+      startRetries = 0
+    }
+    retryTask?.cancel()
+    retryTask = nil
     pitch.rate = max(1 / 32, speed)
     player.play()
     isPlaying = true
   }
 
+  private var startRetries = 0
+  private var retryTask: Task<Void, Never>?
+  /// Set while the player wants sound (it may not be playing yet, if starting failed).
+  private var wantsPlaying = false
+
+  private func retryStart() {
+    guard retryTask == nil, startRetries < 8 else { return }
+    startRetries += 1
+    let delay = min(2.0, 0.25 * Double(startRetries))
+    retryTask = Task { @MainActor [weak self] in
+      try? await Task.sleep(nanoseconds: UInt64(delay * 1e9))
+      guard let self, !Task.isCancelled else { return }
+      self.retryTask = nil
+      guard self.wantsPlaying else { return }
+      // The player hands back what it still has from now on (what was queued has gone stale).
+      self.stopPlayer()
+      self.converter?.reset()
+      self.pendingInput = []
+      self.onReset?()
+      self.play()
+    }
+  }
+
   /// Holds the sound where it is (it goes on from the same place).
   func pause() {
+    wantsPlaying = false
+    retryTask?.cancel()
+    retryTask = nil
+    startRetries = 0
     player.pause()
     isPlaying = false
   }
@@ -219,6 +258,10 @@ final class AudioOutput {
   }
 
   func shutDown() {
+    wantsPlaying = false
+    retryTask?.cancel()
+    retryTask = nil
+    restartTask?.cancel()
     flush()
     engine.stop()
   }
@@ -289,7 +332,21 @@ final class AudioOutput {
   /// The system stopped the engine (headphones in or out, AirPlay, a call): start it again and
   /// have the player hand back what's still to come.
   private func restartAfterSystemStop() {
-    let wasPlaying = isPlaying
+    // They come in bursts (a Bluetooth headset switching profiles sends several in a row): one
+    // restart once it's settled, instead of one per notice, each a gap in the sound.
+    restartTask?.cancel()
+    restartTask = Task { @MainActor [weak self] in
+      try? await Task.sleep(nanoseconds: 150_000_000)
+      guard let self, !Task.isCancelled else { return }
+      self.restartTask = nil
+      self.restartNow()
+    }
+  }
+
+  private var restartTask: Task<Void, Never>?
+
+  private func restartNow() {
+    let wasPlaying = isPlaying || wantsPlaying
     stopPlayer()
     converter?.reset()
     pendingInput = []

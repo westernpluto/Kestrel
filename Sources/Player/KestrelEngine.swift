@@ -177,6 +177,9 @@ final class KestrelEngine: NSObject {
   private(set) var lateAudio = 0
   private(set) var audioGaps = 0
   private(set) var largestAudioGap = 0.0
+  private(set) var audioOverlaps = 0
+  private var inAudioOverlap = false
+  private var lastAudioJumpNote = Date.distantPast
   /// The Picture in Picture copy (see `makeMirror`).
   private(set) var mirrorLayer: AVSampleBufferDisplayLayer?
   private var mirrorWaiting = true
@@ -351,6 +354,7 @@ final class KestrelEngine: NSObject {
     audio.flush()
     audioHistory = []
     lastAudioTime = nil
+    inAudioOverlap = false
     closeDecoder()
   }
 
@@ -1128,9 +1132,22 @@ final class KestrelEngine: NSObject {
       if let last = lastAudioTime {
         let step = Int64(1024 * 90_000 / max(frame.config.sampleRate, 8000))
         let off = time - last - step
-        if abs(off) > 180 {
+        // Sound stamped at or before what's already queued (two encodes' sound overlapping at a
+        // seam): the same moment twice, heard as a stutter and the picture stepping back. Left out
+        // until it follows on.
+        if off < -180, time <= last {
+          if !inAudioOverlap {
+            inAudioOverlap = true
+            audioOverlaps += 1
+            noteAudioJump(ms: Double(off) / 90)
+          }
+          return
+        }
+        inAudioOverlap = false
+        if off > 180 {
           audioGaps += 1
           largestAudioGap = max(largestAudioGap, Double(off) / 90)
+          noteAudioJump(ms: Double(off) / 90)
         }
       }
       lastAudioTime = time
@@ -1139,6 +1156,16 @@ final class KestrelEngine: NSObject {
     }
     audio.enqueue(frame, pts: time)
     audioFramesQueued += 1
+  }
+
+  /// A jump in the sound's times, in the activity log (a few a minute at most) with what was
+  /// going on, so a pattern shows: the sound itself plays straight on.
+  private func noteAudioJump(ms: Double) {
+    guard Date().timeIntervalSince(lastAudioJumpNote) > 20 else { return }
+    lastAudioJumpNote = Date()
+    let what = ms > 0 ? String(format: "skipped %.0f ms of sound the stream didn't have", ms)
+      : String(format: "left out %.0f ms of sound sent twice", -ms)
+    ActivityLog.shared.add("Kestrel player: \(what) (played straight on)")
   }
 
   /// The system stopped the sound and it was started again: what's kept from now on goes back in.
