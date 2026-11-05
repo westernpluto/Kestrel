@@ -1425,6 +1425,13 @@ final class KestrelEngine: NSObject {
       // Ran dry: hold the clock until there's the margin again.
       stalledSince = Date()
       stalls += 1
+      // Why, in the activity log (the stats only counted them).
+      var why: [String] = []
+      if inAdBreak { why.append(latestHasPrefetch ? "during an ad break" : "during an ad break, Twitch sending whole segments") }
+      else if wholeSegments { why.append("the stream sends whole segments") }
+      if let last = lastArrival { why.append(String(format: "nothing in for %.1f s", Date().timeIntervalSince(last))) }
+      why.append(String(format: "margin %.1f s", catchUp.targetBuffer))
+      ActivityLog.shared.add("Kestrel player: ran out of video (\(why.joined(separator: ", ")))")
       setSpeed(0)
       catchUp.stalled()
       state = .stalled
@@ -1443,8 +1450,19 @@ final class KestrelEngine: NSObject {
     }
     if let since = stalledSince {
       // (Whole segments: enough to last until the next one is listed, or it runs dry again.)
-      let resumeAt = deliversWhole ? min(3.5, catchUp.targetBuffer + Self.segmentLength) : max(0.4, min(catchUp.targetBuffer, 1.5))
+      // In an ad break (Twitch leaving out the segment being made for a while): on as soon as one
+      // segment's in. Waiting for the full whole-segment margin there held the picture for two
+      // segments, a few seconds, for something that's over in half a minute.
+      let resumeAt: Double
+      if wholeSegments {
+        resumeAt = min(3.5, catchUp.targetBuffer + Self.segmentLength)
+      } else if deliversWhole {
+        resumeAt = max(1.2, min(2.0, catchUp.targetBuffer + 0.8))
+      } else {
+        resumeAt = max(0.4, min(catchUp.targetBuffer, 1.5))
+      }
       if ahead >= resumeAt {
+        ActivityLog.shared.add(String(format: "Kestrel player: playing again after %.1f s", Date().timeIntervalSince(since)))
         stalledSince = nil
         setSpeed(1)
         state = .playing
