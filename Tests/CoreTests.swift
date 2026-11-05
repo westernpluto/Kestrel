@@ -1983,13 +1983,22 @@ func testCatchUpSimulation() {
   }
   check(dip(0.35) <= LiveCatchUp.minBuffer + 0.01, "bursts below the noise level don't raise the margin: \(dip(0.35))")
   check(dip(0.2) > LiveCatchUp.minBuffer + 0.05, "with the default level they do (the low-latency player's reading is smooth): \(dip(0.2))")
-  // A hiccup fades from memory rather than dropping out of it all at once.
+  // A hiccup fades from memory rather than dropping out of it all at once (stalls that repeat).
   var fading = LiveCatchUp(now: o0)
+  fading.stalled(now: o0.addingTimeInterval(20))
   fading.stalled(now: o0.addingTimeInterval(50))
   let fresh = fading.neededBuffer(now: o0.addingTimeInterval(60))
   let mid = fading.neededBuffer(now: o0.addingTimeInterval(50 + 375))
   let gone = fading.neededBuffer(now: o0.addingTimeInterval(50 + 601))
   check(fresh > mid && mid > gone && gone == LiveCatchUp.minBuffer, "fades: \(fresh) \(mid) \(gone)")
+  // A lone stall on a steady stream is forgotten within a few minutes, not ten.
+  var lone = LiveCatchUp(now: o0)
+  lone.stalled(now: o0.addingTimeInterval(50))
+  let loneFresh = lone.neededBuffer(now: o0.addingTimeInterval(60))
+  let loneLater = lone.neededBuffer(now: o0.addingTimeInterval(50 + 150))
+  let loneGone = lone.neededBuffer(now: o0.addingTimeInterval(50 + 241))
+  check(loneFresh > LiveCatchUp.minBuffer + 0.3 && loneLater < loneFresh && loneGone == LiveCatchUp.minBuffer,
+    "lone stall: \(loneFresh) \(loneLater) \(loneGone)")
 }
 
 func testDeviceLogin() {

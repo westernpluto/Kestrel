@@ -50,7 +50,10 @@ struct LiveCatchUp: Sendable {
   /// No steering before this (just started, stalled or switched quality).
   private var holdUntil: Date
   /// Hiccups lately: when, and how far delivery fell behind (seconds of video).
-  private var hiccups: [(at: Date, depth: Double)] = []
+  /// `lone`: a stall with none before it in a while, remembered only briefly (`loneMemory`).
+  private var hiccups: [(at: Date, depth: Double, lone: Bool)] = []
+  /// The last stall that was learned from.
+  private var lastLearnedStall: Date?
   /// How far delivery is behind playback right now, and the most it reached in this hiccup.
   private var shortfall = 0.0
   private var shortfallPeak = 0.0
@@ -116,6 +119,11 @@ struct LiveCatchUp: Sendable {
   static let memory: TimeInterval = 600
   static let fullMemory: TimeInterval = 150
   static let fadeTo = 0.4
+  /// A lone stall (none in the last `memory`): in full for this long, gone by `loneMemory`. One
+  /// stall on an otherwise steady stream put up to 0.8 s on the latency for ten minutes; a second
+  /// one within the ten minutes is remembered as long as any hiccup.
+  static let loneFullMemory: TimeInterval = 45
+  static let loneMemory: TimeInterval = 240
   /// A gap in delivery longer than this is an outage (the connection, not the stream's rhythm):
   /// no sensible margin covers it, so it's learned as no more than `outageLearned`.
   static let outage = 2.2
@@ -151,8 +159,10 @@ struct LiveCatchUp: Sendable {
     var recent: Double?
     for hiccup in hiccups {
       let age = now.timeIntervalSince(hiccup.at)
-      guard age < Self.memory else { continue }
-      let fade = age <= Self.fullMemory ? 0 : (age - Self.fullMemory) / (Self.memory - Self.fullMemory)
+      let full = hiccup.lone ? Self.loneFullMemory : Self.fullMemory
+      let total = hiccup.lone ? Self.loneMemory : Self.memory
+      guard age < total else { continue }
+      let fade = age <= full ? 0 : (age - full) / (total - full)
       recent = max(recent ?? 0, hiccup.depth * (1 - (1 - Self.fadeTo) * fade))
     }
     return min(Self.maxBuffer, max(floor, recent.map { $0 + Self.air } ?? 0))
@@ -310,10 +320,10 @@ struct LiveCatchUp: Sendable {
   }
 
   /// - Parameter asIs: a stall's depth, already worked out (not put through the outage rule).
-  private mutating func remember(_ depth: Double, now: Date, asIs: Bool = false) {
+  private mutating func remember(_ depth: Double, now: Date, asIs: Bool = false, lone: Bool = false) {
     let depth = asIs ? depth : Self.learnable(depth)
     hiccups.removeAll { now.timeIntervalSince($0.at) >= Self.memory }
-    hiccups.append((now, depth))
+    hiccups.append((now, depth, lone))
   }
 
   private mutating func grow(toCover depth: Double, now: Date, asIs: Bool = false) {
@@ -353,7 +363,13 @@ struct LiveCatchUp: Sendable {
     let depth = min(Self.maxBuffer, max(Self.learnable(shortfallPeak), base) + 0.4)
     stalledAt = now
     marginBeforeStall = base
-    remember(depth, now: now, asIs: true)
+    let lone = lastLearnedStall.map { now.timeIntervalSince($0) >= Self.memory } ?? true
+    lastLearnedStall = now
+    if !lone {
+      // Not a one-off after all: the one before is remembered in full again too.
+      for i in hiccups.indices { hiccups[i].lone = false }
+    }
+    remember(depth, now: now, asIs: true, lone: lone)
     grow(toCover: depth, now: now, asIs: true)
     shortfall = 0
     shortfallPeak = 0
