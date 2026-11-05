@@ -1325,7 +1325,9 @@ final class KestrelEngine: NSObject {
     }
     guard now.timeIntervalSince(lastAdJump) >= 3 else { return }
     let surplus = ahead - catchUp.targetBuffer - (deliversWhole ? Self.segmentLength : 0)
-    guard surplus > 0.6, surplus < 20 else { return }
+    // Under a second is caught up by playing a little faster instead (a few seconds, not
+    // noticed): a jump that small was a visible hitch in the picture and the sound for very little.
+    guard surplus > 1.0, surplus < 20 else { return }
     lastAdJump = now
     jump(by: surplus)
     ActivityLog.shared.add(
