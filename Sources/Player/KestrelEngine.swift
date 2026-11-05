@@ -132,13 +132,16 @@ final class KestrelEngine: NSObject {
   private var timeline = StreamTimeline()
   private(set) var catchUp: LiveCatchUp
   private var loads: [SegmentLoad] = []
-  private lazy var urlSession: URLSession = {
+  private lazy var urlSession: URLSession = makeSession()
+  private(set) var reconnects = 0
+
+  private func makeSession() -> URLSession {
     let configuration = URLSessionConfiguration.default
     configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
     configuration.timeoutIntervalForRequest = 10
     configuration.httpMaximumConnectionsPerHost = 6
     return URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
-  }()
+  }
   private var pollTask: Task<Void, Never>?
   private var ticker: Timer?
   private var running = false
@@ -614,14 +617,55 @@ final class KestrelEngine: NSObject {
   }
 
   private func begin(_ planned: LiveSegmentPlanner.Planned) {
-    guard let url = URL(string: planned.uri) else { return }
+    guard URL(string: planned.uri) != nil else { return }
     let load = SegmentLoad(planned: planned)
+    loads.append(load)
+    request(load)
+  }
+
+  private func request(_ load: SegmentLoad) {
+    guard let url = URL(string: load.planned.uri) else { return }
     var request = URLRequest(url: url)
     request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
     let task = urlSession.dataTask(with: request)
     load.task = task
-    loads.append(load)
+    load.requestedAt = Date()
     task.resume()
+  }
+
+  private var lastReconnect = Date.distantPast
+
+  /// The downloads share a few connections to Twitch's video server, and one can go dead without
+  /// closing (the Wi-Fi dropping packets for a moment, a router forgetting it): every segment on it
+  /// then waits out the full time limit, and they failed together ten or more seconds later (20
+  /// at once in one log, the picture frozen meanwhile). Once nothing has come in on any of them
+  /// for a few seconds while a segment that's due waits, the ones not started are asked for again
+  /// on fresh connections.
+  private func reconnectIfStuck() {
+    let now = Date()
+    guard now.timeIntervalSince(lastReconnect) > 8, let first = loads.first, !first.finished,
+      let asked = first.requestedAt, now.timeIntervalSince(asked) > 3
+    else { return }
+    let quietFor = now.timeIntervalSince(max(lastArrival ?? asked, asked))
+    // (Not while the margin holds: the segment being made is meant to trickle.)
+    let due = !clockRunning || (bufferAhead ?? 0) < 0.4
+    let waiting = loads.filter { !$0.finished && $0.received == 0 }
+    guard quietFor > 3, due, !waiting.isEmpty else { return }
+    lastReconnect = now
+    reconnects += 1
+    let old = urlSession
+    urlSession = makeSession()
+    for load in waiting {
+      // Not started yet: asked for again on the new connections.
+      let stale = load.task
+      request(load)
+      stale?.cancel()
+    }
+    // One part-way in carries on where it is (the stream itself may have paused: dropping it would
+    // lose the rest); the old connections close once it's done.
+    old.finishTasksAndInvalidate()
+    ActivityLog.shared.add(String(format: "Kestrel player: nothing came in for %.0f s; new connection (%d segments asked for again)", quietFor, waiting.count))
+    pump()
   }
 
   // MARK: Frames, in segment order
@@ -1364,6 +1408,7 @@ final class KestrelEngine: NSObject {
     retireOldLayer()
     // A segment whose frames are all in can hand over to the next before its download closes.
     pump()
+    reconnectIfStuck()
     guard clockRunning else { return }
     let ahead = bufferAhead ?? 0
     if stalledSince == nil, ahead < 0.03 {
@@ -1641,6 +1686,8 @@ final class SegmentLoad {
   var downloaded = false
   /// When its last bytes came in.
   var lastArrival: Date?
+  /// When it was (last) asked for.
+  var requestedAt: Date?
   /// Handed over to the next segment before its download closed (its end is ignored).
   var handedOver = false
   /// Unpacked, not yet handed to the renderers.

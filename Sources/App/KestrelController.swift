@@ -446,7 +446,8 @@ final class KestrelController {
     lines.append(
       StatLine(
         label: "Arrival",
-        value: String(format: "longest gap %.2f s, segment handoff %.2f s (last minute)", engine.longestArrivalGap, engine.longestHandoffWait)))
+        value: String(format: "longest gap %.2f s, segment handoff %.2f s (last minute)", engine.longestArrivalGap, engine.longestHandoffWait)
+          + (engine.reconnects > 0 ? ", \(engine.reconnects) reconnects" : "")))
     lines.append(StatLine(label: "Quality mode", value: engine.autoQuality ? "best that plays smoothly" : "picked"))
     lines.append(StatLine(label: "Segments", value: "\(engine.segmentsLoaded) (\(engine.container))"))
     // What to look at when a stream won't show: frames handed to the decoder (and how many only
