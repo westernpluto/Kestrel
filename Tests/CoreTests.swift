@@ -1954,6 +1954,11 @@ func testCatchUpSimulation() {
   dropout.update(buffer: 0.6, latency: 6, playing: true, now: o0.addingTimeInterval(65))
   check(grown > 2.6 && dropout.targetBuffer <= max(2.2, LiveCatchUp.outageLearned + LiveCatchUp.air) + 0.01,
     "dropout cut back: \(grown) -> \(dropout.targetBuffer)")
+  // A stall that isn't the connection's (Twitch sending whole segments for a while) isn't learned.
+  var notLearned = LiveCatchUp(targetBuffer: 1.2, now: o0)
+  notLearned.stalled(now: o0.addingTimeInterval(60), learn: false)
+  check(notLearned.targetBuffer == 1.2 && notLearned.neededBuffer(now: o0.addingTimeInterval(61)) <= 1.2,
+    "unlearned stall leaves the margin: \(notLearned.targetBuffer)")
   // A short stall keeps what it taught.
   var short = LiveCatchUp(targetBuffer: 2.2, now: o0)
   short.stalled(now: o0.addingTimeInterval(60))

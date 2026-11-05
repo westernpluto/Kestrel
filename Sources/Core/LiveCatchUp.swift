@@ -330,9 +330,10 @@ struct LiveCatchUp: Sendable {
 
   /// The player ran out of video: the hiccup was deeper than the margin. Keep more in hand from
   /// now on (it plays slower for a bit to build it), and leave it be for a moment.
-  mutating func stalled(now: Date = Date()) {
+  /// `learn` false: a stall that isn't the connection's (the stream briefly delivered another way).
+  mutating func stalled(now: Date = Date(), learn: Bool = true) {
     // Right after a change of quality: the switch's gap, not the connection's. Not learned.
-    if now < quietUntil {
+    if now < quietUntil || !learn {
       stalledAt = now
       marginBeforeStall = targetBuffer
       shortfall = 0

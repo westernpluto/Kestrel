@@ -1429,15 +1429,22 @@ final class KestrelEngine: NSObject {
       var why: [String] = []
       if inAdBreak { why.append(latestHasPrefetch ? "during an ad break" : "during an ad break, Twitch sending whole segments") }
       else if wholeSegments { why.append("the stream sends whole segments") }
+      else if prefetchSeen && !latestHasPrefetch { why.append("Twitch sending whole segments for now") }
       if let last = lastArrival { why.append(String(format: "nothing in for %.1f s", Date().timeIntervalSince(last))) }
       why.append(String(format: "margin %.1f s", catchUp.targetBuffer))
-      ActivityLog.shared.add("Kestrel player: ran out of video (\(why.joined(separator: ", ")))")
       setSpeed(0)
-      catchUp.stalled()
+      // A low-latency stream that's just now sending whole segments (Twitch leaves out the
+      // segment being made around ad breaks, sometimes for a while after one ends): it ran dry
+      // waiting for a whole segment, which no margin the connection needs would cover. Learned,
+      // one such stall put 0.4 s on the latency for the next ten minutes.
+      let twitchsDoing = inAdBreak || (prefetchSeen && !latestHasPrefetch)
+      catchUp.stalled(learn: !twitchsDoing)
+      if twitchsDoing { why.append("not learned") }
+      ActivityLog.shared.add("Kestrel player: ran out of video (\(why.joined(separator: ", ")))")
       state = .stalled
       // Twice in a few minutes while the video kept arriving: the connection can't carry this
       // quality; one lower from the next segment.
-      if autoQuality, fit.stalled(), fit.step < renditions.count {
+      if autoQuality, !twitchsDoing, fit.stalled(), fit.step < renditions.count {
         applyFit()
         ActivityLog.shared.add("Kestrel player: stalling at this quality; one lower for now (trying again in a few minutes)")
       }
