@@ -2049,6 +2049,12 @@ func testTSDemux() {
   var early = TSDemuxer()
   let half = early.feed(segment.prefix(segment.count / 2))
   check(half.count > 40, "frames out while it's still arriving: \(half.count)")
+  // Sound is out as soon as its packet is all in: by the segment's last byte, every sound frame
+  // has come out without waiting for the end (a segment handed over before its download closed
+  // lost its last packet of sound otherwise: a skip at the seam).
+  var soundEarly = TSDemuxer()
+  let beforeEnd = soundEarly.feed(segment).filter { if case .audio = $0 { return true } else { return false } }
+  check(beforeEnd.count == audio.count, "all the sound before the end: \(beforeEnd.count) of \(audio.count)")
   // The decoder's form: parameter sets out of the first frame, the rest length-prefixed.
   if let first = video.first {
     let units = AnnexB.units(first.data)

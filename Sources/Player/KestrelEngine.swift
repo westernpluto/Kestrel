@@ -736,7 +736,17 @@ final class KestrelEngine: NSObject {
   /// nothing more of this one is on its way).
   private func readyToHandOver(_ first: SegmentLoad, to next: SegmentLoad) -> Bool {
     guard first.demuxer != nil, first.received > 0, let quiet = first.lastArrival, !next.frames.isEmpty else { return false }
-    return Date().timeIntervalSince(quiet) > 0.25
+    let quietFor = Date().timeIntervalSince(quiet)
+    guard quietFor > 0.25 else { return false }
+    // Its sound must be all in too: it ends where the next segment's begins. The last packet of
+    // sound can come a moment after the last picture, and going on without it was a skip in the
+    // sound at the seam. (A second of nothing: on without it.)
+    if !next.planned.discontinuity, let end = first.audioEnd, let nextStart = next.firstAudio,
+      nextStart - end > 900, nextStart - end < 90_000, quietFor < 1
+    {
+      return false
+    }
+    return true
   }
 
   private func enqueue(_ frame: DemuxedFrame, from load: SegmentLoad) {
@@ -1691,7 +1701,20 @@ final class SegmentLoad {
   /// Handed over to the next segment before its download closed (its end is ignored).
   var handedOver = false
   /// Unpacked, not yet handed to the renderers.
-  var frames: [DemuxedFrame] = []
+  var frames: [DemuxedFrame] = [] {
+    didSet {
+      guard frames.count > oldValue.count else { return }
+      for frame in frames[oldValue.count...] {
+        guard case .audio(let audio) = frame else { continue }
+        let end = audio.pts + Int64(1024 * 90_000 / max(audio.config.sampleRate, 8000))
+        if firstAudio == nil { firstAudio = audio.pts }
+        if audioEnd.map({ end > $0 }) ?? true { audioEnd = end }
+      }
+    }
+  }
+  /// The first sound's time and where the sound in so far ends (the stream's own times).
+  var firstAudio: Int64?
+  var audioEnd: Int64?
   var received = 0
   var finished = false
   var failed = false

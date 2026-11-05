@@ -133,6 +133,20 @@ struct TSDemuxer {
       pending[pid] = Data(payload)
     } else if pending[pid] != nil {
       pending[pid]!.append(contentsOf: payload)
+    } else {
+      return
+    }
+    // Sound comes in PES packets that say how long they are: out as soon as one is all in, rather
+    // than when the next one begins. A segment's last packet otherwise waited for the segment's
+    // end, and when the player moved on to the next segment first, the packet (about a tenth of a
+    // second of sound) was lost: a skip in the sound at the seam.
+    if kind == .aac, let data = pending[pid], data.count >= 6 {
+      let b = data.startIndex
+      let declared = Int(data[b + 4]) << 8 | Int(data[b + 5])
+      if declared > 0, data.count >= 6 + declared {
+        pes(data, kind: kind, pid: pid, into: &out)
+        pending[pid] = nil
+      }
     }
   }
 
