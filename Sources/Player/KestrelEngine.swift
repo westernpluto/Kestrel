@@ -278,6 +278,16 @@ final class KestrelEngine: NSObject {
     handoffWaits.filter { Date().timeIntervalSince($0.at) < 60 }.map(\.wait).max() ?? 0
   }
 
+  /// The main thread held up (this player's network, unpacking and timing all run on it): ticks
+  /// due every quarter second that came late, and by how much.
+  private var holdUps: [(at: Date, length: Double)] = []
+  var longestHoldUp: Double {
+    holdUps.filter { Date().timeIntervalSince($0.at) < 60 }.map(\.length).max() ?? 0
+  }
+  private var lastTick = Date()
+  /// When the app last went to or came back from the background (Picture in Picture included).
+  private var lifecycleChangedAt = Date.distantPast
+
   static let clock: Int32 = 90_000
   /// The fastest it plays (the sound pitch-corrected).
   static let maxRate: Float = 1.2
@@ -304,7 +314,10 @@ final class KestrelEngine: NSObject {
     let center = NotificationCenter.default
     lifecycleTokens.append(
       center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
-        MainActor.assumeIsolated { self?.inBackground = true }
+        MainActor.assumeIsolated {
+          self?.inBackground = true
+          self?.lifecycleChangedAt = Date()
+        }
       })
     lifecycleTokens.append(
       center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
@@ -937,6 +950,7 @@ final class KestrelEngine: NSObject {
   private func enteringForeground() {
     screenNote("app back")
     inBackground = false
+    lifecycleChangedAt = Date()
     // Decoding comes back with the app being active: catching up before that only reset the screen.
     guard UIApplication.shared.applicationState == .active else { return }
     guard running, decodeInLayer, screenBehind || displayLayer.requiresFlushToResumeDecoding else { return }
@@ -1271,6 +1285,13 @@ final class KestrelEngine: NSObject {
 
   private func tick() {
     guard running else { return }
+    let tickedAt = Date()
+    let late = tickedAt.timeIntervalSince(lastTick) - 0.25
+    lastTick = tickedAt
+    if late > 0.3 {
+      holdUps.append((tickedAt, late))
+      if holdUps.count > 200 { holdUps.removeFirst(100) }
+    }
     retireOldLayer()
     // A segment whose frames are all in can hand over to the next before its download closes.
     pump()
@@ -1281,15 +1302,29 @@ final class KestrelEngine: NSObject {
       stalledSince = Date()
       stalls += 1
       setSpeed(0)
-      catchUp.stalled()
       state = .stalled
-      // Twice in a few minutes while the video kept arriving: the connection can't carry this
-      // quality; one lower from the next segment.
-      // (Not right after the video's source changed: that gap isn't the connection's.)
+      // What was going on, for the Activity log: how long since video last came in, whether the
+      // main thread (where this player's network and unpacking run) was just held up, whether the
+      // app was going to or coming back from the background.
+      let sinceArrival = lastArrival.map { Date().timeIntervalSince($0) }
+      let heldUp = late > 0.3 ? late : 0
+      let atLifecycle = Date().timeIntervalSince(lifecycleChangedAt) < 4
       let atSwitch = Date().timeIntervalSince(sourceChangedAt) < Self.sourceChangeGrace
-      if atSwitch {
-        ActivityLog.shared.add("Kestrel player: ran dry as the video switched to or from an ad-free copy (not held against the connection)")
-      } else if autoQuality, fit.stalled(), fit.step < renditions.count {
+      var context = [sinceArrival.map { String(format: "video last came in %.2f s ago", $0) } ?? "no video yet"]
+      if heldUp > 0 { context.append(String(format: "main thread held up %.2f s", heldUp)) }
+      if atLifecycle { context.append(inBackground ? "app just went to the background" : "app just came back") }
+      if atSwitch { context.append("video just switched to or from an ad-free copy") }
+      // Not the connection's when the app held itself up, was moving to or from the background, or
+      // the video's source just changed, while the video had kept coming in (the arrivals wait for
+      // the main thread too, so a hold-up's own length doesn't count): no lower quality, no bigger
+      // margin. Otherwise, twice in a few minutes: the connection can't carry this quality, one
+      // lower from the next segment.
+      let quietBefore = (sinceArrival ?? 0) - heldUp
+      let excused = atSwitch || ((heldUp > 0 || atLifecycle) && quietBefore < 1.0)
+      ActivityLog.shared.add("Kestrel player: ran dry (\(context.joined(separator: ", ")))" + (excused ? "; not held against the connection" : ""))
+      if excused { catchUp.quiet(for: 1) }
+      catchUp.stalled()
+      if !excused, autoQuality, fit.stalled(), fit.step < renditions.count {
         setRendition(renditions[fit.step], byHand: false)
         ActivityLog.shared.add("Kestrel player: stalling at this quality; one lower for now (trying again in a few minutes)")
       }

@@ -460,6 +460,8 @@ final class KestrelController {
       StatLine(
         label: "Arrival",
         value: String(format: "longest gap %.2f s, segment handoff %.2f s (last minute)", engine.longestArrivalGap, engine.longestHandoffWait)))
+    // The main thread (this player's network, unpacking and timing run on it) held up by the app.
+    lines.append(StatLine(label: "Main thread", value: String(format: "longest hold-up %.2f s (last minute)", engine.longestHoldUp)))
     lines.append(StatLine(label: "Quality mode", value: engine.autoQuality ? "best that plays smoothly" : "picked"))
     lines.append(StatLine(label: "Segments", value: "\(engine.segmentsLoaded) (\(engine.container))"))
     // What to look at when a stream won't show: frames handed to the decoder (and how many only
