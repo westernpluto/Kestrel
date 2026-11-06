@@ -896,6 +896,12 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
   private var seekingTo: Double?
   private var lastSaved = Date.distantPast
   private var tokens: [NSObjectProtocol] = []
+  private var url: URL?
+  /// Where to go once the item is ready (the start, where it was left, or where it stalled).
+  private var pendingSeek: Double?
+  /// Waiting for video since then (not seeking).
+  private var stalledSince: Date?
+  private var lastReload = Date.distantPast
 
   nonisolated override init() {
     super.init()
@@ -908,22 +914,14 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
 
   func start(url: URL, id: String) {
     self.id = id
+    self.url = url
     try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
     try? AVAudioSession.sharedInstance().setActive(true)
-    let item = AVPlayerItem(url: url)
     let resume = UserDefaults.standard.double(forKey: Self.positionKey(id))
-    statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
-      guard item.status == .readyToPlay else { return }
-      Task { @MainActor in
-        guard let playback = self, playback.statusObservation != nil else { return }
-        playback.statusObservation = nil
-        // Where it was left, or the start (a recording still being made would otherwise start at
-        // its end, like a live stream).
-        playback.seek(to: resume > 5 ? resume - 3 : 0)
-      }
-    }
     player.automaticallyWaitsToMinimizeStalling = true
-    player.replaceCurrentItem(with: item)
+    // Where it was left, or the start (a recording still being made would otherwise start at its
+    // end, like a live stream).
+    load(url, at: resume > 5 ? resume - 3 : 0)
     timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) {
       [weak self] _ in
       Task { @MainActor in self?.tick() }
@@ -935,6 +933,49 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
     tokens.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
       Task { @MainActor in self?.reattach() }
     })
+    tokens.append(center.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: nil, queue: .main) { [weak self] note in
+      guard let failed = (note.object as AnyObject?).map(ObjectIdentifier.init) else { return }
+      Task { @MainActor in
+        guard let playback = self, let item = playback.player.currentItem, ObjectIdentifier(item) == failed else { return }
+        playback.recover("it stopped playing")
+      }
+    })
+  }
+
+  /// A fresh item for the recording, going to `seconds` once it's ready.
+  private func load(_ url: URL, at seconds: Double) {
+    let item = AVPlayerItem(url: url)
+    pendingSeek = seconds
+    stalledSince = nil
+    let identity = ObjectIdentifier(item)
+    statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+      let status = item.status
+      let error = item.error?.localizedDescription ?? "no reason given"
+      Task { @MainActor in
+        guard let playback = self, let current = playback.player.currentItem, ObjectIdentifier(current) == identity else { return }
+        if status == .failed {
+          playback.recover("it failed (\(error))")
+        } else if status == .readyToPlay, let target = playback.pendingSeek {
+          playback.pendingSeek = nil
+          playback.seek(to: target)
+        }
+      }
+    }
+    player.replaceCurrentItem(with: item)
+  }
+
+  /// The player gave up on the recording, or has waited for video it has: load it again where it
+  /// was. (AVPlayer can stop following a playlist that's still growing, or fail on a part read
+  /// while it was being saved.) At most every few seconds, so a recording that really can't play
+  /// doesn't spin.
+  private func recover(_ why: String) {
+    guard let url, Date().timeIntervalSince(lastReload) > 6 else { return }
+    lastReload = Date()
+    let current = player.currentTime().seconds
+    let at = seekingTo ?? pendingSeek ?? (current.isFinite && current > 0 ? current : position)
+    ActivityLog.shared.add("Recording playback: \(why); loading it again at \(Format.duration(Int(at)))")
+    seekingTo = nil
+    load(url, at: max(0, at - 1))
   }
 
   private func tick() {
@@ -944,15 +985,25 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
     let newEnd = max(seekable, length)
     if newEnd.isFinite, abs(newEnd - end) >= 0.5 { end = newEnd.rounded(.down) }
     let current = player.currentTime().seconds
-    if let target = seekingTo {
+    if let target = seekingTo ?? pendingSeek {
       position = target
     } else if current.isFinite {
       position = current
     }
-    if seekingTo == nil, let date = item.currentDate(), date != currentDate { currentDate = date }
-    let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate || seekingTo != nil
+    if seekingTo == nil, pendingSeek == nil, let date = item.currentDate(), date != currentDate { currentDate = date }
+    let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate || seekingTo != nil || pendingSeek != nil
     if waiting != buffering { buffering = waiting }
-    let paused = player.timeControlStatus == .paused && seekingTo == nil
+    // Stuck: waiting with more recorded ahead (or for long at the newest part, where new video
+    // should turn up every couple of seconds).
+    if player.timeControlStatus == .waitingToPlayAtSpecifiedRate, seekingTo == nil, pendingSeek == nil {
+      let since = stalledSince ?? Date()
+      stalledSince = since
+      let stuck = Date().timeIntervalSince(since)
+      if (end - position > 8 && stuck > 8) || stuck > 25 { recover("it waited \(Int(stuck)) s for video") }
+    } else {
+      stalledSince = nil
+    }
+    let paused = player.timeControlStatus == .paused && seekingTo == nil && pendingSeek == nil
     if paused != isPaused { isPaused = paused }
     if Date().timeIntervalSince(lastSaved) > 5, current.isFinite, current > 0 {
       lastSaved = Date()
@@ -979,8 +1030,9 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
 
   func skip(by seconds: Double) { seek(to: position + seconds) }
 
-  /// The newest part recorded (a few seconds back, so it doesn't run straight into the end).
-  func jumpToNewest() { seek(to: max(0, end - 4)) }
+  /// The newest part recorded (a little back, so it doesn't run straight into the end: the player
+  /// picks up what's been recorded since every few seconds).
+  func jumpToNewest() { seek(to: max(0, end - 8)) }
 
   func togglePause() {
     if isPaused {
@@ -1033,6 +1085,7 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
     let seconds = player.currentTime().seconds
     if seconds.isFinite, seconds > 0 { UserDefaults.standard.set(seconds, forKey: Self.positionKey(id)) }
     pip?.stopPictureInPicture()
+    url = nil
     player.pause()
     player.replaceCurrentItem(with: nil)
     if let timeObserver { player.removeTimeObserver(timeObserver) }

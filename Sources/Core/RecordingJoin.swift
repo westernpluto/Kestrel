@@ -41,11 +41,12 @@ enum RecordingJoin {
       first = false
       body += pieceBody
     }
+    // The same header while the last piece is recorded and after (see StreamRecorder.playlistText):
+    // a player watching it reloads it, and stalls if its target duration or type changes.
     var lines = [
-      "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:\(longest)",
-      "#EXT-X-PLAYLIST-TYPE:\(allEnded ? "VOD" : "EVENT")", "#EXT-X-MEDIA-SEQUENCE:0",
+      "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:\(max(StreamRecorder.stableTargetDuration, longest))",
+      "#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-START:TIME-OFFSET=0",
     ]
-    if !allEnded { lines.append("#EXT-X-START:TIME-OFFSET=0") }
     lines += body
     if allEnded { lines.append("#EXT-X-ENDLIST") }
     return lines.joined(separator: "\n") + "\n"
