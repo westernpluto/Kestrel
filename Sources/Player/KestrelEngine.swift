@@ -176,6 +176,7 @@ final class KestrelEngine: NSObject {
   private var lastHeardMoved = Date()
   private(set) var lateAudio = 0
   private(set) var audioGaps = 0
+  private var lastAudioGapNoted = Date.distantPast
   private(set) var largestAudioGap = 0.0
   /// The Picture in Picture copy (see `makeMirror`).
   private(set) var mirrorLayer: AVSampleBufferDisplayLayer?
@@ -1068,6 +1069,13 @@ final class KestrelEngine: NSObject {
         if abs(off) > 180 {
           audioGaps += 1
           largestAudioGap = max(largestAudioGap, Double(off) / 90)
+          // In the log too, so a gap heard can be matched to one in what Twitch sent (it's played
+          // back to back, so it isn't silence here, but the sound moves against the picture).
+          if Date().timeIntervalSince(lastAudioGapNoted) > 10 {
+            lastAudioGapNoted = Date()
+            ActivityLog.shared.add(
+              String(format: "Kestrel player: the stream's sound %@ %.0f ms here (as Twitch sent it)", off > 0 ? "skips" : "repeats", abs(Double(off)) / 90))
+          }
         }
       }
       lastAudioTime = time

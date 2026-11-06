@@ -17,6 +17,8 @@ final class KestrelController {
   private var videoIndices: [Int] = []
   private var variants: [HLSVariant] = []
   private var adTimeline = AdTimeline()
+  /// Straight from Twitch, with an ad-free server's copy only during an ad (Automatic).
+  private var adFreeForAdsOnly = false
   private var stopped = false
   private var loadTask: Task<Void, Never>?
   private(set) var isPaused = false
@@ -44,6 +46,7 @@ final class KestrelController {
     // Straight from Twitch (a quick start, and 1440p where Twitch offers it here), with the
     // ad-free servers' copy only during a stitched ad. A server picked by hand is used throughout.
     if case .automatic = AppSettings.shared.adBlocking { config.adFreeServersForAdsOnly = true }
+    adFreeForAdsOnly = config.adFreeServersForAdsOnly
     config.checkAccountFirst = TwitchAuth.shared.session != nil
     config.nearbyServers = AppSettings.shared.nearbyServers
     let session = LowLatencySession(
@@ -463,7 +466,17 @@ final class KestrelController {
           + (engine.decodeInLayer ? " (decodes)" : " (pictures from VideoToolbox)")))
     if let error = engine.lastDecoderError { lines.append(StatLine(label: "Decoder error", value: error)) }
     if let behind = engine.startedBehind { lines.append(StatLine(label: "Started", value: String(format: "%.2f s behind newest", behind))) }
-    lines.append(StatLine(label: "Ads", value: AppSettings.shared.adBlockingSummary))
+    // Where the video comes from (not just the ad-blocking setting), and what's happening during
+    // an ad break.
+    let source = model?.route.map { $0.source(adFreeForAdsOnly: adFreeForAdsOnly) } ?? AppSettings.shared.adBlockingSummary
+    lines.append(StatLine(label: "Source", value: source))
+    switch model?.adState ?? .none {
+    case .none: break
+    case .skipped: lines.append(StatLine(label: "Ads", value: "break for Twitch's own player only (stream clean)"))
+    case .searching: lines.append(StatLine(label: "Ads", value: "ad break: finding an ad-free copy"))
+    case .replaced(let copy): lines.append(StatLine(label: "Ads", value: "ad break: ad-free copy (\(copy))"))
+    case .covering: lines.append(StatLine(label: "Ads", value: "ad break: covered"))
+    }
     return lines
   }
 }

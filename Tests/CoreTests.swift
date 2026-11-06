@@ -1629,6 +1629,40 @@ func testBetterQualityOnlyWhenSteady() {
   check(behind.rate > 1 && !behind.readyForBetterQuality, "catching up: \(behind.rate)")
 }
 
+func testStreamSource() {
+  // The stats say where the video comes from, not just the ad-blocking setting.
+  check(StreamRoute.twitch.source(adFreeForAdsOnly: true).hasPrefix("straight from Twitch (an ad-free server's copy only during an ad"))
+  check(StreamRoute.twitch.source(adFreeForAdsOnly: false) == "straight from Twitch (Kestrel's ad filter)")
+  check(StreamRoute.twitchAdFree("subscribed").source(adFreeForAdsOnly: true) == "straight from Twitch, no ads (subscribed)")
+  check(StreamRoute.adFreeServer("proxy.test").source(adFreeForAdsOnly: true) == "ad-free server proxy.test")
+}
+
+func testGifMemory() {
+  // Per channel: what went through is offered first (newest first, no repeats); what Twitch turned
+  // away isn't offered again there (elsewhere it still is); one that went through before stays.
+  func gif(_ id: String) -> GifMemory.Sent {
+    GifMemory.Sent(id: id, url: "https://media.giphy.com/\(id).gif", preview: "https://p/\(id)", aspect: 1.5, title: id, term: "lol")
+  }
+  var memory = GifMemory()
+  memory.noteSent(gif("a"), channel: "1")
+  memory.noteSent(gif("b"), channel: "1")
+  memory.noteSent(gif("a"), channel: "1")
+  check(memory.sentHere("1").map(\.id) == ["a", "b"], "newest first, once: \(memory.sentHere("1").map(\.id))")
+  check(memory.sentHere("2").isEmpty, "per channel")
+  memory.noteRefused("x", channel: "1")
+  memory.noteRefused("x", channel: "1")
+  check(memory.isRefused("x", channel: "1") && !memory.isRefused("x", channel: "2"), "refused here only")
+  memory.noteRefused("a", channel: "1")
+  check(!memory.isRefused("a", channel: "1"), "a GIF that went through isn't hidden for one refusal")
+  memory.noteSent(gif("x"), channel: "1")
+  check(!memory.isRefused("x", channel: "1"), "went through after all: no longer hidden")
+  for i in 0..<40 { memory.noteSent(gif("g\(i)"), channel: "3") }
+  check(memory.sentHere("3").count == GifMemory.keepSent && memory.sentHere("3").first?.id == "g39", "kept to the newest")
+  // Saved and read back.
+  let data = try! JSONEncoder().encode(memory)
+  check(try! JSONDecoder().decode(GifMemory.self, from: data) == memory, "round trip")
+}
+
 func testRecordingJoin() {
   let first = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PROGRAM-DATE-TIME:2026-11-04T01:00:00.000Z\n#EXT-X-MAP:URI=\"init0.mp4\"\n#EXTINF:2.000,\nseg0.m4s\n#EXTINF:2.000,\nseg1.m4s\n#EXT-X-ENDLIST\n"
   let second = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-START:TIME-OFFSET=0\n#EXTINF:2.500,\nseg0.ts\n"
@@ -2291,6 +2325,8 @@ testMutedParts()
 testMultiviewLayout()
 testRecordingJoin()
 testBetterQualityOnlyWhenSteady()
+testStreamSource()
+testGifMemory()
 testWholeSegmentSteering()
 testConnectionFitTooSlow()
 testQualityChangeNotLearned()
