@@ -43,10 +43,17 @@ final class KestrelController {
     config.backupStreams = AppSettings.shared.backupStreams
     config.allowLowQualityBackup = AppSettings.shared.allowLowQualityBackup
     config.adFreeProxies = model?.adFreeProxies ?? AppSettings.shared.adFreeProxyHosts
-    // Straight from Twitch (a quick start, and 1440p where Twitch offers it here), with the
-    // ad-free servers' copy only during a stitched ad. A server picked by hand is used throughout.
-    if case .automatic = AppSettings.shared.adBlocking { config.adFreeServersForAdsOnly = true }
+    // Through an ad-free server from the start, as the setting says (and as the other players do),
+    // unless Twitch shows this account no ads here (a sub, Turbo: straight from Twitch). Straight
+    // from Twitch on Automatic, every ad break Twitch announced held the newest segment back (a
+    // stall) and every stitched ad meant switching to an ad-free copy, with "Skipping an ad" over
+    // whatever of it had already come in. Through an ad-free server Twitch has no ads to announce
+    // or stitch in, and with Twitch's servers near the viewer (on by default) the video still comes
+    // from close by.
     adFreeForAdsOnly = config.adFreeServersForAdsOnly
+    // Low latency through ad breaks: this player hides any ad video it's handed (see apply), so
+    // the newest segment isn't held back (that stalled it at every break).
+    config.lowLatencyThroughAds = true
     config.checkAccountFirst = TwitchAuth.shared.session != nil
     config.nearbyServers = AppSettings.shared.nearbyServers
     let session = LowLatencySession(
@@ -72,6 +79,9 @@ final class KestrelController {
       let preferred = model?.takePreferredQualityLabel().flatMap { label in videoIndices.first { found[$0].label == label } }
       let start = preferred ?? best
       model?.route = await session.route
+      // Through an ad-free server: a better quality only Twitch itself offers (1440p, say) is in
+      // the quality menu, to play straight from Twitch at the viewer's choice.
+      model?.checkDirectQualities(served: found)
       model?.qualities = videoIndices.map { PlayerModel.Quality(id: $0, label: found[$0].label) } + [PlayerModel.Quality(id: nil, label: "Auto")]
       // Auto unless a quality was picked (it moves between them: showing the best as picked was
       // wrong whenever it had stepped down).
@@ -183,7 +193,17 @@ final class KestrelController {
 
   private func apply(_ update: LowLatencyUpdate) {
     adTimeline = update.ads
+    // The video now comes from somewhere else (an ad-free copy standing in for an ad, or back from
+    // it): a gap at the switch isn't the connection's, so it doesn't lower the quality or raise
+    // the margin.
+    if Self.source(of: update.state) != Self.source(of: model?.adState ?? .none) { engine?.sourceChanged() }
     model?.adState = update.state
+  }
+
+  /// Which stream the video comes from in this state: Twitch's own, or an ad-free copy.
+  private static func source(of state: AdState) -> Int {
+    if case .replaced = state { return 1 }
+    return 0
   }
 
   func stop() {

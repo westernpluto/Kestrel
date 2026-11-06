@@ -31,6 +31,11 @@ struct LowLatencyConfig: Sendable {
   /// start) and use the ad-free servers only for a copy of the stream during a stitched ad
   /// (asked first among the copies). Off: the stream comes through an ad-free server throughout.
   var adFreeServersForAdsOnly = false
+  /// Keeps Twitch's low latency (the segment it's still making) through ad breaks. Kestrel's own
+  /// player sets it: it mutes and covers any ad video it's handed (by the ad times the playlists
+  /// give, the segment being made included), so holding that segment back (as for the Amazon
+  /// player) only cost latency, and with about a second in hand, every break became a stall.
+  var lowLatencyThroughAds = false
 }
 
 struct LowLatencyUpdate: Sendable {
@@ -261,7 +266,8 @@ actor LowLatencySession: PlaylistSource {
       // tell (costs ~2 s of latency during the break, saves the ad flash). Only where ads can be
       // stitched in at all: through an ad-free server (or an ad-free account) it would only cost
       // latency, and a stream that started during the announcement stayed behind afterwards.
-      let body = LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: marker && route.adsPossible)
+      let body = LowLatencyPlaylist.filter(
+        main.text, base: main.url, dropPrefetch: marker && route.adsPossible && !config.lowLatencyThroughAds)
       return serve(index, body)
     }
 
@@ -304,10 +310,11 @@ actor LowLatencySession: PlaylistSource {
       }
     }
     // No ad-free copy (yet): give the player the ad, without prefetch so it can't run ahead into
-    // it, and let the app hide it.
+    // it, and let the app hide it. (Kestrel's player keeps it: the app hides the segment being made
+    // too, and dropping it stalled the player.)
     ads.update(with: main.playlist)
     publish(.covering)
-    return serve(index, LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: true))
+    return serve(index, LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: !config.lowLatencyThroughAds))
   }
 
   private func serve(_ index: Int, _ body: String) -> (status: Int, body: String) {

@@ -421,6 +421,12 @@ struct LiveCatchUp: Sendable {
     if targetBuffer > needed { targetBuffer = needed }
   }
 
+  /// Nothing learned for a while: the video now comes from elsewhere (an ad-free copy standing in
+  /// during an ad, or back from it), and a gap at the switch isn't the stream's rhythm.
+  mutating func quiet(for seconds: TimeInterval, now: Date = Date()) {
+    quietUntil = max(quietUntil, now.addingTimeInterval(seconds))
+  }
+
   mutating func hold(for seconds: TimeInterval, now: Date = Date()) {
     rate = 1
     last = nil

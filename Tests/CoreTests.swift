@@ -1663,6 +1663,57 @@ func testGifMemory() {
   check(try! JSONDecoder().decode(GifMemory.self, from: data) == memory, "round trip")
 }
 
+func testLowLatencyThroughAds() {
+  // Kestrel's own player: low latency kept through an announced break (holding the segment being
+  // made back stalled it at every break)...
+  runAsync {
+    let fake = FakeTwitch()
+    fake.mainMarkers = 26..<34
+    var config = LowLatencyConfig()
+    config.lowLatencyThroughAds = true
+    let box = UpdateBox()
+    let session = LowLatencySession(login: "streamer", config: config, http: fake, tokens: fake, log: ActivityLog()) { box.add($0) }
+    _ = try! await session.start()
+    _ = await session.mediaPlaylist(0)
+    fake.advance(4)
+    let announced = await session.mediaPlaylist(0)
+    check(announced.body.contains("TWITCH-PREFETCH"), "prefetch kept through an announced break")
+    check(!announced.body.contains("DATERANGE:ID=\"stitched"), "ad marker still removed")
+    check(box.last?.state == .skipped, "still shown as a client-side break")
+  }
+  // ...and through a stitched ad with no ad-free copy: the segment being made still goes to the
+  // player, and the ad's times are still known, so the app still hides it.
+  runAsync {
+    let fake = FakeTwitch()
+    fake.mainAds = 21..<24
+    fake.liveIndex = 24
+    fake.adTitle = "3f0b6c2e-9d1a"
+    fake.backupAds = ["site": 0..<100, "popout": 0..<100, "mobile_web": 0..<100, "embed": 0..<100, "autoplay": 0..<100]
+    var config = LowLatencyConfig()
+    config.firstPollWait = 2
+    config.lowLatencyThroughAds = true
+    let box = UpdateBox()
+    let session = LowLatencySession(login: "streamer", config: config, http: fake, tokens: fake, log: ActivityLog()) { box.add($0) }
+    _ = try! await session.start()
+    let first = await session.mediaPlaylist(0)
+    check(first.body.contains("TWITCH-PREFETCH"), "prefetch kept while the ad is covered")
+    check(box.last?.state == .covering, "app told to cover")
+    check(box.last?.ads.covers(fake.pdt(21).addingTimeInterval(1)) == true, "ad time range known")
+  }
+}
+
+func testQuietAfterSourceChange() {
+  // A stall just after the video's source changed (an ad-free copy standing in) isn't learned.
+  let t0 = Date(timeIntervalSince1970: 7_000_000)
+  var catchUp = LiveCatchUp(now: t0)
+  let before = catchUp.targetBuffer
+  catchUp.quiet(for: 10, now: t0.addingTimeInterval(20))
+  catchUp.stalled(now: t0.addingTimeInterval(22))
+  check(catchUp.targetBuffer == before, "stall at a switch not learned: \(catchUp.targetBuffer)")
+  catchUp.stalled(now: t0.addingTimeInterval(40))
+  check(catchUp.targetBuffer > before, "a later stall still is")
+}
+
 func testRecordingJoin() {
   let first = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PROGRAM-DATE-TIME:2026-11-04T01:00:00.000Z\n#EXT-X-MAP:URI=\"init0.mp4\"\n#EXTINF:2.000,\nseg0.m4s\n#EXTINF:2.000,\nseg1.m4s\n#EXT-X-ENDLIST\n"
   let second = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-START:TIME-OFFSET=0\n#EXTINF:2.500,\nseg0.ts\n"
@@ -2327,6 +2378,8 @@ testRecordingJoin()
 testBetterQualityOnlyWhenSteady()
 testStreamSource()
 testGifMemory()
+testLowLatencyThroughAds()
+testQuietAfterSourceChange()
 testWholeSegmentSteering()
 testConnectionFitTooSlow()
 testQualityChangeNotLearned()

@@ -417,6 +417,16 @@ final class KestrelEngine: NSObject {
     catchUp.qualityChanged(lowered: lowered)
   }
 
+  /// The video now comes from elsewhere (an ad-free copy standing in during an ad, or back from
+  /// it): for a few seconds, a stall isn't the connection's (no lower quality, no bigger margin).
+  func sourceChanged() {
+    sourceChangedAt = Date()
+    catchUp.quiet(for: Self.sourceChangeGrace)
+  }
+
+  private var sourceChangedAt = Date.distantPast
+  static let sourceChangeGrace: TimeInterval = 10
+
   /// The least to keep in hand on this connection (cellular: more, see NetworkWatch).
   func setMarginFloor(_ value: Double) {
     catchUp.setFloor(value)
@@ -1262,7 +1272,11 @@ final class KestrelEngine: NSObject {
       state = .stalled
       // Twice in a few minutes while the video kept arriving: the connection can't carry this
       // quality; one lower from the next segment.
-      if autoQuality, fit.stalled(), fit.step < renditions.count {
+      // (Not right after the video's source changed: that gap isn't the connection's.)
+      let atSwitch = Date().timeIntervalSince(sourceChangedAt) < Self.sourceChangeGrace
+      if atSwitch {
+        ActivityLog.shared.add("Kestrel player: ran dry as the video switched to or from an ad-free copy (not held against the connection)")
+      } else if autoQuality, fit.stalled(), fit.step < renditions.count {
         setRendition(renditions[fit.step], byHand: false)
         ActivityLog.shared.add("Kestrel player: stalling at this quality; one lower for now (trying again in a few minutes)")
       }
