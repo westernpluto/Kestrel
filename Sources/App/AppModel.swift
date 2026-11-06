@@ -96,7 +96,7 @@ enum ChannelMargins {
   static func remember(_ margin: Double, for login: String, network: String) {
     var stored = all()
     stored[entry(login, network: network)] =
-      margin > LiveCatchUp.minBuffer + 0.25 ? [margin, Date().timeIntervalSince1970] : nil
+      margin > LiveCatchUp.standardFloor + 0.2 ? [margin, Date().timeIntervalSince1970] : nil
     UserDefaults.standard.set(stored, forKey: key)
   }
 }

@@ -1056,7 +1056,9 @@ final class KestrelEngine: NSObject {
       // What the stats show about the sound: arriving after its time, or not following on. Sound
       // past its time is left out (it would only push the sound behind the picture).
       if clockRunning, time + 1920 < now {
-        lateAudio += 1
+        // (Not while settling: the skip to the margin after a start passes over sound still coming
+        // in, unheard, which isn't a gap anyone hears.)
+        if !settling { lateAudio += 1 }
         lastAudioTime = time
         return
       }

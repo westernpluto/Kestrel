@@ -358,7 +358,10 @@ func testCatchUpHoldsOneSpeed() {
   let changes = zip(rates, rates.dropFirst()).filter { $0 != $1 }.count
   check(changes <= 2 && Set(rates).isSubset(of: [1, LiveCatchUp.rates.gentle, LiveCatchUp.startRate, LiveCatchUp.rates.fast]),
     "one catch-up, one speed: \(changes) changes, speeds \(Set(rates).sorted())")
-  check(buffer < 1.3, "caught up: \(buffer) s in hand")
+  check(buffer < catchUp.targetBuffer + 0.3, "caught up: \(buffer) s in hand")
+  // And not past the margin: the average it steers by trails what's in hand while it drains, and
+  // ending on the average alone left 0.3 s less than the margin, right after a start.
+  check(buffer >= catchUp.targetBuffer - 0.12, "not under the margin: \(buffer) s in hand, margin \(catchUp.targetBuffer)")
 }
 
 func testAV1Init() {
@@ -1220,7 +1223,7 @@ func testLiveCatchUp() {
   check((rates.first ?? 9) <= LiveCatchUp.rates.medium, "gently")
   check(abs(buffer - catchUp.targetBuffer) < 0.3, "ends at the margin: \(buffer)")
   check(lowest >= catchUp.targetBuffer - 0.2, "without overshooting: \(lowest)")
-  check(catchUp.targetBuffer <= LiveCatchUp.minBuffer + 0.001, "spending the extra on purpose isn't a hiccup")
+  check(catchUp.targetBuffer <= LiveCatchUp.standardFloor + 0.001, "spending the extra on purpose isn't a hiccup")
   // Paused or buffering: normal speed. Close to live already: leave it.
   check(catchUp.update(buffer: 3, latency: 4, playing: false, now: t) == 1)
   check(catchUp.update(buffer: catchUp.targetBuffer + 0.3, latency: catchUp.targetBuffer + 0.3, playing: true, now: t + 0.5) == 1)
@@ -1334,15 +1337,16 @@ func testLiveCatchUp() {
   check(stall.update(buffer: 6, latency: 7, playing: true, maxRate: LiveCatchUp.rates.gentle, now: t0.addingTimeInterval(9.5)) == LiveCatchUp.rates.gentle)
   check(stall.update(buffer: 6, latency: 7, playing: true, maxRate: 1, now: t0.addingTimeInterval(10)) == 1)
 
-  // A given starting margin (what the channel needed last time), within bounds; none: the least.
+  // A given starting margin (what the channel needed last time), within bounds; none: the least
+  // (a second: see LiveCatchUp's top).
   check(LiveCatchUp(targetBuffer: 1.5).targetBuffer == 1.5)
   check(LiveCatchUp(targetBuffer: 9).targetBuffer == LiveCatchUp.maxBuffer)
-  check(LiveCatchUp(targetBuffer: 0.1).targetBuffer == LiveCatchUp.minBuffer)
-  check(LiveCatchUp().targetBuffer == LiveCatchUp.minBuffer)
+  check(LiveCatchUp(targetBuffer: 0.1).targetBuffer == LiveCatchUp.standardFloor)
+  check(LiveCatchUp().targetBuffer == LiveCatchUp.standardFloor && LiveCatchUp.standardFloor == 1.0)
   // On cellular: a little more kept from the start, and never less.
   var cellular = LiveCatchUp()
-  cellular.setFloor(0.9)
-  check(cellular.targetBuffer == 0.9 && cellular.neededBuffer() == 0.9)
+  cellular.setFloor(1.3)
+  check(cellular.targetBuffer == 1.3 && cellular.neededBuffer() == 1.3)
 
   // No hiccups for long enough: the margin comes back down within a minute or so (spending what's
   // in hand by playing faster, read from the playhead), never under the minimum.
@@ -1350,7 +1354,7 @@ func testLiveCatchUp() {
   var c = t0
   var inHand = 2.0
   var position = 0.0
-  while calm.targetBuffer > LiveCatchUp.minBuffer + 0.001, c < t0.addingTimeInterval(600) {
+  while calm.targetBuffer > LiveCatchUp.standardFloor + 0.001, c < t0.addingTimeInterval(600) {
     c += 0.5
     let rate = calm.update(buffer: inHand, latency: inHand + 1, playing: true, position: position, now: c)
     inHand -= Double(rate - 1) * 0.5
@@ -1993,6 +1997,8 @@ func testCatchUpSimulation() {
   // (they raised the Kestrel player's margin to over a second with no stalls at all).
   func dip(_ noise: Double) -> Double {
     var c = LiveCatchUp(noise: noise, now: o0)
+    // (The least it can be told to keep: what's tested is the noise level, not the floor.)
+    c.setFloor(LiveCatchUp.minBuffer)
     var t = o0.addingTimeInterval(45)
     var held = 0.9
     c.update(buffer: held, latency: 1.4, playing: true, now: t)
@@ -2013,7 +2019,7 @@ func testCatchUpSimulation() {
   let fresh = fading.neededBuffer(now: o0.addingTimeInterval(60))
   let mid = fading.neededBuffer(now: o0.addingTimeInterval(50 + 375))
   let gone = fading.neededBuffer(now: o0.addingTimeInterval(50 + 601))
-  check(fresh > mid && mid > gone && gone == LiveCatchUp.minBuffer, "fades: \(fresh) \(mid) \(gone)")
+  check(fresh > mid && mid > gone && gone == LiveCatchUp.standardFloor, "fades: \(fresh) \(mid) \(gone)")
 }
 
 func testDeviceLogin() {

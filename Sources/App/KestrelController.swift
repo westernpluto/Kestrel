@@ -73,9 +73,10 @@ final class KestrelController {
       // Auto unless a quality was picked (it moves between them: showing the best as picked was
       // wrong whenever it had stepped down).
       model?.selectedQuality = preferred == nil ? nil : start
-      // Always from the least margin, as on Apple TV (starting from what the channel needed last
-      // time put the iPhone up to 0.4 s further back every start); hiccups raise it as they come.
-      let margin: Double? = nil
+      // From what this channel needed last time (on this kind of connection, lately), so it
+      // doesn't have to stall again to learn it: always starting from the least, most streams
+      // stalled in their first minute. It comes back down within a minute or two if it isn't needed.
+      let margin = ChannelMargins.margin(for: login, network: NetworkWatch.shared.memoryKey)
       // The best quality, stepped down while the connection can't carry it (a quality picked by
       // hand, or the one handed over, stays).
       let engine = KestrelEngine(rendition: start, renditions: videoIndices, auto: preferred == nil, startMargin: margin) {
