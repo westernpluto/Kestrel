@@ -359,6 +359,17 @@ final class StreamProxy: @unchecked Sendable {
     return URL(string: "http://127.0.0.1:\(port)/rec/\(id)/index.m3u8")!
   }
 
+  /// `url` (one of this server's) at the port the server is on now: it moves when it's restarted
+  /// and the old port is taken, and a player holding the old address would wait forever.
+  func currentAddress(of url: URL) throws -> URL {
+    let port = try ensureRunning()
+    guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false), components.host == "127.0.0.1",
+      components.port != Int(port)
+    else { return url }
+    components.port = Int(port)
+    return components.url ?? url
+  }
+
   /// One broadcast's recordings played as one video (see RecordingJoin).
   func joinedRecordingURL(ids: [String]) throws -> URL {
     let port = try ensureRunning()

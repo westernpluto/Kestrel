@@ -158,6 +158,16 @@ struct LiveCatchUp: Sendable {
     return min(Self.maxBuffer, max(floor, recent.map { $0 + Self.air } ?? 0))
   }
 
+  /// Steady enough to try a better quality: at normal speed (not slowed down to build the margin
+  /// back up, nor speeding to catch up) with the margin in hand on average. A better quality's
+  /// first segments take longer to come in; tried while the margin was short (or mid-stall, or
+  /// while catching up) they ran it dry, and that stall sent it straight back down, held there for
+  /// longer each time. Low-latency players (Owncast's, hls.js's) hold quality up the same way.
+  var readyForBetterQuality: Bool {
+    guard rate == 1, let level else { return false }
+    return level >= targetBuffer - 0.05
+  }
+
   /// How much of a gap is learned (see `outage`).
   static func learnable(_ depth: Double) -> Double { depth > outage ? min(depth, outageLearned) : depth }
 

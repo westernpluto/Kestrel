@@ -1258,10 +1258,6 @@ final class KestrelEngine: NSObject {
       }
       return
     }
-    if autoQuality, fit.tick(), fit.step < renditions.count {
-      setRendition(renditions[fit.step], byHand: false)
-      ActivityLog.shared.add("Kestrel player: trying the better quality again")
-    }
     if let since = stalledSince {
       let resumeAt = max(0.4, min(catchUp.targetBuffer, 1.5))
       if ahead >= resumeAt {
@@ -1300,6 +1296,13 @@ final class KestrelEngine: NSObject {
       buffer: steering, latency: steering + Self.deliveryDelay, playing: true, position: Double(now) / Double(Self.clock),
       maxRate: Self.maxRate)
     if speed != rate { setSpeed(rate) }
+    // A better quality again once the wait is over, but only from steady playback: not mid-stall,
+    // not while slowed down to rebuild the margin or catching up, not while coming in slowly
+    // (see LiveCatchUp.readyForBetterQuality). Otherwise it waits.
+    if autoQuality, !settling, slowSince == nil, catchUp.readyForBetterQuality, fit.tick(), fit.step < renditions.count {
+      setRendition(renditions[fit.step], byHand: false)
+      ActivityLog.shared.add("Kestrel player: trying the better quality again")
+    }
     syncClock()
   }
 

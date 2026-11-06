@@ -780,13 +780,16 @@
       }
 
       // The best quality, stepped down for the connection: try the one above again after a while.
-      if usesConnectionFit, !audioOnlyForBackground, player.state == .playing, connectionFit.tick() {
+      // Only from steady playback (see LiveCatchUp.readyForBetterQuality); otherwise it waits.
+      // (Not steered, e.g. low latency off: there's no reading of it, so as before.)
+      let steadyForBetter = !steering || catchUp.readyForBetterQuality
+      if usesConnectionFit, !audioOnlyForBackground, player.state == .playing, steadyForBetter, connectionFit.tick() {
         applyConnectionFit(down: false)
       }
 
       // Auto: let it try a better quality again once a hold is over; remember what plays well.
       if chosen == nil, !audioOnlyForBackground {
-        if steadyAuto.tick() { applyAutoCap() }
+        if player.state == .playing, steadyForBetter, steadyAuto.tick() { applyAutoCap() }
         // (Not from a multi-view tile: its limit is its size on screen, not the connection.)
         if !tile, let rank = steadyAuto.steadyRank(), rank < videoQualities.count {
           PlaybackMemory.autoBitrate = videoQualities[rank].bitrate

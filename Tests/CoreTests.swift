@@ -1594,6 +1594,37 @@ func testQualityChangeNotLearned() {
   check(catchUp.targetBuffer < before + 0.05, "stepped down: back to what was needed (\(catchUp.targetBuffer))")
 }
 
+func testBetterQualityOnlyWhenSteady() {
+  // A better quality is tried only from steady playback: at 1x with the margin in hand.
+  let t0 = Date(timeIntervalSince1970: 5_000_000)
+  var catchUp = LiveCatchUp(targetBuffer: 1.0, now: t0)
+  check(!catchUp.readyForBetterQuality, "no readings yet")
+  var t = 2.0
+  // Steady, at the margin: ready.
+  for _ in 0..<30 {
+    catchUp.update(buffer: 1.0, latency: 1.8, playing: true, now: t0.addingTimeInterval(t))
+    t += 0.5
+  }
+  check(catchUp.rate == 1 && catchUp.readyForBetterQuality, "steady: \(catchUp.rate)")
+  // Running low: slowed down to build it back, not ready.
+  for _ in 0..<10 {
+    catchUp.update(buffer: 0.3, latency: 1.1, playing: true, now: t0.addingTimeInterval(t))
+    t += 0.5
+  }
+  check(catchUp.rate < 1 && !catchUp.readyForBetterQuality, "short: \(catchUp.rate)")
+  // Stalled: not ready until it's steady again.
+  catchUp.stalled(now: t0.addingTimeInterval(t))
+  check(!catchUp.readyForBetterQuality, "just stalled")
+  // Well over the margin: catching up faster, not ready either.
+  var behind = LiveCatchUp(targetBuffer: 1.0, now: t0)
+  var u = 60.0
+  for _ in 0..<30 {
+    behind.update(buffer: 4.0, latency: 5.0, playing: true, now: t0.addingTimeInterval(u))
+    u += 0.5
+  }
+  check(behind.rate > 1 && !behind.readyForBetterQuality, "catching up: \(behind.rate)")
+}
+
 func testRecordingJoin() {
   let first = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PROGRAM-DATE-TIME:2026-11-04T01:00:00.000Z\n#EXT-X-MAP:URI=\"init0.mp4\"\n#EXTINF:2.000,\nseg0.m4s\n#EXTINF:2.000,\nseg1.m4s\n#EXT-X-ENDLIST\n"
   let second = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-START:TIME-OFFSET=0\n#EXTINF:2.500,\nseg0.ts\n"
@@ -2253,6 +2284,7 @@ testRecordingPlaylist()
 testMutedParts()
 testMultiviewLayout()
 testRecordingJoin()
+testBetterQualityOnlyWhenSteady()
 testWholeSegmentSteering()
 testConnectionFitTooSlow()
 testQualityChangeNotLearned()

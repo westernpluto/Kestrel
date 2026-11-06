@@ -889,7 +889,7 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
   private var id = ""
   private var statusObservation: NSKeyValueObservation?
   private var pipObservation: NSKeyValueObservation?
-  private var timeObserver: Any?
+  private var ticker: Timer?
   private var pip: AVPictureInPictureController?
   private weak var view: PlayerLayerView?
   private var detached = false
@@ -902,6 +902,9 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
   /// Waiting for video since then (not seeking).
   private var stalledSince: Date?
   private var lastReload = Date.distantPast
+  /// Each load's number (a load waits for the server check; only the newest goes ahead).
+  private var loadGeneration = 0
+  private var loadStartedAt = Date.distantPast
 
   nonisolated override init() {
     super.init()
@@ -922,16 +925,22 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
     // Where it was left, or the start (a recording still being made would otherwise start at its
     // end, like a live stream).
     load(url, at: resume > 5 ? resume - 3 : 0)
-    timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) {
-      [weak self] _ in
+    // On the wall clock, not the player's (a periodic time observer goes quiet while the video
+    // doesn't move, which is just when a stall needs noticing).
+    let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
       Task { @MainActor in self?.tick() }
     }
+    RunLoop.main.add(timer, forMode: .common)
+    ticker = timer
     let center = NotificationCenter.default
     tokens.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { Task { @MainActor in self?.settleInBackground() } }
     })
     tokens.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
-      Task { @MainActor in self?.reattach() }
+      Task { @MainActor in
+        self?.reattach()
+        await self?.checkServer()
+      }
     })
     tokens.append(center.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: nil, queue: .main) { [weak self] note in
       guard let failed = (note.object as AnyObject?).map(ObjectIdentifier.init) else { return }
@@ -942,11 +951,41 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
     })
   }
 
-  /// A fresh item for the recording, going to `seconds` once it's ready.
+  /// A fresh item for the recording, going to `seconds` once it's ready. Kestrel's local server
+  /// (which serves recordings) is checked first: iOS can take its socket while Kestrel is in the
+  /// background, and then nothing loads until it's restarted (as quitting Kestrel did).
   private func load(_ url: URL, at seconds: Double) {
-    let item = AVPlayerItem(url: url)
     pendingSeek = seconds
     stalledSince = nil
+    loadStartedAt = Date()
+    loadGeneration += 1
+    let generation = loadGeneration
+    Task { @MainActor in
+      await StreamProxy.shared.ensureResponsive()
+      guard self.url != nil, generation == self.loadGeneration else { return }
+      let address = (try? StreamProxy.shared.currentAddress(of: url)) ?? url
+      if address != url {
+        ActivityLog.shared.add("Recording playback: Kestrel's local server moved, following it")
+        self.url = address
+      }
+      self.makeItem(address)
+    }
+  }
+
+  /// Back from the background: the local server may have been taken meanwhile (and restarted by
+  /// another player, maybe on another port). Loaded again where it was if so.
+  private func checkServer() async {
+    guard let url, pendingSeek == nil else { return }
+    await StreamProxy.shared.ensureResponsive()
+    let moved = (try? StreamProxy.shared.currentAddress(of: url)).map { $0 != url } ?? false
+    if moved || player.currentItem?.status == .failed {
+      lastReload = .distantPast
+      recover("Kestrel's local server was restarted")
+    }
+  }
+
+  private func makeItem(_ url: URL) {
+    let item = AVPlayerItem(url: url)
     let identity = ObjectIdentifier(item)
     statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
       let status = item.status
@@ -972,14 +1011,24 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
     guard let url, Date().timeIntervalSince(lastReload) > 6 else { return }
     lastReload = Date()
     let current = player.currentTime().seconds
-    let at = seekingTo ?? pendingSeek ?? (current.isFinite && current > 0 ? current : position)
+    // Where it was going, or a second before where it stopped.
+    let at = seekingTo ?? pendingSeek ?? max(0, (current.isFinite && current > 0 ? current : position) - 1)
     ActivityLog.shared.add("Recording playback: \(why); loading it again at \(Format.duration(Int(at)))")
     seekingTo = nil
-    load(url, at: max(0, at - 1))
+    load(url, at: at)
   }
 
   private func tick() {
+    // Loaded but never ready, or failed (and not loaded again yet: at most every few seconds).
+    if pendingSeek != nil, Date().timeIntervalSince(loadStartedAt) > 20 {
+      recover("it didn't load")
+      return
+    }
     guard let item = player.currentItem else { return }
+    if item.status == .failed {
+      recover("it failed (\(item.error?.localizedDescription ?? "no reason given"))")
+      return
+    }
     let seekable = item.seekableTimeRanges.map(\.timeRangeValue).last.map { CMTimeRangeGetEnd($0).seconds } ?? 0
     let length = item.duration.seconds.isFinite ? item.duration.seconds : 0
     let newEnd = max(seekable, length)
@@ -1088,8 +1137,8 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
     url = nil
     player.pause()
     player.replaceCurrentItem(with: nil)
-    if let timeObserver { player.removeTimeObserver(timeObserver) }
-    timeObserver = nil
+    ticker?.invalidate()
+    ticker = nil
     statusObservation = nil
     pipObservation = nil
     tokens.forEach(NotificationCenter.default.removeObserver)
