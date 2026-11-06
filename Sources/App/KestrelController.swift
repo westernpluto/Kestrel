@@ -43,13 +43,13 @@ final class KestrelController {
     config.backupStreams = AppSettings.shared.backupStreams
     config.allowLowQualityBackup = AppSettings.shared.allowLowQualityBackup
     config.adFreeProxies = model?.adFreeProxies ?? AppSettings.shared.adFreeProxyHosts
-    // Through an ad-free server from the start, as the setting says (and as the other players do),
-    // unless Twitch shows this account no ads here (a sub, Turbo: straight from Twitch). Straight
-    // from Twitch on Automatic, every ad break Twitch announced held the newest segment back (a
-    // stall) and every stitched ad meant switching to an ad-free copy, with "Skipping an ad" over
-    // whatever of it had already come in. Through an ad-free server Twitch has no ads to announce
-    // or stitch in, and with Twitch's servers near the viewer (on by default) the video still comes
-    // from close by.
+    // Straight from Twitch, from its servers near the viewer, with an ad-free server's copy only
+    // during a stitched ad (a server picked by hand is used throughout). Through an ad-free server
+    // from the start, Twitch's server near a viewer in America turned the stream away (403) and the
+    // video came from Europe: latency up to 5 s, a quality lower, stalls (in the background most).
+    // Straight from Twitch it's steady at about a second and a half, and the breaks Twitch
+    // announces leave the stream itself clean (low latency kept through them: see below).
+    if case .automatic = AppSettings.shared.adBlocking { config.adFreeServersForAdsOnly = true }
     adFreeForAdsOnly = config.adFreeServersForAdsOnly
     // Low latency through ad breaks: this player hides any ad video it's handed (see apply), so
     // the newest segment isn't held back (that stalled it at every break).

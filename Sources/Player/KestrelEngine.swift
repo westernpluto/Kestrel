@@ -630,12 +630,25 @@ final class KestrelEngine: NSObject {
     ActivityLog.shared.add("Kestrel player: starting from the segment being made (it already had enough video)")
   }
 
-  /// The front segment has gone quiet for a moment and the next one's frames are coming in (so
-  /// nothing more of this one is on its way).
+  /// The front segment is complete and the next one's frames are coming in. For MPEG-TS that's
+  /// told from the frames themselves: its picture and sound run right up to where the next one's
+  /// begin (handed over at once). Handed over after a quarter of a second's quiet alone, the end
+  /// of a segment still on its way over a slow or bursty route was dropped when it came: a skip of
+  /// 60 to 100 ms in the sound (three to five of its frames) and in the picture, every minute or
+  /// two. Not joining up, it's given longer for the rest to come in.
   private func readyToHandOver(_ first: SegmentLoad, to next: SegmentLoad) -> Bool {
-    guard first.demuxer != nil, first.received > 0, let quiet = first.lastArrival, !next.frames.isEmpty else { return false }
-    return Date().timeIntervalSince(quiet) > 0.25
+    guard let demuxer = first.demuxer, first.received > 0, let quiet = first.lastArrival, !next.frames.isEmpty else { return false }
+    let idle = Date().timeIntervalSince(quiet)
+    // (A jump in the timeline between them, e.g. to an ad-free copy: they can't join up.)
+    guard !next.planned.discontinuity, let reach = demuxer.transportReach, let start = next.demuxer?.transportStart,
+      let joined = SegmentDemuxer.joins(end: reach, next: start, frame: frameLength)
+    else { return idle > 0.25 }
+    return joined ? idle > 0.05 : idle > Self.handOverWait
   }
+
+  /// The longest a segment that doesn't yet join up with the next one is waited for (its end may
+  /// never come: a dropped connection, a gap in the stream itself).
+  static let handOverWait: TimeInterval = 0.8
 
   private func enqueue(_ frame: DemuxedFrame, from load: SegmentLoad) {
     if !load.timed {
@@ -1079,12 +1092,12 @@ final class KestrelEngine: NSObject {
         if abs(off) > 180 {
           audioGaps += 1
           largestAudioGap = max(largestAudioGap, Double(off) / 90)
-          // In the log too, so a gap heard can be matched to one in what Twitch sent (it's played
-          // back to back, so it isn't silence here, but the sound moves against the picture).
+          // In the log too, so a skip heard can be matched to one here (sound missing from what
+          // came in: a segment's end lost on the way, or a gap in the stream itself).
           if Date().timeIntervalSince(lastAudioGapNoted) > 10 {
             lastAudioGapNoted = Date()
             ActivityLog.shared.add(
-              String(format: "Kestrel player: the stream's sound %@ %.0f ms here (as Twitch sent it)", off > 0 ? "skips" : "repeats", abs(Double(off)) / 90))
+              String(format: "Kestrel player: the sound %@ %.0f ms here (missing from what came in)", off > 0 ? "skips" : "repeats", abs(Double(off)) / 90))
           }
         }
       }

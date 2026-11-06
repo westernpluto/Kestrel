@@ -68,8 +68,69 @@ struct TSDemuxer {
   /// can be the end of the previous frame. Cut at the PES instead, frames lost their last bytes
   /// (the decoder rejected nearly all of them: a black picture on High-profile sources).
   private var heldFrames: [Int: VideoFrame] = [:]
+  /// What's been unpacked so far (frames out or held): the first and newest picture times, and
+  /// where the sound begins and ends.
+  private var firstVideo: Int64?
+  private var newestVideo: Int64?
+  private var firstAudio: Int64?
+  private var audioEnd: Int64?
 
   init() {}
+
+  /// How far what's come in reaches so far, frames held back included: the newest picture's
+  /// presentation time, and where the newest sound ends (a sound packet still coming in counts
+  /// once all of it is in). With the next segment's `start`, it tells whether this one runs right
+  /// up to it (nothing of it still on the way).
+  func reach() -> (video: Int64?, audioEnd: Int64?) {
+    var video = newestVideo
+    var audio = audioEnd
+    for (pid, data) in pending {
+      guard let kind = streams[pid], let pts = Self.headerPTS(data) else { continue }
+      switch kind {
+      case .h264, .hevc: video = max(video ?? pts, pts)
+      case .aac:
+        guard let end = Self.audioEnd(data, pts: pts) else { continue }
+        audio = max(audio ?? end, end)
+      }
+    }
+    return (video, audio)
+  }
+
+  /// Where its picture and sound begin (presentation times), as far as they've come in.
+  func start() -> (video: Int64?, audio: Int64?) {
+    var video = firstVideo
+    var audio = firstAudio
+    for (pid, data) in pending {
+      guard let kind = streams[pid], let pts = Self.headerPTS(data) else { continue }
+      switch kind {
+      case .h264, .hevc: video = min(video ?? pts, pts)
+      case .aac: audio = min(audio ?? pts, pts)
+      }
+    }
+    return (video, audio)
+  }
+
+  /// A PES packet's presentation time, once its header is in (only the header is read: this is
+  /// asked as every piece of a segment comes in).
+  private static func headerPTS(_ raw: Data) -> Int64? {
+    guard raw.count >= 14 else { return nil }
+    let d = Data(raw.prefix(14))
+    guard d[0] == 0, d[1] == 0, d[2] == 1, d[7] & 0x80 != 0 else { return nil }
+    return timestamp(d, 9)
+  }
+
+  /// Where a sound PES still being put together ends, once all of it (its declared length) is in.
+  private static func audioEnd(_ raw: Data, pts: Int64) -> Int64? {
+    let d = Data(raw)
+    let declared = Int(d[4]) << 8 | Int(d[5])
+    let bodyStart = 9 + Int(d[8])
+    guard declared > 0, d.count >= 6 + declared, bodyStart < 6 + declared else { return nil }
+    var end = pts
+    for frame in ADTS.frames(in: d[bodyStart..<(6 + declared)]) {
+      end += Int64((1024.0 * Self.clock / Double(frame.config.sampleRate)).rounded())
+    }
+    return end
+  }
 
   /// Feeds bytes; returns the frames completed by them, in stream order.
   mutating func feed(_ bytes: Data) -> [DemuxedFrame] {
@@ -230,11 +291,17 @@ struct TSDemuxer {
       let codec: VideoFrame.Codec = kind == .h264 ? .h264 : .hevc
       let key = kind == .h264 ? H264.isKeyframe(data[...]) : HEVC.isKeyframe(data[...])
       heldFrames[pid] = VideoFrame(codec: codec, pts: pts, dts: dts, data: data, isKeyframe: key)
+      firstVideo = min(firstVideo ?? pts, pts)
+      newestVideo = max(newestVideo ?? pts, pts)
     case .aac:
       var time = pts
       for frame in ADTS.frames(in: body) {
         out.append(.audio(AudioFrame(pts: time, data: frame.payload, config: frame.config)))
         time += Int64((1024.0 * Self.clock / Double(frame.config.sampleRate)).rounded())
+      }
+      if time > pts {
+        firstAudio = min(firstAudio ?? pts, pts)
+        audioEnd = max(audioEnd ?? time, time)
       }
     }
   }

@@ -2165,6 +2165,26 @@ func testTSDemux() {
   chunked += pieces.flush()
   check(chunked.count == all.count, "chunked count \(chunked.count) vs \(all.count)")
   check(Set(chunked.map(\.pts)) == Set(all.map(\.pts)), "chunked frames match")
+  // How far a segment reaches as it comes in (held frames included), and where it starts: all of
+  // it in reaches its last picture and the end of its sound; half of it, less.
+  var reaching = TSDemuxer()
+  _ = reaching.feed(segment)
+  let reach = reaching.reach()
+  let soundStep = audio.last.map { Int64((1024.0 * 90_000 / Double($0.config.sampleRate)).rounded()) } ?? 0
+  check(reach.video == video.map(\.pts).max(), "reaches the last picture: \(String(describing: reach.video))")
+  check(reach.audioEnd == audio.last.map { $0.pts + soundStep }, "reaches the end of the sound: \(String(describing: reach.audioEnd))")
+  check(reaching.start().video == video.map(\.pts).min() && reaching.start().audio == audio.first?.pts, "starts")
+  var halfway = TSDemuxer()
+  _ = halfway.feed(segment.prefix(segment.count / 2))
+  check((halfway.reach().video ?? .max) < (reach.video ?? 0) && (halfway.reach().audioEnd ?? .max) < (reach.audioEnd ?? 0), "half in: reaches less")
+  // Joined up with the next segment: the picture a frame on, the sound straight on.
+  if let lastPicture = reach.video, let soundEnd = reach.audioEnd {
+    let frame: Int64 = 3000
+    check(SegmentDemuxer.joins(end: reach, next: (lastPicture + frame, soundEnd), frame: frame) == true, "joins")
+    check(SegmentDemuxer.joins(end: reach, next: (lastPicture + frame, soundEnd + 4 * soundStep), frame: frame) == false, "sound missing at the end")
+    check(SegmentDemuxer.joins(end: reach, next: (lastPicture + 5 * frame, soundEnd), frame: frame) == false, "pictures missing at the end")
+    check(SegmentDemuxer.joins(end: (nil, nil), next: (lastPicture, soundEnd), frame: frame) == nil, "can't tell")
+  }
   // Frames come out as soon as the next one starts (not only at the end).
   var early = TSDemuxer()
   let half = early.feed(segment.prefix(segment.count / 2))
