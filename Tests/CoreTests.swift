@@ -1714,6 +1714,21 @@ func testQuietAfterSourceChange() {
   check(catchUp.targetBuffer > before, "a later stall still is")
 }
 
+func testParameterSetLists() {
+  // Every parameter set a keyframe carries goes into the decoder's format, each once: an encoder
+  // using a second PPS for the frames between keyframes left the decoder unable to read them
+  // (the picture held for each segment) when only the first was given.
+  let vps = Data([0x40, 0x01, 0x0C]), sps = Data([0x42, 0x01, 0x01]), pps0 = Data([0x44, 0x01, 0xC1]), pps1 = Data([0x44, 0x01, 0xC2])
+  let idr = Data([0x28, 0x01, 0xAF])
+  check(HEVC.parameterSetList([vps, sps, pps0, pps1, pps0, idr]) == [vps, sps, pps0, pps1], "HEVC: all, once each")
+  check(HEVC.parameterSetList([sps, pps0, idr]) == nil, "HEVC without a VPS")
+  let hsps = Data([0x67, 0x64, 0x00]), hpps0 = Data([0x68, 0xEE, 0x3C]), hpps1 = Data([0x68, 0xCE, 0x3C]), slice = Data([0x65, 0x88])
+  check(H264.parameterSetList([hsps, hpps0, hpps1, slice]) == [hsps, hpps0, hpps1], "H.264: both PPSs")
+  check(H264.parameterSetList([hsps, slice]) == nil, "H.264 without a PPS")
+  // The frames themselves still go without them.
+  check(HEVC.sample([vps, sps, pps0, pps1, idr]).count == 4 + idr.count, "parameter sets left out of the frame")
+}
+
 func testRecordingJoin() {
   let first = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PROGRAM-DATE-TIME:2026-11-04T01:00:00.000Z\n#EXT-X-MAP:URI=\"init0.mp4\"\n#EXTINF:2.000,\nseg0.m4s\n#EXTINF:2.000,\nseg1.m4s\n#EXT-X-ENDLIST\n"
   let second = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-START:TIME-OFFSET=0\n#EXTINF:2.500,\nseg0.ts\n"
@@ -2411,6 +2426,7 @@ testStreamSource()
 testGifMemory()
 testLowLatencyThroughAds()
 testQuietAfterSourceChange()
+testParameterSetLists()
 testWholeSegmentSteering()
 testConnectionFitTooSlow()
 testQualityChangeNotLearned()

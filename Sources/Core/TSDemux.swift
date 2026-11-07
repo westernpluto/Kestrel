@@ -335,6 +335,12 @@ enum AnnexB {
 
   /// Each NAL unit behind a 4-byte big-endian length (what the system's decoder takes), leaving
   /// out the ones `skip` picks (parameter sets, which go in the format, and delimiters).
+  /// Each unit once, in order.
+  static func distinct(_ units: [Data]) -> [Data] {
+    var seen = Set<Data>()
+    return units.filter { seen.insert($0).inserted }
+  }
+
   static func lengthPrefixed(_ units: [Data], skip: (Data) -> Bool) -> Data {
     var out = Data()
     for unit in units where !unit.isEmpty && !skip(unit) {
@@ -363,6 +369,17 @@ enum H264 {
   static func sample(_ units: [Data]) -> Data {
     AnnexB.lengthPrefixed(units) { [7, 8, 9].contains(type($0)) }
   }
+
+  /// Every SPS and PPS (each once), for the decoder's format. An encoder may use more than one
+  /// picture parameter set (one for keyframes, another for the frames between): given only the
+  /// first, the decoder could read the keyframes and nothing in between (the picture held for a
+  /// segment at a time).
+  static func parameterSetList(_ units: [Data]) -> [Data]? {
+    let sps = AnnexB.distinct(units.filter { type($0) == 7 })
+    let pps = AnnexB.distinct(units.filter { type($0) == 8 })
+    guard !sps.isEmpty, !pps.isEmpty else { return nil }
+    return sps + pps
+  }
 }
 
 enum HEVC {
@@ -381,6 +398,15 @@ enum HEVC {
 
   static func sample(_ units: [Data]) -> Data {
     AnnexB.lengthPrefixed(units) { [32, 33, 34, 35].contains(type($0)) }
+  }
+
+  /// Every VPS, SPS and PPS (each once), for the decoder's format (see H264.parameterSetList).
+  static func parameterSetList(_ units: [Data]) -> [Data]? {
+    let vps = AnnexB.distinct(units.filter { type($0) == 32 })
+    let sps = AnnexB.distinct(units.filter { type($0) == 33 })
+    let pps = AnnexB.distinct(units.filter { type($0) == 34 })
+    guard !vps.isEmpty, !sps.isEmpty, !pps.isEmpty else { return nil }
+    return vps + sps + pps
   }
 }
 

@@ -744,19 +744,21 @@ final class KestrelEngine: NSObject {
       }
       payload = frame.data
     case .h264:
-      if frame.isKeyframe, let sets = H264.parameterSets(units) {
-        let key = sets.sps + sets.pps
+      // Every parameter set the keyframe carries, not just the first of each (see
+      // H264.parameterSetList).
+      if frame.isKeyframe, let sets = H264.parameterSetList(units) {
+        let key = sets.reduce(Data(), +)
         if key != parameterSets || videoFormat == nil {
-          videoFormat = Self.h264Format(sps: sets.sps, pps: sets.pps)
+          videoFormat = Self.h264Format(sets: sets)
           parameterSets = key
         }
       }
       payload = H264.sample(units)
     case .hevc:
-      if frame.isKeyframe, let sets = HEVC.parameterSets(units) {
-        let key = sets.vps + sets.sps + sets.pps
+      if frame.isKeyframe, let sets = HEVC.parameterSetList(units) {
+        let key = sets.reduce(Data(), +)
         if key != parameterSets || videoFormat == nil {
-          videoFormat = Self.hevcFormat(vps: sets.vps, sps: sets.sps, pps: sets.pps)
+          videoFormat = Self.hevcFormat(sets: sets)
           parameterSets = key
         }
       }
@@ -1385,7 +1387,62 @@ final class KestrelEngine: NSObject {
       setRendition(renditions[fit.step], byHand: false)
       ActivityLog.shared.add("Kestrel player: trying the better quality again")
     }
+    watchPicture()
     syncClock()
+  }
+
+  // MARK: The picture's own watch
+
+  /// The picture on screen, and since when it's been that one.
+  private var shownPicture: CVPixelBuffer?
+  private var shownSince = Date()
+  private var videoFramesAtShown = 0
+  private var lastPictureRescue = Date.distantPast
+  private var pictureRescues = 0
+
+  /// Playing, frames going in, yet the picture on screen hasn't changed: the display layer is
+  /// showing keyframes only (it drops the frames between when it can't decode them in time, or at
+  /// all). Seen on a 1440p60 HEVC stream: the picture held for each two-second segment while the
+  /// sound played on. Each time it's seen, one step: the Picture in Picture copy stops decoding (if
+  /// it's going without a window), then decoding moves to VideoToolbox here (every frame decoded
+  /// in order, and any it can't read goes in the log), then (Auto) a quality lower.
+  private func watchPicture() {
+    guard #available(iOS 17.4, tvOS 17.4, *) else { return }
+    let now = Date()
+    guard clockRunning, speed > 0, stalledSince == nil, !settling, !inBackground,
+      UIApplication.shared.applicationState == .active, !screenHiddenForPictureInPicture, !displayLayer.isHidden,
+      retiringLayer == nil, now.timeIntervalSince(caughtUpAt) > 2,
+      let since = playingSince, now.timeIntervalSince(since) > 4
+    else {
+      shownPicture = nil
+      return
+    }
+    let current = displayLayer.sampleBufferRenderer.displayedPixelBuffer()
+    if current == nil || shownPicture == nil || current! !== shownPicture! {
+      shownPicture = current
+      shownSince = now
+      videoFramesAtShown = videoFramesQueued
+      return
+    }
+    // The same picture for most of a second while a second's worth of frames went in.
+    guard now.timeIntervalSince(shownSince) > 0.75, videoFramesQueued - videoFramesAtShown >= 20,
+      now.timeIntervalSince(lastPictureRescue) > 4
+    else { return }
+    lastPictureRescue = now
+    shownPicture = nil
+    pictureRescues += 1
+    if mirrorLayer != nil, mirrorFed, !windowUp {
+      feedMirror(false)
+      ActivityLog.shared.add("Kestrel player: the picture held while frames came in; stopped decoding the Picture in Picture copy")
+    } else if decodeInLayer {
+      setDecodeHere(true)
+      ActivityLog.shared.add("Kestrel player: the picture held while frames came in (keyframes only); decoding with VideoToolbox from the next keyframe")
+    } else if autoQuality, fit.tooSlow(), fit.step < renditions.count {
+      setRendition(renditions[fit.step], byHand: false)
+      ActivityLog.shared.add("Kestrel player: the picture still held (decoded \(framesDecoded), shown \(framesShown), \(decodeErrors) errors); one quality lower")
+    } else {
+      ActivityLog.shared.add("Kestrel player: the picture still held (decoded \(framesDecoded), shown \(framesShown), \(decodeErrors) errors)")
+    }
   }
 
   // MARK: Sample buffers
@@ -1402,6 +1459,39 @@ final class KestrelEngine: NSObject {
       CMBlockBufferReplaceDataBytes(with: bytes.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: data.count)
     }
     return status == kCMBlockBufferNoErr ? block : nil
+  }
+
+  /// Several parameter sets' bytes where Core Media can read them (pointers and sizes).
+  private static func withParameterSets<T>(_ sets: [Data], _ body: ([UnsafePointer<UInt8>], [Int]) -> T) -> T {
+    let buffers = sets.map { set -> UnsafeMutablePointer<UInt8> in
+      let pointer = UnsafeMutablePointer<UInt8>.allocate(capacity: max(1, set.count))
+      set.copyBytes(to: pointer, count: set.count)
+      return pointer
+    }
+    defer { buffers.forEach { $0.deallocate() } }
+    return body(buffers.map { UnsafePointer($0) }, sets.map(\.count))
+  }
+
+  /// H.264 from all of its SPSs and PPSs.
+  static func h264Format(sets: [Data]) -> CMVideoFormatDescription? {
+    var format: CMVideoFormatDescription?
+    let status = withParameterSets(sets) { pointers, sizes in
+      CMVideoFormatDescriptionCreateFromH264ParameterSets(
+        allocator: kCFAllocatorDefault, parameterSetCount: sets.count, parameterSetPointers: pointers, parameterSetSizes: sizes,
+        nalUnitHeaderLength: 4, formatDescriptionOut: &format)
+    }
+    return status == noErr ? format : nil
+  }
+
+  /// HEVC from all of its VPSs, SPSs and PPSs.
+  static func hevcFormat(sets: [Data]) -> CMVideoFormatDescription? {
+    var format: CMVideoFormatDescription?
+    let status = withParameterSets(sets) { pointers, sizes in
+      CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+        allocator: kCFAllocatorDefault, parameterSetCount: sets.count, parameterSetPointers: pointers, parameterSetSizes: sizes,
+        nalUnitHeaderLength: 4, extensions: nil, formatDescriptionOut: &format)
+    }
+    return status == noErr ? format : nil
   }
 
   static func h264Format(sps: Data, pps: Data) -> CMVideoFormatDescription? {
