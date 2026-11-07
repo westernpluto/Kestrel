@@ -1526,7 +1526,7 @@ final class PlayerModel: ObservableObject {
     liveAgain = nil
     streamUpHeard = nil
     let channelID = (channel?.id).flatMap { $0.isEmpty ? nil : $0 } ?? waiting.id
-    let watch = LiveWatch(channelID: channelID) { [weak self] in
+    let watch = LiveWatch(channelIDs: [channelID]) { [weak self] _ in
       guard let self, self.streamUpHeard == nil else { return }
       self.streamUpHeard = Date()
       ActivityLog.shared.add("\(self.channel?.name ?? waiting.name) is going live (Twitch's live events); checking for the stream")

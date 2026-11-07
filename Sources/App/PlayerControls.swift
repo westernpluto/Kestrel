@@ -166,6 +166,12 @@ struct PlayerVideoArea: View {
     .clipped()
     .animation(.easeInOut(duration: 0.25), value: model.currentMutedPart)
     .onAppear { scheduleHide(after: 3.5) }
+    // A pull the system took over (Notification Center, Control Center) never ends: start the next
+    // one afresh (the player itself springs back: see PlayerScreen).
+    .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+      pulling = false
+      swipeTookKeyboard = false
+    }
   }
 
   private var controlsShown: Bool { controlsVisible || model.isPaused || model.phase != .playing }
@@ -324,7 +330,8 @@ struct PlayerVideoArea: View {
       .onChanged { value in
         guard !landscape || largeWindow, !swipeTookKeyboard, Date().timeIntervalSince(lastPinch) > 0.5 else { return }
         let dx = value.translation.width, dy = value.translation.height
-        if pulling || (dy > 8 && dy > abs(dx) * 1.2) {
+        // (From the very top edge of the screen it's the system's: Notification Center.)
+        if pulling || (dy > 8 && dy > abs(dx) * 1.2 && value.startLocation.y > PlayerScreen.systemEdge) {
           // Typing: a swipe down puts the keyboard away (letting it slide off), rather than
           // starting to shrink the player under it.
           if !pulling, keyboardUp {

@@ -1,15 +1,15 @@
-// Word the moment a channel goes live, while its page is open and it's offline: Twitch's
-// `video-playback-by-id.<channel id>` topic on Hermes (the socket twitch.tv uses, see
-// Sources/Twitch/Raids.swift) says "stream-up" as the broadcast starts. Asking Twitch's API every
-// half a minute instead, a channel showed as live 40 to 50 seconds after it went (the API itself
-// lists a stream a while after it starts).
+// Word the moment a channel goes live: Twitch's `video-playback-by-id.<channel id>` topic on
+// Hermes (the socket twitch.tv uses, see Sources/Twitch/Raids.swift) says "stream-up" as the
+// broadcast starts. Used while an offline channel's page is open (asking Twitch's API every half a
+// minute instead, a channel showed as live 40 to 50 seconds after it went: the API lists a stream
+// a while after it starts), and for go-live alerts (one socket watches up to 50 channels).
 
 import Foundation
 
 @MainActor
 final class LiveWatch {
-  private let channelID: String
-  private let onStreamUp: () -> Void
+  private let channelIDs: [String]
+  private let onStreamUp: (String) -> Void
   private var socket: URLSessionWebSocketTask?
   private var session: URLSession?
   private var watchdog: Task<Void, Never>?
@@ -18,13 +18,17 @@ final class LiveWatch {
   private var failures = 0
   private var stopped = false
 
-  init(channelID: String, onStreamUp: @escaping () -> Void) {
-    self.channelID = channelID
+  /// Channels one socket watches at most (Twitch's old PubSub took 50 topics a connection).
+  static let perSocket = 50
+
+  /// - Parameter onStreamUp: called with the channel's ID when one goes live.
+  init(channelIDs: [String], onStreamUp: @escaping (String) -> Void) {
+    self.channelIDs = Array(channelIDs.filter { !$0.isEmpty }.prefix(Self.perSocket))
     self.onStreamUp = onStreamUp
   }
 
   func start() {
-    guard !channelID.isEmpty else { return }
+    guard !channelIDs.isEmpty else { return }
     connect(to: Hermes.url)
   }
 
@@ -50,9 +54,12 @@ final class LiveWatch {
     socket = task
     lastHeard = Date()
     task.resume()
-    task.send(.string(Hermes.subscribe(topic: Hermes.playbackTopic(channelID: channelID)))) { [weak self] error in
-      guard error != nil else { return }
-      Task { @MainActor in self?.dropped(task) }
+    for id in channelIDs {
+      let message = Hermes.subscribe(topic: Hermes.playbackTopic(channelID: id), subscriptionID: Hermes.playbackSubscription(channelID: id))
+      task.send(.string(message)) { [weak self] error in
+        guard error != nil else { return }
+        Task { @MainActor in self?.dropped(task) }
+      }
     }
     receive(on: task)
     startWatchdog()
@@ -87,8 +94,11 @@ final class LiveWatch {
       failures = 0
     case .reconnect(let url):
       connect(to: url ?? Hermes.url)
-    case .streamUp:
-      onStreamUp()
+    case .streamUp(let subscription):
+      // (Watching one channel: it's that one whatever the subscription says.)
+      if let id = Hermes.channel(ofPlaybackSubscription: subscription) ?? (channelIDs.count == 1 ? channelIDs[0] : nil) {
+        onStreamUp(id)
+      }
     case .keepalive, .subscribed, .raid, .streamDown, .other:
       break
     }

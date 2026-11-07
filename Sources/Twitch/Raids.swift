@@ -65,8 +65,9 @@ enum Hermes {
     case raid(RaidEvent)
     /// The channel went live, or ended (the `video-playback-by-id.<channel id>` topic: twitch.tv
     /// lights a channel up the moment this comes, before its API lists the stream).
-    case streamUp
-    case streamDown
+    /// `subscription`: the subscription it came for (one socket can watch many channels).
+    case streamUp(subscription: String?)
+    case streamDown(subscription: String?)
     case other
   }
 
@@ -84,6 +85,13 @@ enum Hermes {
 
   /// A channel's playback events (stream-up, stream-down, viewer counts); needs no sign-in.
   static func playbackTopic(channelID: String) -> String { "video-playback-by-id.\(channelID)" }
+
+  /// The subscription ID used for a channel's playback topic, and the channel back from one.
+  static func playbackSubscription(channelID: String) -> String { "up-\(channelID)" }
+  static func channel(ofPlaybackSubscription id: String?) -> String? {
+    guard let id, id.hasPrefix("up-") else { return nil }
+    return String(id.dropFirst(3))
+  }
 
   static func parse(_ text: String) -> Message {
     guard let data = text.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) else { return .other }
@@ -107,9 +115,10 @@ enum Hermes {
         payload = JSONValue(innerObject)
       }
       if let event = RaidEvent.parse(payload: payload) { return .raid(event) }
+      let subscription = json["notification"]["subscription"]["id"].string
       switch payload["type"].string {
-      case "stream-up": return .streamUp
-      case "stream-down": return .streamDown
+      case "stream-up": return .streamUp(subscription: subscription)
+      case "stream-down": return .streamDown(subscription: subscription)
       default: return .other
       }
     default:

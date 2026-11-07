@@ -1962,8 +1962,12 @@ func testRaids() {
   // rest (viewer counts) aren't acted on.
   check(Hermes.playbackTopic(channelID: "4242") == "video-playback-by-id.4242", "playback topic")
   let up = #"{"type":"notification","notification":{"subscription":{"id":"b"},"type":"pubsub","pubsub":"{\"type\":\"stream-up\",\"server_time\":1762500000.5,\"play_delay\":0}"}}"#
-  check(Hermes.parse(up) == .streamUp, "stream-up")
-  check(Hermes.parse(#"{"type":"notification","notification":{"pubsub":{"type":"stream-down","server_time":1}}}"#) == .streamDown, "stream-down")
+  check(Hermes.parse(up) == .streamUp(subscription: "b"), "stream-up")
+  check(Hermes.parse(#"{"type":"notification","notification":{"pubsub":{"type":"stream-down","server_time":1}}}"#) == .streamDown(subscription: nil), "stream-down")
+  // One socket watches many channels: which one went live is in the subscription's ID.
+  let upID = Hermes.playbackSubscription(channelID: "4242")
+  check(Hermes.channel(ofPlaybackSubscription: upID) == "4242" && Hermes.channel(ofPlaybackSubscription: "b") == nil, "subscription ids")
+  check(Hermes.subscribe(topic: Hermes.playbackTopic(channelID: "4242"), subscriptionID: upID).contains("\"id\":\"up-4242\""), "subscribed with it")
   check(Hermes.parse(#"{"type":"notification","notification":{"pubsub":"{\"type\":\"viewcount\",\"viewers\":12}"}}"#) == .other, "viewer count ignored")
 }
 

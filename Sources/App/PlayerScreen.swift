@@ -1066,6 +1066,8 @@ struct PlayerScreen: View {
   @State private var resizedWidth: CGFloat? = nil
   /// 0 = full screen … 1 = mini player, while a finger is moving it.
   @State private var dragProgress: CGFloat? = nil
+  /// A pull starting this close to the top of the screen is the system's (Notification Center).
+  static let systemEdge: CGFloat = 28
   /// The mini player following a finger (to throw it away).
   @State private var miniOffset: CGSize = .zero
   @State private var closing = false
@@ -1153,7 +1155,8 @@ struct PlayerScreen: View {
             DragGesture(minimumDistance: 14, coordinateSpace: .global)
               .onChanged { value in
                 let dx = value.translation.width, dy = value.translation.height
-                guard dragProgress != nil || (dy > 8 && dy > abs(dx) * 1.2) else { return }
+                // (From the very top edge it's the system's: Notification Center.)
+                guard dragProgress != nil || (dy > 8 && dy > abs(dx) * 1.2 && value.startLocation.y > Self.systemEdge) else { return }
                 if dragProgress == nil { dismissKeyboard() }
                 dragProgress = min(1, max(0, dy / pullDistance))
               }
@@ -1357,6 +1360,14 @@ struct PlayerScreen: View {
     .preferredColorScheme(.dark)
     .animation(Self.spring, value: landscapeChat)
     .background(ChatFollower(model: model, chat: chat))
+    // A drag the system takes over (Notification Center or Control Center pulled down over the
+    // player) never ends: the player was left part-way to the mini player, glitching until it was
+    // dragged again. The app goes inactive as the system's sheet comes down: the player springs
+    // back to where it was.
+    .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+      guard dragProgress != nil else { return }
+      withAnimation(Self.spring) { dragProgress = nil }
+    }
     .task {
       orientation.start()
       // (Opened straight into the mini player when following a raid from it.)
