@@ -262,7 +262,10 @@ final class KestrelController {
       return
     }
     let pick = videoIndices.first { variants[$0].height <= height } ?? videoIndices.last
-    if let pick { engine.setRendition(pick, byHand: false) }
+    if let pick, pick != engine.rendition {
+      ActivityLog.shared.add("Kestrel player: \(variants[pick].label) while the picture is small")
+      engine.setRendition(pick, byHand: false, forSize: true)
+    }
   }
 
   func select(_ id: Int?) {

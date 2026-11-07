@@ -420,14 +420,17 @@ final class KestrelEngine: NSObject {
   }
 
   /// Another rendition: from the next segment on (Twitch's renditions share their timeline).
-  /// Picked by hand, it stays (no stepping down).
-  func setRendition(_ index: Int, byHand: Bool = true) {
+  /// Picked by hand, it stays (no stepping down). `forSize`: lower because the picture is small
+  /// (the mini player, a multi-view tile), not because the connection couldn't carry it: what the
+  /// stream taught about its hiccups is kept. (Forgotten, every trip to the mini player and back
+  /// put the margin back to the least, and the switch back up then stalled.)
+  func setRendition(_ index: Int, byHand: Bool = true, forSize: Bool = false) {
     if byHand { autoQuality = false }
     guard index != rendition else { return }
     // (Best first: further along the list is lower.)
     let lowered = (renditions.firstIndex(of: index) ?? 0) > (renditions.firstIndex(of: rendition) ?? 0)
     rendition = index
-    catchUp.qualityChanged(lowered: lowered)
+    catchUp.qualityChanged(lowered: lowered && !forSize)
   }
 
   /// The video now comes from elsewhere (an ad-free copy standing in during an ad, or back from
@@ -656,12 +659,19 @@ final class KestrelEngine: NSObject {
     guard !next.planned.discontinuity, let reach = demuxer.transportReach, let start = next.demuxer?.transportStart,
       let joined = SegmentDemuxer.joins(end: reach, next: start, frame: frameLength)
     else { return idle > 0.25 }
-    return joined ? idle > 0.05 : idle > Self.handOverWait
+    if joined { return idle > 0.05 }
+    // Not joining up: waited for while there's plenty in hand, never into a stall. (The next
+    // segment's frames don't count toward what's in hand until it's handed over: waiting the full
+    // 0.8 s with about a second in hand ran it dry.) A small skip beats a stall.
+    let inHand = clockRunning ? (bufferAhead ?? 0) : 0
+    return idle > Self.handOverWait || (idle > 0.25 && inHand < Self.handOverReserve)
   }
 
   /// The longest a segment that doesn't yet join up with the next one is waited for (its end may
-  /// never come: a dropped connection, a gap in the stream itself).
+  /// never come: a dropped connection, a gap in the stream itself), and the least kept in hand
+  /// while waiting.
   static let handOverWait: TimeInterval = 0.8
+  static let handOverReserve: Double = 0.5
 
   private func enqueue(_ frame: DemuxedFrame, from load: SegmentLoad) {
     if !load.timed {

@@ -173,7 +173,7 @@ final class RaidWatcher: ObservableObject {
       connect(to: url ?? Hermes.url)
     case .raid(let event):
       handle(event)
-    case .keepalive, .subscribed, .other:
+    case .keepalive, .subscribed, .streamUp, .streamDown, .other:
       break
     }
   }

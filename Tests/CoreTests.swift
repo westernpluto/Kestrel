@@ -1958,6 +1958,13 @@ func testRaids() {
   if case .raid(let e) = go { check(e.kind == .go && e.targetDisplayName == "friend", "go fallback name") } else { check(false, "raid go as object") }
   check(Hermes.parse(#"{"type":"notification","notification":{"pubsub":"{\"type\":\"something_else\"}"}}"#) == .other, "other pubsub")
   check(Hermes.parse("not json") == .other, "garbage")
+  // A channel's playback events: stream-up the moment it goes live, stream-down when it ends; the
+  // rest (viewer counts) aren't acted on.
+  check(Hermes.playbackTopic(channelID: "4242") == "video-playback-by-id.4242", "playback topic")
+  let up = #"{"type":"notification","notification":{"subscription":{"id":"b"},"type":"pubsub","pubsub":"{\"type\":\"stream-up\",\"server_time\":1762500000.5,\"play_delay\":0}"}}"#
+  check(Hermes.parse(up) == .streamUp, "stream-up")
+  check(Hermes.parse(#"{"type":"notification","notification":{"pubsub":{"type":"stream-down","server_time":1}}}"#) == .streamDown, "stream-down")
+  check(Hermes.parse(#"{"type":"notification","notification":{"pubsub":"{\"type\":\"viewcount\",\"viewers\":12}"}}"#) == .other, "viewer count ignored")
 }
 
 /// A shaky broadcaster over Twitch's low-latency delivery (hiccups of 0.4–1.5 s about every 25 s,
