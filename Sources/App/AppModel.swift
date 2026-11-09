@@ -105,7 +105,6 @@ final class AppSettings: ObservableObject {
   static let shared = AppSettings()
   private let defaults = UserDefaults.standard
 
-  @Published var lowLatency: Bool { didSet { defaults.set(lowLatency, forKey: "lowLatency") } }
   @Published var adBlocking: AdBlocking { didSet { defaults.set(adBlocking.stored, forKey: "adBlocking"); applyProxy() } }
   @Published var backgroundAudio: Bool { didSet { defaults.set(backgroundAudio, forKey: "backgroundAudio") } }
   @Published var showVideoStats: Bool { didSet { defaults.set(showVideoStats, forKey: "showVideoStats") } }
@@ -123,9 +122,9 @@ final class AppSettings: ObservableObject {
   @Published var raidMode: RaidMode { didSet { defaults.set(raidMode.rawValue, forKey: "raidMode") } }
   /// A single stream's Picture in Picture: the regular window with play/pause (the picture can
   /// show black for a moment on the way back), or a seamless one without buttons (see
-  /// LowLatencyController.pipContent).
+  /// KestrelController's Picture in Picture).
   @Published var pipControls: Bool { didSet { defaults.set(pipControls, forKey: "pipControls") } }
-  /// Live streams play in Kestrel's own low-latency player (experimental) instead of Amazon's.
+  /// Live streams play in Kestrel's own low-latency player (the default) instead of Apple's.
   @Published var kestrelPlayer: Bool { didSet { defaults.set(kestrelPlayer, forKey: "kestrelPlayer") } }
   /// Kestrel's player: the audio compressor (see AudioOutput).
   @Published var audioCompressor: Bool {
@@ -154,10 +153,9 @@ final class AppSettings: ObservableObject {
 
   private init() {
     defaults.register(defaults: [
-      "lowLatency": true, "nearbyServers": true, "adBlocking": "auto", "backgroundAudio": true, "showVideoStats": false, "chatFontSize": 15.0,
+      "kestrelPlayer": true, "nearbyServers": true, "adBlocking": "auto", "backgroundAudio": true, "showVideoStats": false, "chatFontSize": 15.0,
       "multiviewPiPAll": true, "raidMode": RaidMode.follow.rawValue, "pipControls": true,
     ])
-    lowLatency = defaults.bool(forKey: "lowLatency")
     adBlocking = AdBlocking(stored: defaults.string(forKey: "adBlocking"))
     backgroundAudio = defaults.bool(forKey: "backgroundAudio")
     showVideoStats = defaults.bool(forKey: "showVideoStats")

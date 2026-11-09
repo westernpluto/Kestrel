@@ -21,22 +21,6 @@ sign() { codesign --force --sign - --timestamp=none "$1"; }
 rm -rf "$OUT"
 mkdir -p "$BUNDLE"
 
-# Optional: the Amazon IVS Player SDK enables the low-latency player (#if canImport(AmazonIVSPlayer)).
-# Point IVS_XCFRAMEWORK at AmazonIVSPlayer.xcframework, or unpack it into vendor/.
-IVS_XCFRAMEWORK="${IVS_XCFRAMEWORK:-vendor/AmazonIVSPlayer.xcframework}"
-IVS_FRAMEWORK=""
-if [[ -d "$IVS_XCFRAMEWORK" ]]; then
-  for slice in "$IVS_XCFRAMEWORK"/ios-arm64*; do
-    [[ "$slice" == *simulator* ]] && continue
-    [[ -d "$slice/AmazonIVSPlayer.framework" ]] && IVS_FRAMEWORK="$slice/AmazonIVSPlayer.framework" && break
-  done
-  [[ -n "$IVS_FRAMEWORK" ]] || { echo "No iOS device slice in $IVS_XCFRAMEWORK" >&2; exit 1; }
-  EXTRA+=(-F "$(dirname "$IVS_FRAMEWORK")" -framework AmazonIVSPlayer)
-  echo "==> Low-latency player: linking $(basename "$IVS_FRAMEWORK") from $(dirname "$IVS_FRAMEWORK")"
-else
-  echo "==> Low-latency player: AmazonIVSPlayer.xcframework not found, building without it"
-fi
-
 # Extra compiler flags, e.g. SWIFT_FLAGS="-D KESTREL_NO_CAPTIONS" to leave out a feature.
 read -r -a FLAGS <<< "${SWIFT_FLAGS:-}"
 [[ ${#FLAGS[@]} -gt 0 ]] && echo "==> Extra flags: ${FLAGS[*]}"
@@ -55,15 +39,8 @@ sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD_NUMBER/" Resources/Info.
 cp Resources/AppIcon60x60@2x.png Resources/AppIcon60x60@3x.png "$BUNDLE/"
 cp "Resources/AppIcon76x76@2x~ipad.png" "Resources/AppIcon83.5x83.5@2x~ipad.png" "$BUNDLE/"
 printf 'APPL????' > "$BUNDLE/PkgInfo"
-if [[ -n "$IVS_FRAMEWORK" ]]; then
-  mkdir -p "$BUNDLE/Frameworks"
-  cp -R "$IVS_FRAMEWORK" "$BUNDLE/Frameworks/"
-  rm -rf "$BUNDLE/Frameworks/AmazonIVSPlayer.framework/Headers" "$BUNDLE/Frameworks/AmazonIVSPlayer.framework/Modules" \
-    "$BUNDLE/Frameworks/AmazonIVSPlayer.framework/_CodeSignature"
-fi
 
 echo "==> Signing (ad-hoc)"
-[[ -n "$IVS_FRAMEWORK" ]] && sign "$BUNDLE/Frameworks/AmazonIVSPlayer.framework"
 sign "$BUNDLE/$APP"
 
 echo "==> Packaging"

@@ -233,15 +233,7 @@ struct PlayerVideoArea: View {
       if let engine = model.kestrelEngine {
         KestrelVideoView(engine: engine, fill: fill)
       } else {
-        #if canImport(AmazonIVSPlayer)
-          if let controller = model.lowLatency {
-            LowLatencyVideoView(controller: controller, fill: fill)
-          } else {
-            ApplePlayerSurface(model: model, fill: fill)
-          }
-        #else
           ApplePlayerSurface(model: model, fill: fill)
-        #endif
       }
       // Rewinding: the broadcast's VOD plays on top once it has a picture; the live player stays
       // underneath, paused on its last frame, so the switch never flashes black.
@@ -603,15 +595,12 @@ struct PlayerControls: View {
     return PlayerSettingsMenu(
       qualities: qualities,
       selected: model.menuSelectedQuality,
-      showLowLatency: model.isLive && model.canToggleLowLatency && !model.isRewinding,
-      lowLatency: settings.lowLatency,
       showStats: settings.showVideoStats,
       recordOptions: canRecord ? RecordQuality.options(from: model.qualities.map(\.label)) : [],
       recording: canRecord ? recordings.isRecording(login) : nil,
       autoRecord: autoRecorder.rule(for: login) != nil,
       skipMuted: model.currentMutedParts.isEmpty ? nil : settings.skipMutedParts,
       select: { [model] in model.selectQuality($0) },
-      setLowLatency: { [model] in model.setLowLatency($0) },
       setStats: { [settings] in settings.showVideoStats = $0 },
       startRecording: { [model, recordings] (label: String) in
         guard let channel = model.channel else { return }
@@ -791,7 +780,7 @@ struct PlayerControls: View {
     .accessibilityValue(model.latency.map { String(format: "%.1f seconds behind", $0) } ?? "")
   }
 
-  private var atLiveEdge: Bool { !model.isRewinding && (model.latency ?? 0) < (settings.lowLatency ? 6 : 15) }
+  private var atLiveEdge: Bool { !model.isRewinding && (model.latency ?? 0) < (model.kestrelEngine != nil ? 6 : 15) }
 
   @ViewBuilder
   private func adBadge(iconOnly: Bool) -> some View {
@@ -1394,8 +1383,6 @@ enum ChatMode: Hashable {
 struct PlayerSettingsMenu: View, Equatable {
   var qualities: [PlayerModel.Quality]
   var selected: Int?
-  var showLowLatency: Bool
-  var lowLatency: Bool
   var showStats: Bool
   /// Qualities a recording can be made at (empty: none offered).
   var recordOptions: [String]
@@ -1406,7 +1393,6 @@ struct PlayerSettingsMenu: View, Equatable {
   /// Skip muted parts by themselves (nil: the video has none).
   var skipMuted: Bool?
   var select: (PlayerModel.Quality) -> Void
-  var setLowLatency: (Bool) -> Void
   var setStats: (Bool) -> Void
   var startRecording: (String) -> Void
   var stopRecording: () -> Void
@@ -1416,8 +1402,8 @@ struct PlayerSettingsMenu: View, Equatable {
   var opened: () -> Void
 
   static func == (a: Self, b: Self) -> Bool {
-    a.qualities == b.qualities && a.selected == b.selected && a.showLowLatency == b.showLowLatency
-      && a.lowLatency == b.lowLatency && a.showStats == b.showStats
+    a.qualities == b.qualities && a.selected == b.selected
+      && a.showStats == b.showStats
       && a.recordOptions == b.recordOptions && a.recording == b.recording && a.autoRecord == b.autoRecord
       && a.skipMuted == b.skipMuted
   }
@@ -1433,11 +1419,6 @@ struct PlayerSettingsMenu: View, Equatable {
           }
         } label: {
           Label("Quality · \(qualities.first { $0.id == selected }?.label ?? "Auto")", systemImage: "slider.horizontal.3")
-        }
-      }
-      if showLowLatency {
-        Toggle(isOn: Binding(get: { lowLatency }, set: setLowLatency)) {
-          Label("Low latency", systemImage: "bolt")
         }
       }
       if let skipMuted {

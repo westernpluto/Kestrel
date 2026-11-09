@@ -20,12 +20,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # Amazon IVS Player SDK (the low-latency player). Version and checksum come from AWS's
-  # Package.swift for that release: https://player.live-video.net/<version>/Package.swift
-  IVS_VERSION: "1.57.0"
-  IVS_SHA256: "a848cb36f59d5d19f11456913d7a8c035fb118a7f3a0a4e12230e2e534970430"
-
 jobs:
   # iPhone: Xcode 27.1 or later (the newest 27.x release the runner has) and its SDK, so Kestrel
   # fills iPhone Duo's displays (built with an older SDK, iPhone Duo shows the app at a regular
@@ -56,24 +50,8 @@ jobs:
           xcodebuild -version
           echo "iOS SDK $(xcrun --sdk iphoneos --show-sdk-version)"
 
-      - name: Download Amazon IVS Player SDK
-        id: ivs
-        continue-on-error: true
-        run: |
-          curl -fsSL --retry 3 -o /tmp/ivs.zip "https://player.live-video.net/${IVS_VERSION}/AmazonIVSPlayer.xcframework.zip"
-          echo "${IVS_SHA256}  /tmp/ivs.zip" | shasum -a 256 -c -
-          mkdir -p vendor
-          unzip -q -o /tmp/ivs.zip -d vendor
-          test -d vendor/AmazonIVSPlayer.xcframework || mv "$(find vendor -maxdepth 3 -name AmazonIVSPlayer.xcframework -type d | head -1)" vendor/
-
       - name: Build IPA
-        run: |
-          if [ -d vendor/AmazonIVSPlayer.xcframework ] && ./build.sh; then
-            exit 0
-          fi
-          echo "::warning::Built without the Amazon IVS SDK, so the low-latency player isn't included."
-          rm -rf vendor/AmazonIVSPlayer.xcframework
-          ./build.sh
+        run: ./build.sh
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4

@@ -43,7 +43,7 @@ struct SettingsView: View {
           PlaybackSettingsView()
         } label: {
           SettingsRow(title: "Playback", systemImage: "play.fill", color: .accentTeal,
-            value: PlayerEngine.isLowLatencyBuilt && settings.lowLatency ? "Low latency" : nil)
+            value: settings.kestrelPlayer ? "Kestrel" : "Apple")
         }
         NavigationLink {
           AdBlockingView()
@@ -172,20 +172,13 @@ struct PlaybackSettingsView: View {
 
   var body: some View {
     Form {
-      if PlayerEngine.isLowLatencyBuilt {
-        Section {
-          Toggle("Low latency", isOn: $settings.lowLatency)
-        } footer: {
-          Text("Keeps streams as close to live as your connection allows: when one falls behind, it plays slightly faster for a few seconds to catch up, and it starts right at the live edge.")
-        }
-      }
       Section {
         Picker("Player", selection: $settings.kestrelPlayer) {
-          Text(PlayerEngine.isLowLatencyBuilt ? "Amazon low latency" : "Apple").tag(false)
-          Text("Kestrel (experimental)").tag(true)
+          Text("Kestrel").tag(true)
+          Text("Apple").tag(false)
         }
       } footer: {
-        Text("Kestrel's own player downloads each piece of the stream while it's still being made and shows it as it arrives, aiming at about a second behind live. It's new: if a stream misbehaves, switch back. Applies from the next stream you open, multi-view included. Its audio compressor (the waveform button on the video) evens out the volume, as FrankerFaceZ's does.")
+        Text("Kestrel's own player downloads each piece of the stream while it's still being made and shows it as it arrives, aiming at about a second behind live. Apple's player is further behind (several seconds) but is there if a stream misbehaves. Applies from the next stream you open, multi-view included. Its audio compressor (the waveform button on the video) evens out the volume, as FrankerFaceZ's does.")
       }
       Section {
         Toggle("Background audio", isOn: $settings.backgroundAudio)
@@ -212,14 +205,14 @@ struct PictureInPictureSettingsView: View {
       Section {
         Toggle("Playback controls", isOn: $settings.pipControls)
       } footer: {
-        Text("On: the regular window with play and pause; the picture can show black for a moment when you come back to the app. Off: no buttons in the window, but the stream comes back without the black (pause from the lock screen, Control Center or headphones). For both players (the low-latency one and Kestrel's own). Applies from the next stream you open.")
+        Text("On: the regular window with play and pause; the picture can show black for a moment when you come back to the app. Off: no buttons in the window, but the stream comes back without the black (pause from the lock screen, Control Center or headphones). For both players. Applies from the next stream you open.")
       }
-      if PlayerEngine.isLowLatencyBuilt || settings.kestrelPlayer {
+      if settings.kestrelPlayer {
         Section {
           Toggle("Multi-view: all streams together", isOn: $settings.multiviewPiPAll)
         } footer: {
           Text(
-            "Multi-view's Picture in Picture shows every stream at once, laid out as on screen (experimental). Off, it shows the picked stream. With Kestrel's player and Playback controls on, the window has play and pause too."
+            "Multi-view's Picture in Picture shows every stream at once, laid out as on screen (experimental). Off, or with Playback controls off, it shows the picked stream. The window has play and pause."
           )
         }
       }

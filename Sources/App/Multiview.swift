@@ -43,7 +43,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
   @Published private(set) var running = false
   /// Open the stream picker as soon as the screen shows.
   @Published var wantsPicker = false
-  /// Every stream is in one Picture in Picture window (see MultiviewPictureInPicture).
+  /// Every stream is in one Picture in Picture window (see MultiviewControlsPiP).
   @Published private(set) var pictureInPictureActive = false
   /// Paused from the lock screen, Control Center or headphones (see `setPaused`).
   @Published private(set) var paused = false
@@ -52,14 +52,11 @@ final class MultiviewModel: ObservableObject, Identifiable {
   private var lastFit: (heights: [String: CGFloat], scale: CGFloat)?
   /// The view under the pictures on screen (the all-streams PiP window grows from it).
   private weak var pictureSource: UIView?
-  #if canImport(AmazonIVSPlayer)
-    private lazy var sharedPiP = MultiviewPictureInPicture(model: self)
-  #endif
   /// All the streams in one window with play and pause (Kestrel's player, Playback controls on).
   private lazy var controlsPiP = MultiviewControlsPiP(model: self)
 
-  /// Every stream is on Kestrel's player and Picture in Picture has controls: the window with
-  /// controls (see MultiviewControlsPiP) rather than the one that moves the pictures in.
+  /// Every stream is on Kestrel's player and Picture in Picture has controls: the all-streams
+  /// window (see MultiviewControlsPiP) can be used.
   var usesControlsPiP: Bool {
     AppSettings.shared.pipControls && AppSettings.shared.kestrelPlayer && !tiles.isEmpty
   }
@@ -243,13 +240,6 @@ final class MultiviewModel: ObservableObject, Identifiable {
       controlsPiP.toggle()
       return
     }
-    #if canImport(AmazonIVSPlayer)
-      if picturesTogether || sharedPiP.isActive {
-        updatePictureInPicture()
-        sharedPiP.toggle()
-        return
-      }
-    #endif
     guard running, let selectedID, let tile = tiles.first(where: { $0.id == selectedID }) else { return }
     tile.player.pictureInPictureAllowed = true
     tile.player.togglePictureInPicture()
@@ -274,14 +264,10 @@ final class MultiviewModel: ObservableObject, Identifiable {
 
   // MARK: Picture in Picture
 
-  /// Leaving the app puts every stream in one PiP window (Settings › Playback, experimental; it
-  /// needs the low-latency player), rather than just the picked one.
+  /// Leaving the app puts every stream in one PiP window (Settings › Picture in Picture; it needs
+  /// Kestrel's player with Playback controls on), rather than just the picked one.
   var picturesTogether: Bool {
-    #if canImport(AmazonIVSPlayer)
-      return AppSettings.shared.multiviewPiPAll && tiles.count > 1
-    #else
-      return AppSettings.shared.multiviewPiPAll && tiles.count > 1 && usesControlsPiP
-    #endif
+    AppSettings.shared.multiviewPiPAll && tiles.count > 1 && usesControlsPiP
   }
 
   /// Where each picture is on the multi-view screen, and the size of the area they're in.
@@ -291,10 +277,6 @@ final class MultiviewModel: ObservableObject, Identifiable {
     guard size.width > 0, size.height > 0 else { return }
     pictureLayout = (rects, size)
     controlsPiP.setLayout(rects, in: size)
-    #if canImport(AmazonIVSPlayer)
-      sharedPiP.setLayout(rects, in: size)
-      sharedPiP.fit(count: tiles.count)
-    #endif
   }
 
   /// Sets up whichever Picture in Picture applies now.
@@ -305,12 +287,6 @@ final class MultiviewModel: ObservableObject, Identifiable {
     if let pictureLayout { controlsPiP.setLayout(pictureLayout.rects, in: pictureLayout.size) }
     controlsPiP.setEnabled(together && withControls && running && !hidden, source: pictureSource)
     controlsPiP.sync()
-    #if canImport(AmazonIVSPlayer)
-      if let pictureLayout { sharedPiP.setLayout(pictureLayout.rects, in: pictureLayout.size) }
-      sharedPiP.fit(count: tiles.count)
-      sharedPiP.setEnabled(together && !withControls && running && !hidden, source: pictureSource)
-      sharedPiP.sync()
-    #endif
   }
 
   /// The multi-view screen's pictures came on screen (or went).
@@ -376,9 +352,6 @@ final class MultiviewModel: ObservableObject, Identifiable {
 
   private func stopPictureInPicture() {
     controlsPiP.stop()
-    #if canImport(AmazonIVSPlayer)
-      sharedPiP.stop()
-    #endif
   }
 
   /// Each stream no sharper than its picture is shown (see `MultiviewLayout.heightCap`).
@@ -1354,21 +1327,11 @@ struct MultiviewTileFace: View {
 
   @ViewBuilder
   private var surface: some View {
-    #if canImport(AmazonIVSPlayer)
-      if let engine = player.kestrelEngine {
-        KestrelVideoView(engine: engine, fill: false)
-      } else if let controller = player.lowLatency {
-        LowLatencyVideoView(controller: controller, fill: false)
-      } else {
-        ApplePlayerSurface(model: player, fill: false, pictureInPicture: false)
-      }
-    #else
       if let engine = player.kestrelEngine {
         KestrelVideoView(engine: engine, fill: false)
       } else {
         ApplePlayerSurface(model: player, fill: false, pictureInPicture: false)
       }
-    #endif
   }
 
   @ViewBuilder

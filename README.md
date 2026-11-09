@@ -29,11 +29,10 @@ Builds between releases are under **Actions → Build IPA and APK → Artifacts*
 ## Build
 
 - **GitHub Actions:** every push builds all three apps. Push a `v*` tag, or tick **Publish this build as a GitHub release** under **Run workflow**, to publish a release.
-- **Locally:** `./build.sh` (iPhone) and `./build-tv.sh` (Apple TV) need macOS with Xcode 27.1+. For the low-latency Amazon IVS player, unpack its xcframework into `vendor/`. Android: `gradle assembleRelease` in `android/`.
+- **Locally:** `./build.sh` (iPhone) and `./build-tv.sh` (Apple TV) need macOS with Xcode 27.1+. Android: `gradle assembleRelease` in `android/`.
 - **Tests:** `./Tests/run.sh` (any host Swift toolchain).
 
 ## Notes
 
 - The ad-free servers are run by third parties. They see which channel you open, not your Twitch login.
-- The Amazon IVS Player SDK is distributed by AWS under its own terms and isn't included here.
 - Not affiliated with Twitch. Ad handling draws on [TwitchAdSolutions](https://github.com/ryanbr/TwitchAdSolutions) and [streamlink](https://github.com/streamlink/streamlink). GraphQL shapes follow [Xtra](https://github.com/crackededed/Xtra).

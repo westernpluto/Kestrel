@@ -3,9 +3,6 @@ import AVKit
 import SwiftUI
 import UIKit
 
-#if canImport(AmazonIVSPlayer)
-  import AmazonIVSPlayer
-#endif
 
 @MainActor
 final class PlayerModel: ObservableObject {
@@ -154,10 +151,6 @@ final class PlayerModel: ObservableObject {
   private var stall: (position: Double, since: Date)?
   private var storyboardLoaded = Date.distantPast
 
-  #if canImport(AmazonIVSPlayer)
-    /// Set while the low-latency player is in use.
-    @Published private(set) var lowLatency: LowLatencyController?
-  #endif
 
   private var session: StreamSession?
   private var adRanges: [ClosedRange<Date>] = []
@@ -194,9 +187,6 @@ final class PlayerModel: ObservableObject {
   /// Multi-view: this is the picked stream, the one that can go into Picture in Picture.
   var pictureInPictureAllowed = false {
     didSet {
-      #if canImport(AmazonIVSPlayer)
-        lowLatency?.pictureInPictureAllowed = pictureInPictureAllowed
-      #endif
     }
   }
   private(set) var userMuted = false
@@ -236,9 +226,6 @@ final class PlayerModel: ObservableObject {
   func setVolume(_ value: Float) {
     volume = min(1, max(0, value))
     kestrel?.setVolume(volume)
-    #if canImport(AmazonIVSPlayer)
-      lowLatency?.setVolume(volume)
-    #endif
     player.volume = volume
   }
 
@@ -248,12 +235,6 @@ final class PlayerModel: ObservableObject {
       kestrel.setMuted(muted)
       return
     }
-    #if canImport(AmazonIVSPlayer)
-      if let lowLatency {
-        lowLatency.setMuted(muted)
-        return
-      }
-    #endif
     player.isMuted = muted || mutedForAd
   }
 
@@ -262,9 +243,6 @@ final class PlayerModel: ObservableObject {
     guard height != tileMaxHeight else { return }
     tileMaxHeight = height
     kestrel?.setMaxHeight(height)
-    #if canImport(AmazonIVSPlayer)
-      lowLatency?.setMaxHeight(height)
-    #endif
     player.currentItem?.preferredMaximumResolution = Self.resolution(forHeight: height)
   }
 
@@ -275,7 +253,7 @@ final class PlayerModel: ObservableObject {
   nonisolated init(target: PlaybackTarget) {
     self.target = target
     if case .live(let channel) = target {
-      // The low-latency (IVS) player when the build has it; the Apple player otherwise and as a
+      // Kestrel's own player (the default) or the Apple player, chosen in Settings; the Apple one also as a
       // fallback.
       _engine = Published(initialValue: PlayerEngine.preferredDefault)
       _expectsOffline = Published(initialValue: Self.openedOffline.contains(channel.login.lowercased()))
@@ -291,9 +269,6 @@ final class PlayerModel: ObservableObject {
 
   func start() async {
     guard session == nil, phase == .loading, !stopped else { return }
-    #if canImport(AmazonIVSPlayer)
-      guard lowLatency == nil else { return }
-    #endif
     // Opened for chat while offline: nothing plays yet, so other apps' audio carries on.
     if !expectsOffline {
       try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
@@ -307,19 +282,12 @@ final class PlayerModel: ObservableObject {
       lastInfoRefresh = Date()
       Task { await refreshInfo() }
       if engine == .kestrel {
-        // (Multi-view's tiles too: their pictures move into its all-streams Picture in Picture
-        // window, see showPicture.)
+        // (Multi-view's tiles too: their pictures go into its all-streams Picture in Picture
+        // window, see MultiviewControlsPiP.)
         startKestrel(channel)
         startTimer()
         return
       }
-      #if canImport(AmazonIVSPlayer)
-        if engine == .lowLatency {
-          startLowLatency(channel)
-          startTimer()
-          return
-        }
-      #endif
       startObservingAVPlayer()
       await startLive(channel)
     case .video(let video):
@@ -691,13 +659,6 @@ final class PlayerModel: ObservableObject {
       kestrel.select(quality.id)
       return
     }
-    #if canImport(AmazonIVSPlayer)
-      if let lowLatency {
-        selectedQuality = quality.id
-        lowLatency.select(quality.id)
-        return
-      }
-    #endif
     if let session {
       selectedQuality = quality.id
       play(StreamProxy.shared.masterURL(for: session, quality: quality.id))
@@ -718,12 +679,6 @@ final class PlayerModel: ObservableObject {
       isPaused = false
       return
     }
-    #if canImport(AmazonIVSPlayer)
-      if let lowLatency {
-        lowLatency.goLive()
-        return
-      }
-    #endif
     guard isLive, let item = player.currentItem, let range = item.seekableTimeRanges.last?.timeRangeValue else { return }
     lastCatchUp = Date()
     let offset = item.recommendedTimeOffsetFromLive.isValid ? item.recommendedTimeOffsetFromLive : CMTime(seconds: 6, preferredTimescale: 600)
@@ -751,13 +706,6 @@ final class PlayerModel: ObservableObject {
       isPaused = paused
       return
     }
-    #if canImport(AmazonIVSPlayer)
-      if let lowLatency {
-        lowLatency.setPaused(paused)
-        isPaused = lowLatency.isPaused
-        return
-      }
-    #endif
     if !paused {
       if isLive { goLive() } else { player.play() }
       isPaused = false
@@ -800,12 +748,6 @@ final class PlayerModel: ObservableObject {
       kestrel.togglePictureInPicture()
       return
     }
-    #if canImport(AmazonIVSPlayer)
-      if let lowLatency {
-        lowLatency.togglePictureInPicture()
-        return
-      }
-    #endif
     guard let pip = applePictureInPicture else { return }
     if pip.isPictureInPictureActive { pip.stopPictureInPicture() } else { pip.startPictureInPicture() }
   }
@@ -830,27 +772,9 @@ final class PlayerModel: ObservableObject {
   }
 
   /// Twitch's low-latency mode (the low-latency player only).
-  func setLowLatency(_ enabled: Bool) {
-    AppSettings.shared.lowLatency = enabled
-    #if canImport(AmazonIVSPlayer)
-      lowLatency?.setLowLatency(enabled)
-    #endif
-  }
-
-  var canToggleLowLatency: Bool {
-    #if canImport(AmazonIVSPlayer)
-      return lowLatency != nil
-    #else
-      return false
-    #endif
-  }
-
   func setFill(_ fill: Bool) {
     fillsScreen = fill
     kestrel?.setFill(fill)
-    #if canImport(AmazonIVSPlayer)
-      lowLatency?.setFill(fill)
-    #endif
   }
 
   /// Ten-second skips (`skip(by:)`): back through a VOD or the broadcast (from live, into the
@@ -922,10 +846,6 @@ final class PlayerModel: ObservableObject {
     kestrel?.stop()
     kestrel = nil
     kestrelEngine = nil
-    #if canImport(AmazonIVSPlayer)
-      lowLatency?.stop()
-      lowLatency = nil
-    #endif
     player.pause()
     player.replaceCurrentItem(with: nil)
     itemObservation = nil
@@ -1084,15 +1004,6 @@ final class PlayerModel: ObservableObject {
       if pictureInPictureActive != kestrel.pictureInPictureActive { pictureInPictureActive = kestrel.pictureInPictureActive }
       return
     }
-    #if canImport(AmazonIVSPlayer)
-      if let lowLatency {
-        lowLatency.tick()
-        if wantsStats { stats = lowLatency.stats() }
-        if isPaused != lowLatency.isPaused { isPaused = lowLatency.isPaused }
-        if pictureInPictureActive != lowLatency.pictureInPictureActive { pictureInPictureActive = lowLatency.pictureInPictureActive }
-        return
-      }
-    #endif
     if wantsStats { stats = appleStats() }
     // Only once the item is ready and not mid-start or mid-seek: before that the player reports
     // "paused" while it loads, which used to stop VODs from ever starting.
@@ -1383,12 +1294,6 @@ final class PlayerModel: ObservableObject {
     scrubTarget = nil
     isBuffering = true
     isPaused = false
-    #if canImport(AmazonIVSPlayer)
-      if let lowLatency {
-        lowLatency.resumeLive()
-        return
-      }
-    #endif
     goLive()
   }
 
@@ -1430,12 +1335,6 @@ final class PlayerModel: ObservableObject {
       kestrel.setPaused(true)
       return
     }
-    #if canImport(AmazonIVSPlayer)
-      if let lowLatency {
-        lowLatency.suspend()
-        return
-      }
-    #endif
     player.pause()
   }
 
@@ -1552,68 +1451,4 @@ final class PlayerModel: ObservableObject {
     stream = page.stream
   }
 
-  #if canImport(AmazonIVSPlayer)
-    /// Multi-view, all streams in Picture in Picture: the picture shows in this view of the PiP
-    /// window (nil: back in the tile). Kept for a player started afresh meanwhile.
-    private weak var sharedPictureView: UIView?
-
-    func showPicture(in view: UIView?) {
-      sharedPictureView = view
-      if let engine = kestrelEngine, let surface = engine.screenView as? KestrelVideoView.LayerView {
-        // Kestrel's player: its own picture moves into the window's cell and back, fed in the
-        // background meanwhile.
-        if let view {
-          engine.screenInWindow = true
-          surface.lendScreen(to: view)
-        } else {
-          surface.takeScreenBack()
-          engine.screenInWindow = false
-        }
-        return
-      }
-      if let view { lowLatency?.show(in: view) } else { lowLatency?.showInTile() }
-    }
-
-    private func startLowLatency(_ channel: Channel) {
-      let controller = LowLatencyController(login: channel.login, codecs: codecs, model: self)
-      controller.tile = isTile
-      controller.pictureInPictureAllowed = pictureInPictureAllowed
-      lowLatency = controller
-      controller.start()
-      if let sharedPictureView { controller.show(in: sharedPictureView) }
-      if userMuted { controller.setMuted(true) }
-      if volume < 1 { controller.setVolume(volume) }
-      if let tileMaxHeight { controller.setMaxHeight(tileMaxHeight) }
-    }
-
-    /// The low-latency player gave up: use the Apple player for the rest of this stream.
-    func lowLatencyFailed(_ message: String) {
-      guard engine == .lowLatency, !stopped else { return }
-      ActivityLog.shared.add("Low-latency player failed (\(message)); switching to the Apple player")
-      teardownPlayback()
-      waitingForStream = false
-      engine = .standard
-      phase = .loading
-      Task { await start() }
-    }
-
-    /// For this stream only (the setting stays): e.g. a 1440p rendition the low-latency player
-    /// can't decode.
-    func switchToApplePlayer(quality label: String?, reason: String) {
-      guard engine == .lowLatency, !stopped else { return }
-      ActivityLog.shared.add("Switching to the Apple player: \(reason)")
-      teardownPlayback()
-      engine = .standard
-      preferredQualityLabel = label
-      phase = .loading
-      Task { await start() }
-    }
-
-    func lowLatencyOffline() {
-      guard !stopped else { return }
-      teardownPlayback()
-      waitingForStream = false
-      phase = .offline
-    }
-  #endif
 }

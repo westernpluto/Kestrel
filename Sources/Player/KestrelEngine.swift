@@ -1,9 +1,9 @@
 // Kestrel's own player, part 2: playing what TSDemuxer unpacks.
 //
-// Amazon's player keeps Twitch streams about a second behind live by downloading each segment
+// Twitch's own player keeps its streams about a second behind live by downloading each segment
 // while it's still being made (Twitch lists those ahead of time, as prefetch hints) and showing
 // its frames as they arrive. The Apple player can't: it only plays finished segments, so it
-// stays several seconds back. This does what Amazon's does, with the system's own pieces:
+// stays several seconds back. This does what Twitch's does, with the system's own pieces:
 //
 //   playlist (from the ad-free session)  →  LiveSegmentPlanner: which segments, in order
 //   each segment streamed over HTTP       →  TSDemuxer: video and audio frames, as bytes arrive

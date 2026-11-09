@@ -3,8 +3,8 @@
 // interface of its own made for the TV: focusable cards in a grid, a full-screen player with chat
 // beside it, and signing in with a code at twitch.tv/activate instead of typing a password.
 //
-// Apple TV has no Amazon IVS player, so streams play in the Apple player, kept as close to live as
-// it will go (see TVPlayerModel).
+// Streams play in Kestrel's own low-latency player, or the Apple player (kept as close to live as
+// it will go) when that's turned off or can't play a stream (see TVPlayerModel).
 
 import AVFoundation
 import Security

@@ -1,4 +1,4 @@
-// Playlists for the low-latency player (Amazon IVS). Twitch's playlists go through the local
+// Playlists for the low-latency player (Kestrel's own). Twitch's playlists go through the local
 // server almost untouched, so Twitch's low-latency tags survive, but:
 //  - ad markers are removed, so nothing in the player can act on them;
 //  - while an ad is stitched into the video itself, the playlist of an ad-free copy of the stream
