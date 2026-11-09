@@ -30,6 +30,9 @@ final class NowPlaying {
     artworkURL = nil
     artwork = nil
     lastSignature = ""
+    // (Opened for chat while offline: nothing plays yet, other apps' audio carries on. It's
+    // claimed once the stream plays: see `update`.)
+    if !model.expectsOffline { claimSession() }
     registerCommands()
     update(model)
   }
@@ -47,6 +50,7 @@ final class NowPlaying {
     artworkURL = nil
     artwork = nil
     lastSignature = ""
+    claimSession()
     registerCommands()
     update(multiview: multiview)
   }
@@ -55,6 +59,26 @@ final class NowPlaying {
     guard self.multiview === multiview else { return }
     self.multiview = nil
     clear()
+  }
+
+  /// Makes Kestrel the app iOS treats as playing: the playback category, not mixed with other
+  /// apps, and active. Only that app is tied to the lock screen's Now Playing card, so tapping the
+  /// card opens it. Running in the background with nothing playing (go-live alerts, recordings)
+  /// mixes with other apps so music isn't interrupted (see BackgroundKeepAlive). Multi-view
+  /// never switched that back: the card showed the streams, but tapping it didn't open Kestrel,
+  /// and its buttons could go to the music app instead.
+  func claimSession() {
+    let session = AVAudioSession.sharedInstance()
+    let mixing = session.categoryOptions.contains(.mixWithOthers)
+    if mixing || session.category != .playback {
+      do {
+        try session.setCategory(.playback, mode: .moviePlayback, options: [])
+        if mixing { ActivityLog.shared.add("Now Playing: sound no longer mixed with other apps (the lock screen opens Kestrel)") }
+      } catch {
+        ActivityLog.shared.add("Now Playing: couldn't set the sound up for playback (\(error.localizedDescription))")
+      }
+    }
+    try? session.setActive(true)
   }
 
   private func clear() {
@@ -141,6 +165,7 @@ final class NowPlaying {
     lastSignature = signature
     lastPaused = paused
     lastPush = Date()
+    if !paused, AVAudioSession.sharedInstance().categoryOptions.contains(.mixWithOthers) { claimSession() }
     var info: [String: Any] = [
       MPMediaItemPropertyTitle: title,
       MPMediaItemPropertyArtist: artist,
@@ -194,6 +219,7 @@ final class NowPlaying {
     lastPaused = paused
     lastElapsed = elapsed
     lastPush = Date()
+    if !paused, model.phase == .playing, AVAudioSession.sharedInstance().categoryOptions.contains(.mixWithOthers) { claimSession() }
 
     var info: [String: Any] = [
       MPMediaItemPropertyTitle: title,
