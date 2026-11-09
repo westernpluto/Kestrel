@@ -176,6 +176,15 @@ final class KestrelEngine: NSObject {
   private var liveArrivals: [(at: Date, newest: Int64)] = []
   private var liveSince: Date?
   private var delivery = KestrelEngine.deliveryDelay
+  /// The newest video's delay on the way (seconds, learned from the stream's clock).
+  var arrivalDelay: Double { delivery }
+  /// How long each playlist took to come back, over the last minute.
+  private var playlistTimes: [(at: Date, took: Double)] = []
+  /// The slowest playlist in the last minute (seconds).
+  var slowestPlaylist: Double { playlistTimes.map(\.took).max() ?? 0 }
+  /// Latency has been high since then (see `noteIfStuckBehind`), and whether that was logged.
+  private var highLatencySince: Date?
+  private var highLatencyNoted = false
   private var lastHeardMoved = Date()
   private(set) var lateAudio = 0
   private(set) var audioGaps = 0
@@ -341,7 +350,10 @@ final class KestrelEngine: NSObject {
     }
   }
 
-  func stop() {
+  /// - Parameter keepPicture: the frame showing stays up (a pause, a restart): only queued frames
+  ///   go. Emptied, a pause turned the player black instead of holding the paused frame, and every
+  ///   restart showed black until the new start's first frame.
+  func stop(keepPicture: Bool = false) {
     running = false
     pollTask?.cancel()
     pollTask = nil
@@ -350,9 +362,14 @@ final class KestrelEngine: NSObject {
     for load in loads { load.task?.cancel() }
     loads = []
     setSpeed(0)
-    displayLayer.flushAndRemoveImage()
+    if keepPicture {
+      displayLayer.flush()
+      mirrorLayer?.flush()
+    } else {
+      displayLayer.flushAndRemoveImage()
+      mirrorLayer?.flushAndRemoveImage()
+    }
     retireOldLayer(force: true)
-    mirrorLayer?.flushAndRemoveImage()
     group = []
     audio.flush()
     audioHistory = []
@@ -371,7 +388,7 @@ final class KestrelEngine: NSObject {
 
   /// Starts over at the live edge (after a pause, a long dropout, a failure).
   func restart() {
-    stop()
+    stop(keepPicture: true)
     // (Whole segments: one more back, to have a segment's worth on top of the margin.)
     planner = LiveSegmentPlanner(startBack: wholeSegments ? 1 : 0)
     aheadHistory = []
@@ -405,7 +422,7 @@ final class KestrelEngine: NSObject {
     guard pause != paused else { return }
     if pause {
       paused = true
-      stop()
+      stop(keepPicture: true)
     } else {
       // A live stream resumes at live.
       restart()
@@ -551,6 +568,32 @@ final class KestrelEngine: NSObject {
     delivery += (seen - delivery) * 0.03
   }
 
+  /// Latency stuck high (3 s or more for half a minute, playing, outside ad breaks): one line in
+  /// the activity log saying which part it is. Reopening a stream stuck like that brought it back
+  /// to 1–2 s; what was behind (the video held here, or the video arriving late, and the
+  /// playlists) wasn't known, so nothing's done about it yet.
+  private func noteIfStuckBehind(ahead: Double) {
+    guard let latency, !inAdBreak, stalledSince == nil else {
+      highLatencySince = nil
+      return
+    }
+    if latency < 2.5 {
+      highLatencySince = nil
+      highLatencyNoted = false
+      return
+    }
+    guard latency >= 3 else { return }
+    let since = highLatencySince ?? Date()
+    highLatencySince = since
+    guard !highLatencyNoted, Date().timeIntervalSince(since) > 30 else { return }
+    highLatencyNoted = true
+    ActivityLog.shared.add(
+      String(
+        format: "Kestrel player: %.1f s behind for half a minute: %.2f s in hand (margin %.1f s, speed %.2f×), video arriving %.1f s late, slowest playlist %.1f s, %@%@",
+        latency, ahead, catchUp.targetBuffer, speed, delivery, slowestPlaylist,
+        latestHasPrefetch ? "segments as they're made" : "whole segments", wholeSegments ? " (not low latency)" : ""))
+  }
+
   /// How far behind the broadcast the newest video usually arrives (Twitch low latency).
   static let deliveryDelay = 0.8
 
@@ -587,7 +630,13 @@ final class KestrelEngine: NSObject {
 
   private func poll() async {
     while running, !Task.isCancelled {
-      if let text = await playlist(rendition), running {
+      let asked = Date()
+      let fetched = await playlist(rendition)
+      if fetched != nil {
+        playlistTimes.append((Date(), Date().timeIntervalSince(asked)))
+        playlistTimes.removeAll { Date().timeIntervalSince($0.at) > 60 }
+      }
+      if let text = fetched, running {
         // No prefetch hints: a channel not on Twitch's low latency. Its video comes two seconds at
         // a time, once each segment is finished. A low-latency channel's playlist can lack them
         // too, for a while (an ad break, served without them on purpose; a moment of Twitch's):
@@ -1482,6 +1531,7 @@ final class KestrelEngine: NSObject {
       return
     }
     learnDelivery(ahead: ahead)
+    noteIfStuckBehind(ahead: ahead)
     checkPace(ahead: ahead)
     let skipped = skipStartSurplus(ahead: ahead)
     if !skipped, startSkipDone { jumpAfterAd(ahead: ahead) }

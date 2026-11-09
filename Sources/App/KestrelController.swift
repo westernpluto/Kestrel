@@ -447,6 +447,7 @@ final class KestrelController {
       StatLine(
         label: "Arrival",
         value: String(format: "longest gap %.2f s, segment handoff %.2f s (last minute)", engine.longestArrivalGap, engine.longestHandoffWait)
+          + String(format: ", %.1f s late, playlists up to %.1f s", engine.arrivalDelay, engine.slowestPlaylist)
           + (engine.reconnects > 0 ? ", \(engine.reconnects) reconnects" : "")))
     lines.append(StatLine(label: "Quality mode", value: engine.autoQuality ? "best that plays smoothly" : "picked"))
     lines.append(StatLine(label: "Segments", value: "\(engine.segmentsLoaded) (\(engine.container))"))
