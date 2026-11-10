@@ -2025,6 +2025,34 @@ func testDeviceLogin() {
   check(session?.clientID == nil && session?.refreshToken == nil && session?.login == "l", "old session decodes")
 }
 
+func testMP4Writer() {
+  let dir = URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent()
+  for name in ["twitch_160p_segment.ts", "twitch_1080p_bframes.ts"] {
+    guard let segment = try? Data(contentsOf: dir.appendingPathComponent(name)) else {
+      check(false, "fixture missing \(name)")
+      continue
+    }
+    var demuxer = TSDemuxer()
+    let frames = demuxer.feed(segment) + demuxer.flush()
+    let video = frames.compactMap { if case .video(let f) = $0 { return f } else { return nil } }
+    let audio = frames.compactMap { if case .audio(let f) = $0 { return f } else { return nil } }
+    guard let file = MP4Writer.file(.init(video: video, audio: audio)) else {
+      check(false, "\(name): no MP4")
+      continue
+    }
+    check(file.count > segment.count / 2 && file.count < segment.count, "\(name): size \(file.count) from \(segment.count)")
+    check(String(decoding: file[4..<8], as: UTF8.self) == "ftyp", "\(name): starts with ftyp")
+    if let key = video.first(where: \.isKeyframe), let sets = H264.parameterSets(AnnexB.units(key.data)) {
+      let size = H264.pictureSize(sps: sets.sps)
+      check(size != nil && size!.width > size!.height, "\(name): picture size \(String(describing: size))")
+    }
+    // For checking by hand with ffprobe/ffmpeg (see Tests/run.sh).
+    if let out = ProcessInfo.processInfo.environment["KESTREL_MP4_OUT"] {
+      try? file.write(to: URL(fileURLWithPath: out).appendingPathComponent(name + ".mp4"))
+    }
+  }
+}
+
 func testTSDemux() {
   let dir = URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent()
   guard let segment = try? Data(contentsOf: dir.appendingPathComponent("twitch_160p_segment.ts")) else {
@@ -2252,6 +2280,7 @@ func testFMP4Demux() {
 
 testFMP4Demux()
 testTSDemux()
+testMP4Writer()
 testDeviceLogin()
 testCatchUpSimulation()
 testRestrictedVOD()

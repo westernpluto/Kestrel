@@ -40,6 +40,17 @@ cp Resources/AppIcon60x60@2x.png Resources/AppIcon60x60@3x.png "$BUNDLE/"
 cp "Resources/AppIcon76x76@2x~ipad.png" "Resources/AppIcon83.5x83.5@2x~ipad.png" "$BUNDLE/"
 printf 'APPL????' > "$BUNDLE/PkgInfo"
 
+# Kestrel for Apple Watch, inside the iPhone app (the iPhone's Watch app installs it from there).
+# If it doesn't build, the iPhone app is still built, without it.
+if [[ "${SKIP_WATCH:-0}" != 1 ]] && xcrun --sdk watchos --show-sdk-path >/dev/null 2>&1; then
+  if VERSION="$VERSION" BUILD_NUMBER="$BUILD_NUMBER" ./build-watch.sh "$BUNDLE/Watch"; then
+    echo "==> Apple Watch app included"
+  else
+    echo "::warning::The Apple Watch app didn't build; the iPhone app is built without it."
+    rm -rf "$BUNDLE/Watch"
+  fi
+fi
+
 echo "==> Signing (ad-hoc)"
 sign "$BUNDLE/$APP"
 
