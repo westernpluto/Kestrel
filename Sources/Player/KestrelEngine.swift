@@ -176,6 +176,9 @@ final class KestrelEngine: NSObject {
   private var liveArrivals: [(at: Date, newest: Int64)] = []
   private var liveSince: Date?
   private var delivery = KestrelEngine.deliveryDelay
+  /// When the picture last moved (Picture in Picture opening or closing, the app leaving or coming
+  /// back): a stall just after is the move's, not the connection's.
+  private var lastScreenChange = Date.distantPast
   /// The newest video's delay on the way (seconds, learned from the stream's clock).
   var arrivalDelay: Double { delivery }
   /// How long each playlist took to come back, over the last minute.
@@ -318,7 +321,10 @@ final class KestrelEngine: NSObject {
     let center = NotificationCenter.default
     lifecycleTokens.append(
       center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
-        MainActor.assumeIsolated { self?.inBackground = true }
+        MainActor.assumeIsolated {
+          self?.inBackground = true
+          self?.lastScreenChange = Date()
+        }
       })
     lifecycleTokens.append(
       center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
@@ -676,10 +682,47 @@ final class KestrelEngine: NSObject {
     guard let url = URL(string: load.planned.uri) else { return }
     var request = URLRequest(url: url)
     request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
+    // Part-way in already: just the rest.
+    if load.received > 0 {
+      request.setValue("bytes=\(load.received)-", forHTTPHeaderField: "Range")
+      load.skip = load.received
+    }
     let task = urlSession.dataTask(with: request)
     load.task = task
     load.requestedAt = Date()
     task.resume()
+  }
+
+  /// The segment due next stuck (nothing from it for two seconds) while the ones after it come in,
+  /// with the video about to run out: asked for again (the rest of it, if part came in), and after
+  /// two tries, gone on without. It waited out the full time limit before, ten seconds with the
+  /// picture frozen, then the segments that had piled up behind it were skipped through.
+  private func refetchStuckFront() {
+    guard loads.count > 1, let front = loads.first, !front.finished, !front.handedOver, let asked = front.requestedAt else { return }
+    let now = Date()
+    let frontLast = max(front.lastArrival ?? asked, asked)
+    guard now.timeIntervalSince(frontLast) > 2,
+      loads.dropFirst().contains(where: { ($0.lastArrival ?? .distantPast) > frontLast }),
+      stalledSince != nil || (clockRunning && (bufferAhead ?? 0) < 0.6)
+    else { return }
+    if front.retries >= 2 {
+      front.task?.cancel()
+      front.task = nil
+      front.frames += front.demuxer?.flush() ?? []
+      front.failed = true
+      front.finished = true
+      ActivityLog.shared.add("Kestrel player: segment \(front.planned.sequence) still stuck; going on without the rest of it")
+      pump()
+      return
+    }
+    front.retries += 1
+    let stale = front.task
+    request(front)
+    stale?.cancel()
+    ActivityLog.shared.add(
+      String(
+        format: "Kestrel player: segment %d stuck (%@) while the next ones came in; asked for it again",
+        front.planned.sequence, front.received > 0 ? "\(front.received / 1024) KB in" : "nothing in"))
   }
 
   private var lastReconnect = Date.distantPast
@@ -1075,6 +1118,9 @@ final class KestrelEngine: NSObject {
   /// A line in the Activity log about the screen's layers around Picture in Picture, timed to the
   /// millisecond (to find the moment the picture goes black on the way back).
   func screenNote(_ text: String) {
+    // (Each of these is the picture moving: into or out of Picture in Picture, the app leaving or
+    // coming back. See `lastScreenChange`.)
+    lastScreenChange = Date()
     let ms = Int(Date().timeIntervalSince1970 * 1000) % 100_000
     var showing = "?"
     if #available(iOS 17.4, tvOS 17.4, *) { showing = displayLayer.sampleBufferRenderer.displayedPixelBuffer() != nil ? "frame" : "empty" }
@@ -1470,6 +1516,7 @@ final class KestrelEngine: NSObject {
     // A segment whose frames are all in can hand over to the next before its download closes.
     pump()
     reconnectIfStuck()
+    refetchStuckFront()
     guard clockRunning else { return }
     let ahead = bufferAhead ?? 0
     if stalledSince == nil, ahead < 0.03 {
@@ -1489,13 +1536,17 @@ final class KestrelEngine: NSObject {
       // waiting for a whole segment, which no margin the connection needs would cover. Learned,
       // one such stall put 0.4 s on the latency for the next ten minutes.
       let twitchsDoing = inAdBreak || (prefetchSeen && !latestHasPrefetch)
-      catchUp.stalled(learn: !twitchsDoing)
-      if twitchsDoing { why.append("not learned") }
+      // Just after Picture in Picture opened or closed, or the app went away or came back: that
+      // move held things up for a moment. Learned, one put 0.7 s on the margin (3.9 s behind).
+      let screenMoved = Date().timeIntervalSince(lastScreenChange) < 5
+      if screenMoved { why.append("just after Picture in Picture or switching apps") }
+      catchUp.stalled(learn: !twitchsDoing && !screenMoved)
+      if twitchsDoing || screenMoved { why.append("not learned") }
       ActivityLog.shared.add("Kestrel player: ran out of video (\(why.joined(separator: ", ")))")
       state = .stalled
       // Twice in a few minutes while the video kept arriving: the connection can't carry this
       // quality; one lower from the next segment.
-      if autoQuality, !twitchsDoing, fit.stalled(), fit.step < renditions.count {
+      if autoQuality, !twitchsDoing, !screenMoved, fit.stalled(), fit.step < renditions.count {
         applyFit()
         ActivityLog.shared.add("Kestrel player: stalling at this quality; one lower for now (trying again in a few minutes)")
       }
@@ -1775,6 +1826,11 @@ final class SegmentLoad {
   var lastArrival: Date?
   /// When it was (last) asked for.
   var requestedAt: Date?
+  /// Asked for again after getting stuck (see KestrelEngine.refetchStuckFront).
+  var retries = 0
+  /// Asked for again part-way in: bytes at the start of the answer that are already in (when the
+  /// server sends the whole file instead of the rest).
+  var skip = 0
   /// Handed over to the next segment before its download closed (its end is ignored).
   var handedOver = false
   /// Unpacked, not yet handed to the renderers.
@@ -1808,6 +1864,8 @@ extension KestrelEngine: URLSessionDataDelegate {
   nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
     MainActor.assumeIsolated {
       guard let load = loads.first(where: { $0.task === dataTask }), !load.handedOver else { return }
+      // (An error's page isn't video.)
+      if let code = (dataTask.response as? HTTPURLResponse)?.statusCode, code >= 300 { return }
       let now = Date()
       if load.planned.live, let last = load.lastArrival {
         let gap = now.timeIntervalSince(last)
@@ -1818,6 +1876,19 @@ extension KestrelEngine: URLSessionDataDelegate {
       }
       load.lastArrival = now
       lastArrival = now
+      var data = data
+      if load.skip > 0 {
+        // Asked for the rest: a server that sent all of it anyway has its start (already in) left out.
+        if (dataTask.response as? HTTPURLResponse)?.statusCode == 206 {
+          load.skip = 0
+        } else {
+          let drop = min(load.skip, data.count)
+          load.skip -= drop
+          data = data.dropFirst(drop)
+          guard !data.isEmpty else { return }
+          data = Data(data)
+        }
+      }
       load.received += data.count
       feed(load, data)
       pump()
@@ -1827,7 +1898,9 @@ extension KestrelEngine: URLSessionDataDelegate {
   nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     MainActor.assumeIsolated {
       guard let load = loads.first(where: { $0.task === task }), !load.handedOver else { return }
-      let status = (task.response as? HTTPURLResponse)?.statusCode ?? 0
+      var status = (task.response as? HTTPURLResponse)?.statusCode ?? 0
+      // The rest of one asked for again (206), or nothing was left of it (416: it was all in).
+      if status == 206 || (status == 416 && load.received > 0) { status = 200 }
       if error != nil || status != 200 {
         load.failed = true
         if (error as? URLError)?.code != .cancelled {
