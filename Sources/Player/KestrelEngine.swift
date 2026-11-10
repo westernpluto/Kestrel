@@ -179,6 +179,7 @@ final class KestrelEngine: NSObject {
   /// When the picture last moved (Picture in Picture opening or closing, the app leaving or coming
   /// back): a stall just after is the move's, not the connection's.
   private var lastScreenChange = Date.distantPast
+  private var lastPaceNote = Date.distantPast
   /// The newest video's delay on the way (seconds, learned from the stream's clock).
   var arrivalDelay: Double { delivery }
   /// How long each playlist took to come back, over the last minute.
@@ -824,10 +825,15 @@ final class KestrelEngine: NSObject {
     ActivityLog.shared.add("Kestrel player: starting from the segment being made (it already had enough video)")
   }
 
-  /// The front segment has gone quiet for a moment and the next one's frames are coming in (so
-  /// nothing more of this one is on its way).
+  /// The front segment, the one that was being made, has gone quiet for a moment and the next one's
+  /// frames are coming in (so nothing more of this one is on its way: the server keeps its
+  /// connection open a while after the last bytes).
+  /// Only that one: a finished segment downloading slowly (a weak connection, sharing it with the
+  /// next) goes quiet too, with more to come. Going on then cut it off part-way, the last frame
+  /// half in, and the picture smeared into blocks.
   private func readyToHandOver(_ first: SegmentLoad, to next: SegmentLoad) -> Bool {
-    guard first.demuxer != nil, first.received > 0, let quiet = first.lastArrival, !next.frames.isEmpty else { return false }
+    guard first.planned.live, first.demuxer != nil, first.received > 0, let quiet = first.lastArrival, !next.frames.isEmpty
+    else { return false }
     let quietFor = Date().timeIntervalSince(quiet)
     guard quietFor > 0.25 else { return false }
     // Its sound must be all in too: it ends where the next segment's begins. The last packet of
@@ -1491,7 +1497,7 @@ final class KestrelEngine: NSObject {
   /// before it runs dry. (Only stalls stepped it down before, two of them: on a train that was
   /// stall after stall first.)
   private func checkPace(ahead: Double) {
-    guard autoQuality, let newest = newestPlayable, speed > 0 else { return }
+    guard let newest = newestPlayable, speed > 0 else { return }
     let at = Date()
     paceHistory.append((at, newest))
     paceHistory.removeAll { at.timeIntervalSince($0.at) > 8 }
@@ -1503,7 +1509,18 @@ final class KestrelEngine: NSObject {
     } else {
       slowSince = nil
     }
-    guard let since = slowSince, at.timeIntervalSince(since) >= 3, fit.tooSlow(), fit.step < renditions.count else { return }
+    guard let since = slowSince, at.timeIntervalSince(since) >= 3 else { return }
+    guard autoQuality else {
+      // A quality picked by hand stays; the log says why it stalls (once a minute at most).
+      if at.timeIntervalSince(lastPaceNote) > 60 {
+        lastPaceNote = at
+        ActivityLog.shared.add(
+          String(format: "Kestrel player: video coming in at %.0f%% of real time at the picked quality; Auto or a lower one would keep up", pace * 100))
+      }
+      slowSince = nil
+      return
+    }
+    guard fit.tooSlow(), fit.step < renditions.count else { return }
     slowSince = nil
     paceHistory = []
     applyFit()
