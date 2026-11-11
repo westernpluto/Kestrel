@@ -30,6 +30,12 @@ struct AVCheck {
         case .audio(let a): audio.append(a)
         }
       }
+      // (The 1080p fixture is cut off part-way through its last frame.)
+      if name.contains("1080p"), !video.isEmpty { video.removeLast() }
+      let first = video.map(\.pts).min() ?? 0
+      print(String(format: "     %@: video %.3f-%.3f, audio %.3f-%.3f (stream times from the first picture)", name,
+        0.0, Double((video.map(\.pts).max() ?? 0) - first + 3000) / 90_000,
+        Double((audio.first?.pts ?? 0) - first) / 90_000, Double((audio.last?.pts ?? 0) - first + 1920) / 90_000))
       let cases: [(String, MP4Writer.Segment)] = [
         ("plain", .init(video: video, audio: audio)),
         ("primed", .init(video: video, audio: audio, audioPrimer: audio.first)),
@@ -80,7 +86,15 @@ struct AVCheck {
         if CMSampleBufferGetImageBuffer(sample) != nil { pictureCount += 1 }
       }
       var soundSamples = 0
-      while let sample = sound.copyNextSampleBuffer() { soundSamples += CMSampleBufferGetNumSamples(sample) }
+      var soundStart: Double?
+      var soundEnd = 0.0
+      while let sample = sound.copyNextSampleBuffer() {
+        soundSamples += CMSampleBufferGetNumSamples(sample)
+        let pts = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+        if soundStart == nil { soundStart = pts }
+        soundEnd = pts + CMSampleBufferGetDuration(sample).seconds
+      }
+      print(String(format: "     decoded sound from %.3f to %.3f s", soundStart ?? -1, soundEnd))
       guard reader.status == .completed else { return "decoding: \(reader.error?.localizedDescription ?? "status \(reader.status.rawValue)")" }
       guard pictureCount >= videoFrames - 1 else { return "decoded \(pictureCount) of \(videoFrames) pictures" }
       let soundSeconds = Double(soundSamples) / 48_000
