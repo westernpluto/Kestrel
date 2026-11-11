@@ -41,11 +41,8 @@ final class WatchPlayer: ObservableObject {
   private static let startAt = 4.0
   /// above this, segments go two to a file (fewer joins); below, one at a time, sooner;
   private static let pairAbove = 6.0
-  /// above this it plays a little faster (pitch kept) until it's back down to `settleAt`, instead of
-  /// staying further behind live for good;
-  private static let catchUpAbove = 9.0
-  private static let settleAt = 6.5
-  private static let catchUpRate: Float = 1.1
+  // (No playing faster to catch up: every change of speed cut the sound and picture out for a
+  // moment, a hitch each time.)
   /// above this (a long pause), the oldest are dropped.
   private static let dropAbove = 25.0
   /// Each queued file's length.
@@ -314,8 +311,6 @@ final class WatchPlayer: ObservableObject {
       player.pause()
     }
     let item = AVPlayerItem(url: file)
-    // (Playing a little faster to catch up: the pitch kept.)
-    item.audioTimePitchAlgorithm = .timeDomain
     fileSeconds[ObjectIdentifier(item)] = seconds
     watch(item)
     player.insert(item, after: nil)
@@ -383,14 +378,6 @@ final class WatchPlayer: ObservableObject {
   private func measureAhead() {
     let items = player.items()
     ahead = queuedSeconds
-    // Catching up: a little faster while more than needed is queued.
-    if started, !buffering, !userPaused {
-      if ahead > Self.catchUpAbove, player.rate > 0, player.rate < Self.catchUpRate {
-        player.rate = Self.catchUpRate
-      } else if ahead < Self.settleAt, player.rate > 1 {
-        player.rate = 1
-      }
-    }
     let live = Set(items.map(ObjectIdentifier.init))
     itemWatches = itemWatches.filter { live.contains($0.key) }
     fileSeconds = fileSeconds.filter { live.contains($0.key) }
