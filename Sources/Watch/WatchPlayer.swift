@@ -38,9 +38,12 @@ final class WatchPlayer: ObservableObject {
 
   // How much is kept in hand (seconds queued ahead of what's playing):
   /// before playing starts, and again after running out;
-  private static let startAt = 4.0
-  /// above this, segments go two to a file (fewer joins); below, one at a time, sooner;
-  private static let pairAbove = 6.0
+  private static let startAt = 6.0
+  /// below this, a lone segment goes in a file by itself instead of waiting for the next to be
+  /// listed. Otherwise segments always go two to a file: every join between files is a hitch in
+  /// the sound and picture, and one file per segment (as below 6 s in hand did) was a hitch every
+  /// two seconds.
+  private static let runningLow = 3.5
   // (No playing faster to catch up: every change of speed cut the sound and picture out for a
   // moment, a hitch each time.)
   /// above this (a long pause), the oldest are dropped.
@@ -146,14 +149,13 @@ final class WatchPlayer: ObservableObject {
       // Two at a time (each request's round trip, through the iPhone over Bluetooth especially,
       // added up one after another), and the two in one file: half as many joins between files,
       // where the player can hitch.
-      // Only with enough in hand: at the start, or running low, one at a time, sooner. (Pairing, a
-      // lone one waits for the next to be listed.)
       while running, !Task.isCancelled, !pending.isEmpty {
-        let pairing = started && queuedSeconds >= Self.pairAbove
-        if pairing, pending.count == 1 { break }
+        // A lone one waits for the next to be listed, unless it's the start (still filling up) or
+        // what's queued is running low.
+        if pending.count == 1, started, queuedSeconds >= Self.runningLow { break }
         let (first, firstStep) = pending.removeFirst()
         var parts: [Frames] = []
-        if pairing, let (second, secondStep) = pending.first, !second.discontinuity, secondStep == firstStep {
+        if let (second, secondStep) = pending.first, !second.discontinuity, secondStep == firstStep {
           pending.removeFirst()
           async let a = load(first)
           async let b = load(second)
