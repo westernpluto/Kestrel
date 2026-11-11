@@ -18,6 +18,8 @@ final class WatchPlayer: ObservableObject {
   }
 
   @Published private(set) var phase: Phase = .loading
+  /// Ran out of segments and waiting for a couple more.
+  @Published private(set) var buffering = false
   let player = AVQueuePlayer()
 
   private var session: LowLatencySession?
@@ -34,9 +36,25 @@ final class WatchPlayer: ObservableObject {
     return URLSession(configuration: configuration)
   }()
 
-  /// More queued than this (after a pause, or a burst of downloads): the oldest are dropped, to
-  /// stay close to live.
-  private static let mostQueued = 4
+  /// More queued than this (a long pause, or a burst of downloads): the oldest are dropped, to
+  /// stay within reach of live. (At 4 it dropped segments after every slow patch: skips.)
+  private static let mostQueued = 7
+  /// Segments in hand before playing starts (each about two seconds).
+  private static let startWith = 3
+
+  /// The stream's renditions, and the ones with a picture, smallest first.
+  private var variants: [HLSVariant] = []
+  private var videos: [Int] = []
+  /// Where in `videos` it's playing, and the highest it may go (the setting).
+  @Published private(set) var step = 0
+  private var topStep = 0
+  /// How fast segments have downloaded lately, against what each quality needs.
+  private var slowSegments = 0
+  private var fastSegments = 0
+  private var steppedAt = Date.distantPast
+
+  /// The quality playing ("360p30").
+  var qualityLabel: String { videos.indices.contains(step) ? variants[videos[step]].label : "" }
 
   func start(login: String, maxHeight: Int) async {
     guard !running else { return }
@@ -55,9 +73,9 @@ final class WatchPlayer: ObservableObject {
     config.adFreeServersForAdsOnly = true
     config.checkAccountFirst = TwitchAuth.shared.session != nil
     let session = LowLatencySession(login: login, config: config, http: URLSessionHTTPClient(timeout: 10), tokens: TwitchAPI.shared)
-    let variants: [HLSVariant]
+    let found: [HLSVariant]
     do {
-      variants = try await session.start()
+      found = try await session.start()
     } catch StreamSession.StartError.offline {
       phase = .offline
       return
@@ -67,16 +85,19 @@ final class WatchPlayer: ObservableObject {
     }
     guard running else { return }
     self.session = session
-    // The tallest picture up to the setting (else the smallest there is).
-    let videos = variants.indices.filter { !variants[$0].isAudioOnly && variants[$0].height > 0 }
-      .sorted { variants[$0].height < variants[$1].height }
-    guard let smallest = videos.first else {
+    variants = found
+    videos = found.indices.filter { !found[$0].isAudioOnly && found[$0].height > 0 }
+      .sorted { (found[$0].height, found[$0].bandwidth) < (found[$1].height, found[$1].bandwidth) }
+    guard !videos.isEmpty else {
       phase = .failed("No quality this watch can play.")
       return
     }
-    let rendition = videos.last { variants[$0].height <= maxHeight } ?? smallest
-    ActivityLog.shared.add("Watch player: \(login) at \(variants[rendition].label)")
-    loop = Task { [weak self] in await self?.run(session: session, rendition: rendition) }
+    // Up to the setting; starting one below it (when there is one) for a quick, steady start,
+    // going up once the downloads show the connection carries it.
+    topStep = videos.lastIndex { found[$0].height <= maxHeight } ?? 0
+    step = max(0, topStep - 1)
+    ActivityLog.shared.add("Watch player: \(login) at \(qualityLabel)")
+    loop = Task { [weak self] in await self?.run(session: session) }
   }
 
   func stop() {
@@ -91,17 +112,16 @@ final class WatchPlayer: ObservableObject {
 
   // MARK: Segments
 
-  private func run(session: LowLatencySession, rendition: Int) async {
-    var planner = LiveSegmentPlanner(startBack: 1)
+  private func run(session: LowLatencySession) async {
+    // Two complete segments back from the newest, plus the ones being made: a few seconds in hand.
+    var planner = LiveSegmentPlanner(startBack: 2)
     var failures = 0
+    var pending: [LiveSegmentPlanner.Planned] = []
     while running, !Task.isCancelled {
-      let playlist = await session.mediaPlaylist(rendition)
+      let playlist = await session.mediaPlaylist(videos[step])
       if playlist.status == 200 {
         failures = 0
-        for segment in planner.plan(playlist.body) {
-          guard running, !Task.isCancelled else { return }
-          await load(segment)
-        }
+        pending += planner.plan(playlist.body)
       } else {
         failures += 1
         // The playlist gone for a while: the stream ended.
@@ -110,17 +130,43 @@ final class WatchPlayer: ObservableObject {
           return
         }
       }
-      try? await Task.sleep(nanoseconds: 800_000_000)
+      // Two at a time (each request's round trip, through the iPhone over Bluetooth especially,
+      // added up one after another), queued in order.
+      while !pending.isEmpty, running, !Task.isCancelled {
+        let first = pending.removeFirst()
+        if !pending.isEmpty {
+          let second = pending.removeFirst()
+          async let a = load(first)
+          async let b = load(second)
+          let fileA = await a
+          if let fileA { enqueue(fileA) }
+          let fileB = await b
+          if let fileB { enqueue(fileB) }
+        } else if let file = await load(first) {
+          enqueue(file)
+        }
+      }
+      try? await Task.sleep(nanoseconds: 700_000_000)
     }
   }
 
-  private func load(_ segment: LiveSegmentPlanner.Planned) async {
-    guard let url = URL(string: segment.uri) else { return }
+  /// One segment downloaded (tried twice) and rewritten as an MP4 file.
+  private func load(_ segment: LiveSegmentPlanner.Planned) async -> URL? {
+    guard let url = URL(string: segment.uri) else { return nil }
     var request = URLRequest(url: url)
     request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
-    guard let (data, response) = try? await downloads.data(for: request),
-      (response as? HTTPURLResponse)?.statusCode == 200, running
-    else { return }
+    var fetched: Data?
+    for attempt in 0..<2 where fetched == nil && running {
+      let asked = Date()
+      if let (data, response) = try? await downloads.data(for: request), (response as? HTTPURLResponse)?.statusCode == 200 {
+        fetched = data
+        // (The one being made arrives as it's made: its time says nothing about the connection.)
+        if !segment.live { measure(bytes: data.count, seconds: Date().timeIntervalSince(asked)) }
+      } else if attempt == 0 {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+      }
+    }
+    guard let data = fetched, running else { return nil }
     let file = folder.appendingPathComponent("\(segment.sequence)-\(UUID().uuidString.prefix(6)).mp4")
     // Unpacked and rewritten away from the main thread.
     let written = await Task.detached(priority: .userInitiated) { () -> Bool in
@@ -137,24 +183,53 @@ final class WatchPlayer: ObservableObject {
       guard let mp4 = MP4Writer.file(.init(video: video, audio: audio)) else { return false }
       return (try? mp4.write(to: file)) != nil
     }.value
-    guard written, running else { return }
-    enqueue(file)
+    return written && running ? file : nil
+  }
+
+  /// Steps the quality to what the connection carries: down after two segments that came in
+  /// barely faster than this quality needs, up after a run of them well over the next one's
+  /// (never past the setting). From the next playlist on (Twitch's qualities share segment numbers).
+  private func measure(bytes: Int, seconds: Double) {
+    guard seconds > 0.05, videos.indices.contains(step) else { return }
+    let speed = Double(bytes * 8) / seconds  // bits a second
+    let needs = Double(max(variants[videos[step]].bandwidth, 1))
+    if speed < needs * 1.4 {
+      slowSegments += 1
+      fastSegments = 0
+    } else {
+      slowSegments = 0
+      if step < topStep, speed > Double(max(variants[videos[step + 1]].bandwidth, 1)) * 2.2 { fastSegments += 1 } else { fastSegments = 0 }
+    }
+    let now = Date()
+    if slowSegments >= 2, step > 0 {
+      step -= 1
+      slowSegments = 0
+      steppedAt = now
+      ActivityLog.shared.add("Watch player: downloads too slow; down to \(qualityLabel)")
+    } else if fastSegments >= 6, step < topStep, now.timeIntervalSince(steppedAt) > 30 {
+      step += 1
+      fastSegments = 0
+      steppedAt = now
+      ActivityLog.shared.add("Watch player: downloads keeping up; up to \(qualityLabel)")
+    }
   }
 
   private func enqueue(_ file: URL) {
     // (Empty only when it played through everything: paused, it doesn't use up the queue.)
-    let ranDry = player.items().isEmpty
+    if started, !buffering, player.items().isEmpty { buffering = true }
     player.insert(AVPlayerItem(url: file), after: nil)
     files.append(file)
     // Behind (paused a while, or downloads bunched up): on to the newer ones.
     while player.items().count > Self.mostQueued { player.advanceToNextItem() }
     removePlayedFiles()
-    if !started, player.items().count >= 2 {
+    if !started, player.items().count >= Self.startWith {
       started = true
       player.play()
       phase = .playing
-    } else if started, ranDry {
-      // Ran dry and stopped at the end of the queue: on again with the new segment.
+    } else if buffering, player.items().count >= 2 {
+      // Ran dry: on again once there's a little in hand (going on with one, it stopped again
+      // as soon as that one ended).
+      buffering = false
       player.play()
     }
   }

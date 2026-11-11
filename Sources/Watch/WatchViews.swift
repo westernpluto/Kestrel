@@ -202,11 +202,12 @@ struct PlayerView: View {
           case .failed(let message):
             Text(message).font(.caption2).multilineTextAlignment(.center).padding(4)
           case .playing:
-            EmptyView()
+            if player.buffering { ProgressView() }
           }
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        Text(stream.title).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+        Text(player.qualityLabel.isEmpty ? stream.title : "\(player.qualityLabel) · \(stream.title)")
+          .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
         if store.chatShown {
           ForEach(chat.messages.suffix(60)) { message in
             ChatLine(message: message)
