@@ -192,8 +192,17 @@ struct PlayerView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 6) {
         ZStack {
+          // The system's controls off (their Done button did nothing here): a tap pauses and plays.
           VideoPlayer(player: player.player)
             .aspectRatio(16 / 9, contentMode: .fit)
+            .allowsHitTesting(false)
+          Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture { player.togglePause() }
+          if player.userPaused {
+            Image(systemName: "play.fill").font(.title2).padding(10).background(.black.opacity(0.5), in: Circle())
+              .allowsHitTesting(false)
+          }
           switch player.phase {
           case .loading:
             ProgressView()
@@ -208,6 +217,14 @@ struct PlayerView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
         Text(player.qualityLabel.isEmpty ? stream.title : "\(player.qualityLabel) · \(stream.title)")
           .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+        if player.phase == .playing {
+          // What's going on, to tell stalls from files the watch won't play.
+          Text(
+            String(format: "%.0f s in hand · %d stalls · %d dropped · %d failed", player.ahead, player.stalls, player.dropped, player.failed)
+              + (player.lastError.map { "\n\($0)" } ?? "")
+          )
+          .font(.system(size: 10)).foregroundStyle(.secondary)
+        }
         if store.chatShown {
           ForEach(chat.messages.suffix(60)) { message in
             ChatLine(message: message)

@@ -36,10 +36,11 @@ final class WatchPlayer: ObservableObject {
     return URLSession(configuration: configuration)
   }()
 
-  /// More files queued than this, about 16 s (a long pause, or a burst of downloads): the oldest
+  /// More files queued than this, about 24 s (a long pause, or a burst of downloads): the oldest
   /// are dropped, to stay within reach of live. (At 8 s it dropped some after every slow patch.)
-  private static let mostQueued = 4
-  /// Files in hand before playing starts (each two segments, about four seconds).
+  private static let mostQueued = 6
+  /// Files in hand before playing starts, and again after running out (each two segments, about
+  /// four seconds).
   private static let startWith = 2
 
   /// The stream's renditions, and the ones with a picture, smallest first.
@@ -102,6 +103,9 @@ final class WatchPlayer: ObservableObject {
 
   func stop() {
     running = false
+    aheadTimer?.invalidate()
+    aheadTimer = nil
+    itemWatches = [:]
     loop?.cancel()
     loop = nil
     player.pause()
@@ -236,22 +240,89 @@ final class WatchPlayer: ObservableObject {
   }
 
   private func enqueue(_ file: URL) {
-    // (Empty only when it played through everything: paused, it doesn't use up the queue.)
-    if started, !buffering, player.items().isEmpty { buffering = true }
-    player.insert(AVPlayerItem(url: file), after: nil)
+    // (Empty only when it played through everything: paused, it doesn't use up the queue.) Held
+    // until there's a little in hand again: the queue would otherwise start on the one file and
+    // run dry again as soon as it ended.
+    if started, !buffering, player.items().isEmpty {
+      buffering = true
+      stalls += 1
+      player.pause()
+    }
+    let item = AVPlayerItem(url: file)
+    watch(item)
+    player.insert(item, after: nil)
     files.append(file)
-    // Behind (paused a while, or downloads bunched up): on to the newer ones.
-    while player.items().count > Self.mostQueued { player.advanceToNextItem() }
+    // Far behind (a long pause, or downloads bunched up): on to the newer ones.
+    while player.items().count > Self.mostQueued {
+      player.advanceToNextItem()
+      dropped += 1
+    }
     removePlayedFiles()
     if !started, player.items().count >= Self.startWith {
       started = true
-      player.play()
+      if !userPaused { player.play() }
       phase = .playing
-    } else if buffering {
-      // Ran dry: on again with the file that's come (two segments, about four seconds).
+    } else if buffering, player.items().count >= Self.startWith {
       buffering = false
+      if !userPaused { player.play() }
+    }
+  }
+
+  // MARK: Play and pause, and what's going on
+
+  /// Paused with a tap on the picture.
+  @Published private(set) var userPaused = false
+  /// Times it ran out, files dropped to stay near live, and files the watch couldn't play.
+  @Published private(set) var stalls = 0
+  @Published private(set) var dropped = 0
+  @Published private(set) var failed = 0
+  @Published private(set) var lastError: String?
+  /// Seconds queued ahead of what's playing.
+  @Published private(set) var ahead: Double = 0
+  private var itemWatches: [ObjectIdentifier: NSKeyValueObservation] = [:]
+  private var aheadTimer: Timer?
+
+  func togglePause() {
+    userPaused.toggle()
+    if userPaused {
+      player.pause()
+    } else if started, !buffering {
       player.play()
     }
+  }
+
+  /// A file the watch's player won't take is skipped by it: counted, with its reason, for the
+  /// line under the picture.
+  private func watch(_ item: AVPlayerItem) {
+    let key = ObjectIdentifier(item)
+    itemWatches[key] = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+      guard item.status == .failed else { return }
+      let reason = item.error?.localizedDescription ?? "unknown"
+      Task { @MainActor in
+        guard let self else { return }
+        self.failed += 1
+        self.lastError = reason
+        ActivityLog.shared.add("Watch player: a file didn't play (\(reason))")
+      }
+    }
+    if aheadTimer == nil {
+      aheadTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        MainActor.assumeIsolated { self?.measureAhead() }
+      }
+    }
+  }
+
+  private func measureAhead() {
+    let items = player.items()
+    var seconds = 0.0
+    for (index, item) in items.enumerated() {
+      let length = item.asset.duration.seconds
+      guard length.isFinite else { continue }
+      seconds += index == 0 ? max(0, length - item.currentTime().seconds) : length
+    }
+    ahead = seconds
+    let live = Set(items.map(ObjectIdentifier.init))
+    itemWatches = itemWatches.filter { live.contains($0.key) }
   }
 
   private func removePlayedFiles() {

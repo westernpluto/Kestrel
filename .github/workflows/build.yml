@@ -50,6 +50,12 @@ jobs:
           xcodebuild -version
           echo "iOS SDK $(xcrun --sdk iphoneos --show-sdk-version)"
 
+      - name: Check the watch's video files with AVFoundation
+        continue-on-error: true
+        run: |
+          xcrun swiftc -swift-version 5 -parse-as-library Sources/Core/*.swift Sources/Twitch/*.swift Tests/AVCheck.swift -o /tmp/avcheck
+          /tmp/avcheck Tests/Fixtures
+
       - name: Build IPA
         run: ./build.sh
 
