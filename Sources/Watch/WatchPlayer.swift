@@ -36,11 +36,11 @@ final class WatchPlayer: ObservableObject {
     return URLSession(configuration: configuration)
   }()
 
-  /// More queued than this (a long pause, or a burst of downloads): the oldest are dropped, to
-  /// stay within reach of live. (At 4 it dropped segments after every slow patch: skips.)
-  private static let mostQueued = 7
-  /// Segments in hand before playing starts (each about two seconds).
-  private static let startWith = 3
+  /// More files queued than this, about 16 s (a long pause, or a burst of downloads): the oldest
+  /// are dropped, to stay within reach of live. (At 8 s it dropped some after every slow patch.)
+  private static let mostQueued = 4
+  /// Files in hand before playing starts (each two segments, about four seconds).
+  private static let startWith = 2
 
   /// The stream's renditions, and the ones with a picture, smallest first.
   private var variants: [HLSVariant] = []
@@ -116,12 +116,14 @@ final class WatchPlayer: ObservableObject {
     // Two complete segments back from the newest, plus the ones being made: a few seconds in hand.
     var planner = LiveSegmentPlanner(startBack: 2)
     var failures = 0
-    var pending: [LiveSegmentPlanner.Planned] = []
+    // (With the quality each came from: only the same quality goes in one file.)
+    var pending: [(segment: LiveSegmentPlanner.Planned, step: Int)] = []
     while running, !Task.isCancelled {
       let playlist = await session.mediaPlaylist(videos[step])
       if playlist.status == 200 {
         failures = 0
-        pending += planner.plan(playlist.body)
+        let at = step
+        pending += planner.plan(playlist.body).map { ($0, at) }
       } else {
         failures += 1
         // The playlist gone for a while: the stream ended.
@@ -131,27 +133,36 @@ final class WatchPlayer: ObservableObject {
         }
       }
       // Two at a time (each request's round trip, through the iPhone over Bluetooth especially,
-      // added up one after another), queued in order.
-      while !pending.isEmpty, running, !Task.isCancelled {
-        let first = pending.removeFirst()
-        if !pending.isEmpty {
-          let second = pending.removeFirst()
+      // added up one after another), and the two in one file: half as many joins between files,
+      // where the player can hitch.
+      // (A lone one waits for the next to be listed, unless what's queued is running low.)
+      while running, !Task.isCancelled, pending.count >= 2 || (pending.count == 1 && started && player.items().count < 2) {
+        let (first, firstStep) = pending.removeFirst()
+        var parts: [Frames] = []
+        if let (second, secondStep) = pending.first, !second.discontinuity, secondStep == firstStep {
+          pending.removeFirst()
           async let a = load(first)
           async let b = load(second)
-          let fileA = await a
-          if let fileA { enqueue(fileA) }
-          let fileB = await b
-          if let fileB { enqueue(fileB) }
-        } else if let file = await load(first) {
-          enqueue(file)
+          let framesA = await a
+          let framesB = await b
+          parts = [framesA, framesB].compactMap { $0 }
+        } else if let frames = await load(first) {
+          parts = [frames]
         }
+        guard !parts.isEmpty, running else { continue }
+        if first.discontinuity { lastAudio = nil }
+        if let file = await write(parts, name: "\(first.sequence)") { enqueue(file) }
       }
       try? await Task.sleep(nanoseconds: 700_000_000)
     }
   }
 
-  /// One segment downloaded (tried twice) and rewritten as an MP4 file.
-  private func load(_ segment: LiveSegmentPlanner.Planned) async -> URL? {
+  typealias Frames = (video: [VideoFrame], audio: [AudioFrame])
+  /// The last sound frame written (the next file starts its decoder with it: see MP4Writer).
+  private var lastAudio: AudioFrame?
+
+  /// One segment downloaded (tried twice) and unpacked.
+  private func load(_ segment: LiveSegmentPlanner.Planned) async -> Frames? {
     guard let url = URL(string: segment.uri) else { return nil }
     var request = URLRequest(url: url)
     request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
@@ -167,20 +178,30 @@ final class WatchPlayer: ObservableObject {
       }
     }
     guard let data = fetched, running else { return nil }
-    let file = folder.appendingPathComponent("\(segment.sequence)-\(UUID().uuidString.prefix(6)).mp4")
-    // Unpacked and rewritten away from the main thread.
-    let written = await Task.detached(priority: .userInitiated) { () -> Bool in
+    // Unpacked away from the main thread.
+    return await Task.detached(priority: .userInitiated) { () -> Frames in
       var demuxer = TSDemuxer()
-      let frames = demuxer.feed(data) + demuxer.flush()
       var video: [VideoFrame] = []
       var audio: [AudioFrame] = []
-      for frame in frames {
+      for frame in demuxer.feed(data) + demuxer.flush() {
         switch frame {
         case .video(let v): video.append(v)
         case .audio(let a): audio.append(a)
         }
       }
-      guard let mp4 = MP4Writer.file(.init(video: video, audio: audio)) else { return false }
+      return (video, audio)
+    }.value
+  }
+
+  /// Segments (one after another, the same quality) as one MP4 file.
+  private func write(_ parts: [Frames], name: String) async -> URL? {
+    let video = parts.flatMap(\.video)
+    let audio = parts.flatMap(\.audio)
+    let primer = lastAudio
+    if let last = audio.last { lastAudio = last }
+    let file = folder.appendingPathComponent("\(name)-\(UUID().uuidString.prefix(6)).mp4")
+    let written = await Task.detached(priority: .userInitiated) { () -> Bool in
+      guard let mp4 = MP4Writer.file(.init(video: video, audio: audio, audioPrimer: primer)) else { return false }
       return (try? mp4.write(to: file)) != nil
     }.value
     return written && running ? file : nil
@@ -226,9 +247,8 @@ final class WatchPlayer: ObservableObject {
       started = true
       player.play()
       phase = .playing
-    } else if buffering, player.items().count >= 2 {
-      // Ran dry: on again once there's a little in hand (going on with one, it stopped again
-      // as soon as that one ended).
+    } else if buffering {
+      // Ran dry: on again with the file that's come (two segments, about four seconds).
       buffering = false
       player.play()
     }

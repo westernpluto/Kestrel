@@ -2046,6 +2046,18 @@ func testMP4Writer() {
       let size = H264.pictureSize(sps: sets.sps)
       check(size != nil && size!.width > size!.height, "\(name): picture size \(String(describing: size))")
     }
+    // With the previous file's last sound frame in front (edited out of what plays): one frame
+    // more of sound in the file, the same length played.
+    if let primer = audio.first, let primed = MP4Writer.file(.init(video: video, audio: audio, audioPrimer: primer)) {
+      // (Its bytes, and a few more in the index.)
+      let extra = primed.count - file.count - primer.data.count
+      check(extra >= 0 && extra < 64, "\(name): primer adds one sound frame (\(primed.count) vs \(file.count))")
+      if let out = ProcessInfo.processInfo.environment["KESTREL_MP4_OUT"] {
+        try? primed.write(to: URL(fileURLWithPath: out).appendingPathComponent(name + ".primed.mp4"))
+      }
+    } else {
+      check(false, "\(name): primed MP4")
+    }
     // For checking by hand with ffprobe/ffmpeg (see Tests/run.sh).
     if let out = ProcessInfo.processInfo.environment["KESTREL_MP4_OUT"] {
       try? file.write(to: URL(fileURLWithPath: out).appendingPathComponent(name + ".mp4"))

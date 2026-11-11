@@ -19,6 +19,10 @@ enum MP4Writer {
   struct Segment {
     var video: [VideoFrame]
     var audio: [AudioFrame]
+    /// The sound frame just before this file's (the end of the previous file): written first and
+    /// edited out of what plays, so the AAC decoder starts already warmed up. Started cold, each
+    /// file's first moment of sound came out wrong: a little click at every join between files.
+    var audioPrimer: AudioFrame? = nil
   }
 
   /// The MP4 file for one segment, or nil when it has no H.264 keyframe with its parameter sets
@@ -46,6 +50,9 @@ enum MP4Writer {
 
     let audio = segment.audio
     let audioConfig = audio.first?.config
+    // (Only one in the same format.)
+    let primer = segment.audioPrimer.flatMap { $0.config == audioConfig ? $0 : nil }
+    let audioSamples = (primer.map { [$0] } ?? []) + audio
     let audioRate = UInt32(audioConfig?.sampleRate ?? 48_000)
 
     // The movie starts at whichever track starts first; the other waits with an empty edit.
@@ -54,8 +61,8 @@ enum MP4Writer {
     let base = min(videoStart, audioStart ?? videoStart)
     let videoMediaDuration = durations.reduce(0) { $0 + UInt64($1) }
     let videoShown = UInt32(clamping: videoMediaDuration)
-    let audioMediaDuration = UInt64(audio.count) * 1024  // in the audio track's own clock (its rate)
-    let audioShown = UInt32(clamping: audioMediaDuration * UInt64(movieTimescale) / UInt64(audioRate))
+    let audioMediaDuration = UInt64(audioSamples.count) * 1024  // in the audio track's own clock (its rate)
+    let audioShown = UInt32(clamping: UInt64(audio.count) * 1024 * UInt64(movieTimescale) / UInt64(audioRate))
     let videoDelay = UInt32(clamping: videoStart - base)
     let audioDelay = UInt32(clamping: (audioStart ?? base) - base)
     let movieDuration = max(videoDelay + videoShown, audio.isEmpty ? 0 : audioDelay + audioShown)
@@ -71,8 +78,9 @@ enum MP4Writer {
         mediaDuration: videoShown, delay: videoDelay, firstOffset: offsets.first ?? 0)
       if let audioConfig, !audio.isEmpty {
         tracks += audioTrack(
-          id: 2, config: audioConfig, sizes: audio.map { UInt32($0.data.count) }, chunk: audioChunk,
-          mediaDuration: UInt32(clamping: audioMediaDuration), shown: audioShown, delay: audioDelay)
+          id: 2, config: audioConfig, sizes: audioSamples.map { UInt32($0.data.count) }, chunk: audioChunk,
+          mediaDuration: UInt32(clamping: audioMediaDuration), shown: audioShown, delay: audioDelay,
+          mediaStart: primer == nil ? 0 : 1024)
       }
       return box("moov", mvhd(duration: movieDuration, nextTrack: 3) + tracks)
     }
@@ -83,10 +91,10 @@ enum MP4Writer {
     let mdatStart = UInt32(ftyp.count + measured.count + 8)
     var out = ftyp
     out += moov(mdatStart: mdatStart)
-    let mdatSize = 8 + videoBytes + audio.reduce(0) { $0 + $1.data.count }
+    let mdatSize = 8 + videoBytes + audioSamples.reduce(0) { $0 + $1.data.count }
     out += u32(UInt32(mdatSize)) + ascii("mdat")
     for sample in videoSamples { out += sample }
-    for frame in audio { out += frame.data }
+    for frame in audioSamples { out += frame.data }
     return out
   }
 
@@ -123,7 +131,8 @@ enum MP4Writer {
   }
 
   private static func audioTrack(
-    id: UInt32, config: ADTS.Config, sizes: [UInt32], chunk: UInt32, mediaDuration: UInt32, shown: UInt32, delay: UInt32
+    id: UInt32, config: ADTS.Config, sizes: [UInt32], chunk: UInt32, mediaDuration: UInt32, shown: UInt32, delay: UInt32,
+    mediaStart: UInt32
   ) -> Data {
     let channels = UInt16(max(1, min(config.channels, 2)))
     let rate = UInt32(config.sampleRate)
@@ -136,7 +145,7 @@ enum MP4Writer {
       + fullBox("stco", payload: u32(1) + u32(chunk))
     let minf = box("minf", fullBox("smhd", payload: Data(count: 4)) + dinf() + box("stbl", stbl))
     let mdia = box("mdia", mdhd(timescale: rate, duration: mediaDuration) + hdlr("soun", name: "Kestrel audio") + minf)
-    let edits = elst(delay: delay, shown: shown, mediaStart: 0)
+    let edits = elst(delay: delay, shown: shown, mediaStart: mediaStart)
     return box("trak", tkhd(id: id, duration: delay + shown, volume: 0x0100, width: 0, height: 0) + edits + mdia)
   }
 
