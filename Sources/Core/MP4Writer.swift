@@ -14,6 +14,8 @@ import Foundation
 enum MP4Writer {
   /// The movie's clock (and the video track's): 90 kHz, as the stream's own times.
   static let movieTimescale: UInt32 = 90_000
+  /// What AVFoundation takes the AAC decoder's delay to be (samples), and drops.
+  static let aacDecoderDelay = 2112
 
   /// What's needed to write one segment.
   struct Segment {
@@ -57,7 +59,11 @@ enum MP4Writer {
     // (Only ones in the same format.)
     let primers = (segment.audioPrimers + (segment.audioPrimer.map { [$0] } ?? [])).filter { $0.config == audioConfig }
     let audioSamples = primers + audio
-    let audioEditStart = UInt32(clamping: segment.audioEditStart ?? primers.count * 1024)
+    // AVFoundation drops the AAC decoder's delay (2112 samples) from where the sound starts,
+    // whatever's there: with Twitch's sound, which has none, that was 44 ms of real sound gone from
+    // every file. Started that much into the primers, what's dropped is primers (checked against
+    // AVFoundation, Tests/AVCheck.swift).
+    let audioEditStart = UInt32(clamping: segment.audioEditStart ?? max(0, primers.count * 1024 - aacDecoderDelay))
     let audioRate = UInt32(audioConfig?.sampleRate ?? 48_000)
 
     // The movie starts with the sound's first frame. Files are played one after another, and each
@@ -68,16 +74,25 @@ enum MP4Writer {
     let videoStart = ordered.map(\.pts).min() ?? 0
     let audioStart = audio.first?.pts
     let base = audioStart ?? videoStart
+    let audioMediaDuration = UInt64(audioSamples.count) * 1024  // in the audio track's own clock (its rate)
+    let audioShown = UInt32(clamping: UInt64(audio.count) * 1024 * UInt64(movieTimescale) / UInt64(audioRate))
+    let audioDelay = UInt32(clamping: (audioStart ?? base) - base)
+    let videoDelay = UInt32(clamping: max(0, videoStart - base))
+    var videoEnd = (ordered.map(\.pts).max() ?? videoStart) + Int64(durations.last ?? 3000)
+    // The last picture held until the sound ends: a file is as long as its longest track to the
+    // player, and with the picture shorter, the file ended before its last moment of sound.
+    if !audio.isEmpty, !durations.isEmpty {
+      let soundEnd = base + Int64(audioDelay) + Int64(audioShown)
+      if soundEnd > videoEnd {
+        durations[durations.count - 1] += UInt32(clamping: soundEnd - videoEnd)
+        videoEnd = soundEnd
+      }
+    }
     let videoMediaDuration = durations.reduce(0) { $0 + UInt64($1) }
-    let videoEnd = (ordered.map(\.pts).max() ?? videoStart) + Int64(durations.last ?? 3000)
     let videoShown = UInt32(clamping: max(0, videoEnd - max(videoStart, base)))
     // Where the shown picture starts in the track's own timeline (decode times from the first
     // frame's, plus its composition offset).
     let videoMediaStart = UInt32(clamping: max(videoStart, base) - (ordered.first?.dts ?? videoStart))
-    let audioMediaDuration = UInt64(audioSamples.count) * 1024  // in the audio track's own clock (its rate)
-    let audioShown = UInt32(clamping: UInt64(audio.count) * 1024 * UInt64(movieTimescale) / UInt64(audioRate))
-    let videoDelay = UInt32(clamping: max(0, videoStart - base))
-    let audioDelay = UInt32(clamping: (audioStart ?? base) - base)
     let movieDuration = max(videoDelay + videoShown, audio.isEmpty ? 0 : audioDelay + audioShown)
 
     let videoBytes = videoSamples.reduce(0) { $0 + $1.count }

@@ -41,9 +41,7 @@ struct AVCheck {
       let three = Array(audio.prefix(3))
       let cases: [(String, MP4Writer.Segment)] = [
         ("plain", .init(video: video, audio: audio)),
-        ("primed", .init(video: video, audio: audio, audioPrimer: audio.first)),
         ("3 primers", .init(video: video, audio: audio, audioPrimers: three)),
-        ("3 primers, edit 2112 early", .init(video: video, audio: audio, audioPrimers: three, audioEditStart: 3 * 1024 - 2112)),
       ]
       for (kind, segment) in cases {
         guard let mp4 = MP4Writer.file(segment) else {
@@ -55,7 +53,7 @@ struct AVCheck {
         try? mp4.write(to: file)
         let keyframe = video.firstIndex(where: \.isKeyframe) ?? 0
         print(String(format: "     %@ %@: %.3f s of sound in it", name, kind, Double(audio.count * 1024) / 48_000))
-        if let problem = await check(file, videoFrames: video.count - keyframe) {
+        if let problem = await check(file, videoFrames: video.count - keyframe, expectedSound: audio.count * 1024) {
           print("FAIL \(name) \(kind): \(problem)")
           failures += 1
         } else {
@@ -68,7 +66,7 @@ struct AVCheck {
   }
 
   /// nil when AVFoundation plays it; else what's wrong.
-  static func check(_ url: URL, videoFrames: Int) async -> String? {
+  static func check(_ url: URL, videoFrames: Int, expectedSound: Int) async -> String? {
     let asset = AVURLAsset(url: url)
     do {
       guard try await asset.load(.isPlayable) else { return "not playable" }
@@ -104,6 +102,11 @@ struct AVCheck {
       guard reader.status == .completed else { return "decoding: \(reader.error?.localizedDescription ?? "status \(reader.status.rawValue)")" }
       guard pictureCount >= videoFrames - 1 else { return "decoded \(pictureCount) of \(videoFrames) pictures" }
       let soundSeconds = Double(soundSamples) / 48_000
+      if url.lastPathComponent.contains("3-primers") {
+        let expected = Double(expectedSound) / 48_000
+        guard abs(soundSeconds - expected) < 0.005 else { return String(format: "sound %.3f s of %.3f s played", soundSeconds, expected) }
+        guard duration > expected - 0.005 else { return String(format: "file %.3f s long, sound %.3f s", duration, expected) }
+      }
       // And ready to play in AVPlayer.
       let item = AVPlayerItem(asset: asset)
       let player = AVPlayer(playerItem: item)

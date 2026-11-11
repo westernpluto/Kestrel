@@ -154,7 +154,7 @@ final class WatchPlayer: ObservableObject {
           parts = [frames]
         }
         guard !parts.isEmpty, running else { continue }
-        if first.discontinuity { lastAudio = nil }
+        if first.discontinuity { recentAudio = [] }
         if let file = await write(parts, name: "\(first.sequence)") { enqueue(file) }
       }
       try? await Task.sleep(nanoseconds: 700_000_000)
@@ -162,8 +162,9 @@ final class WatchPlayer: ObservableObject {
   }
 
   typealias Frames = (video: [VideoFrame], audio: [AudioFrame])
-  /// The last sound frame written (the next file starts its decoder with it: see MP4Writer).
-  private var lastAudio: AudioFrame?
+  /// The last sound frames written (the next file starts with them, for AVFoundation to drop in
+  /// place of its own sound: see MP4Writer).
+  private var recentAudio: [AudioFrame] = []
 
   /// One segment downloaded (tried twice) and unpacked.
   private func load(_ segment: LiveSegmentPlanner.Planned) async -> Frames? {
@@ -201,11 +202,11 @@ final class WatchPlayer: ObservableObject {
   private func write(_ parts: [Frames], name: String) async -> URL? {
     let video = parts.flatMap(\.video)
     let audio = parts.flatMap(\.audio)
-    let primer = lastAudio
-    if let last = audio.last { lastAudio = last }
+    let primers = recentAudio
+    recentAudio = Array((recentAudio + audio).suffix(3))
     let file = folder.appendingPathComponent("\(name)-\(UUID().uuidString.prefix(6)).mp4")
     let written = await Task.detached(priority: .userInitiated) { () -> Bool in
-      guard let mp4 = MP4Writer.file(.init(video: video, audio: audio, audioPrimer: primer)) else { return false }
+      guard let mp4 = MP4Writer.file(.init(video: video, audio: audio, audioPrimers: primers)) else { return false }
       return (try? mp4.write(to: file)) != nil
     }.value
     return written && running ? file : nil
