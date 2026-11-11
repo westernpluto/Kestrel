@@ -55,15 +55,23 @@ enum MP4Writer {
     let audioSamples = (primer.map { [$0] } ?? []) + audio
     let audioRate = UInt32(audioConfig?.sampleRate ?? 48_000)
 
-    // The movie starts at whichever track starts first; the other waits with an empty edit.
+    // The movie starts with the sound's first frame. Files are played one after another, and each
+    // one's sound carries on exactly where the last one's ended; started at the picture instead
+    // (Twitch's is a little ahead of its sound in each segment, 14 ms or so), every file began with
+    // a moment of silence: a blip in the sound at every join. Picture from before then is edited
+    // out (decoded, not shown); a picture that starts later waits with an empty edit.
     let videoStart = ordered.map(\.pts).min() ?? 0
     let audioStart = audio.first?.pts
-    let base = min(videoStart, audioStart ?? videoStart)
+    let base = audioStart ?? videoStart
     let videoMediaDuration = durations.reduce(0) { $0 + UInt64($1) }
-    let videoShown = UInt32(clamping: videoMediaDuration)
+    let videoEnd = (ordered.map(\.pts).max() ?? videoStart) + Int64(durations.last ?? 3000)
+    let videoShown = UInt32(clamping: max(0, videoEnd - max(videoStart, base)))
+    // Where the shown picture starts in the track's own timeline (decode times from the first
+    // frame's, plus its composition offset).
+    let videoMediaStart = UInt32(clamping: max(videoStart, base) - (ordered.first?.dts ?? videoStart))
     let audioMediaDuration = UInt64(audioSamples.count) * 1024  // in the audio track's own clock (its rate)
     let audioShown = UInt32(clamping: UInt64(audio.count) * 1024 * UInt64(movieTimescale) / UInt64(audioRate))
-    let videoDelay = UInt32(clamping: videoStart - base)
+    let videoDelay = UInt32(clamping: max(0, videoStart - base))
     let audioDelay = UInt32(clamping: (audioStart ?? base) - base)
     let movieDuration = max(videoDelay + videoShown, audio.isEmpty ? 0 : audioDelay + audioShown)
 
@@ -75,7 +83,7 @@ enum MP4Writer {
       tracks += videoTrack(
         id: 1, width: size.width, height: size.height, sps: sets.sps, pps: sets.pps, sizes: videoSamples.map { UInt32($0.count) },
         durations: durations, offsets: offsets, keyframes: keyframes, chunk: videoChunk,
-        mediaDuration: videoShown, delay: videoDelay, firstOffset: offsets.first ?? 0)
+        mediaDuration: UInt32(clamping: videoMediaDuration), shown: videoShown, delay: videoDelay, mediaStart: videoMediaStart)
       if let audioConfig, !audio.isEmpty {
         tracks += audioTrack(
           id: 2, config: audioConfig, sizes: audioSamples.map { UInt32($0.data.count) }, chunk: audioChunk,
@@ -102,7 +110,7 @@ enum MP4Writer {
 
   private static func videoTrack(
     id: UInt32, width: Int, height: Int, sps: Data, pps: Data, sizes: [UInt32], durations: [UInt32], offsets: [UInt32],
-    keyframes: [UInt32], chunk: UInt32, mediaDuration: UInt32, delay: UInt32, firstOffset: UInt32
+    keyframes: [UInt32], chunk: UInt32, mediaDuration: UInt32, shown: UInt32, delay: UInt32, mediaStart: UInt32
   ) -> Data {
     var avcC = Data([1, sps.count > 1 ? sps[sps.startIndex + 1] : 66, sps.count > 2 ? sps[sps.startIndex + 2] : 0,
       sps.count > 3 ? sps[sps.startIndex + 3] : 30, 0xFF, 0xE1])
@@ -124,10 +132,9 @@ enum MP4Writer {
       "minf", fullBox("vmhd", flags: 1, payload: Data(count: 8)) + dinf() + box("stbl", stbl))
     let mdia = box(
       "mdia", mdhd(timescale: movieTimescale, duration: mediaDuration) + hdlr("vide", name: "Kestrel video") + minf)
-    // Shown from the first frame's presentation time (its composition offset into the media).
-    let edits = elst(delay: delay, shown: mediaDuration, mediaStart: firstOffset)
+    let edits = elst(delay: delay, shown: shown, mediaStart: mediaStart)
     return box(
-      "trak", tkhd(id: id, duration: delay + mediaDuration, volume: 0, width: width, height: height) + edits + mdia)
+      "trak", tkhd(id: id, duration: delay + shown, volume: 0, width: width, height: height) + edits + mdia)
   }
 
   private static func audioTrack(
