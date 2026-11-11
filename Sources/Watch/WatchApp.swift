@@ -41,6 +41,8 @@ final class WatchStore: ObservableObject {
   /// The tallest picture to play (pixels): small screens, and the watch's connection.
   @Published var maxHeight: Int { didSet { UserDefaults.standard.set(maxHeight, forKey: "watch.maxHeight") } }
   @Published var chatShown: Bool { didSet { UserDefaults.standard.set(chatShown, forKey: "watch.chatShown") } }
+  /// Play the quality set, as it is (off: Auto, stepped down when the connection can't carry it).
+  @Published var fixedQuality: Bool { didSet { UserDefaults.standard.set(fixedQuality, forKey: "watch.fixedQuality") } }
 
   static let heights = [160, 360, 480, 720]
 
@@ -48,6 +50,7 @@ final class WatchStore: ObservableObject {
     UserDefaults.standard.register(defaults: ["watch.maxHeight": 360, "watch.chatShown": true])
     maxHeight = UserDefaults.standard.integer(forKey: "watch.maxHeight")
     chatShown = UserDefaults.standard.bool(forKey: "watch.chatShown")
+    fixedQuality = UserDefaults.standard.bool(forKey: "watch.fixedQuality")
     if let data = WatchKeychain.get("session"), let saved = try? JSONDecoder().decode(TwitchAuth.Session.self, from: data) {
       session = saved
       TwitchAuth.shared.update(saved)

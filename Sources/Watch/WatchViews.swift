@@ -166,8 +166,9 @@ struct WatchSettingsView: View {
   var body: some View {
     List {
       Picker("Quality", selection: $store.maxHeight) {
-        ForEach(WatchStore.heights, id: \.self) { Text("Up to \($0)p").tag($0) }
+        ForEach(WatchStore.heights, id: \.self) { Text(store.fixedQuality ? "\($0)p" : "Up to \($0)p").tag($0) }
       }
+      Toggle("Always this quality", isOn: $store.fixedQuality)
       Toggle("Chat", isOn: $store.chatShown)
       if let session = store.session {
         Section {
@@ -175,7 +176,7 @@ struct WatchSettingsView: View {
         }
       }
       Section {
-        Text("Higher qualities use more data and battery. 360p is sharp on the watch's screen.")
+        Text("Higher qualities use more data and battery. 360p is sharp on the watch's screen. Off, Always this quality starts a step lower and moves with the connection, up to the quality set; on, it plays the quality set (or the nearest below it the stream has), even if it stalls. The quality button on the player picks one for that stream.")
           .font(.footnote).foregroundStyle(.secondary)
       }
     }
@@ -194,6 +195,7 @@ struct PlayerView: View {
   /// Full screen: the controls showing (a tap brings them up; they go after a few seconds).
   @State private var controlsShown = false
   @State private var hideControls: Task<Void, Never>?
+  @State private var choosingQuality = false
 
   var body: some View {
     Group {
@@ -205,8 +207,35 @@ struct PlayerView: View {
     }
     .navigationTitle(stream.channel.name)
     .toolbar(full ? .hidden : .automatic, for: .navigationBar)
+    .sheet(isPresented: $choosingQuality) {
+      List {
+        Button {
+          player.choose(step: nil)
+          choosingQuality = false
+        } label: {
+          HStack {
+            Text("Auto (up to \(store.maxHeight)p)")
+            Spacer()
+            if !player.lockedQuality { Image(systemName: "checkmark") }
+          }
+        }
+        ForEach(player.qualities.reversed(), id: \.step) { option in
+          Button {
+            player.choose(step: option.step)
+            choosingQuality = false
+          } label: {
+            HStack {
+              Text(option.label)
+              Spacer()
+              if player.lockedQuality, player.step == option.step { Image(systemName: "checkmark") }
+            }
+          }
+        }
+      }
+      .navigationTitle("Quality")
+    }
     .task {
-      await player.start(login: stream.channel.login, maxHeight: store.maxHeight)
+      await player.start(login: stream.channel.login, maxHeight: store.maxHeight, fixed: store.fixedQuality)
     }
     .onChange(of: player.phase) { _, phase in
       // Chat's connection is allowed while sound plays (watchOS keeps other connections for that).
@@ -230,6 +259,15 @@ struct PlayerView: View {
         HStack(spacing: 6) {
           VolumeControl().frame(width: 30, height: 30)
           Spacer()
+          Button {
+            choosingQuality = true
+          } label: {
+            Image(systemName: "slider.horizontal.3")
+          }
+          .buttonStyle(.bordered)
+          .frame(width: 44, height: 30)
+          .accessibilityLabel("Quality")
+          .disabled(player.qualities.isEmpty)
           Button {
             withAnimation { full = true }
             showControls()

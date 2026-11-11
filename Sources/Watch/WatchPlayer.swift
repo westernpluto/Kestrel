@@ -65,7 +65,29 @@ final class WatchPlayer: ObservableObject {
   /// The quality playing ("360p30").
   var qualityLabel: String { videos.indices.contains(step) ? variants[videos[step]].label : "" }
 
-  func start(login: String, maxHeight: Int) async {
+  /// A quality picked (in Settings, or on the player): played as it is, never stepped.
+  @Published private(set) var lockedQuality = false
+
+  /// The qualities there are, smallest first: their place in `videos` and their names.
+  var qualities: [(step: Int, label: String)] { videos.indices.map { ($0, variants[videos[$0]].label) } }
+
+  /// A quality to play from the next segments on (nil: Auto, stepped to the connection, up to
+  /// the setting's).
+  func choose(step chosen: Int?) {
+    if let chosen, videos.indices.contains(chosen) {
+      lockedQuality = true
+      step = chosen
+      ActivityLog.shared.add("Watch player: \(qualityLabel) picked")
+    } else {
+      lockedQuality = false
+      slowSegments = 0
+      fastSegments = 0
+      steppedAt = .distantPast
+      ActivityLog.shared.add("Watch player: Auto quality")
+    }
+  }
+
+  func start(login: String, maxHeight: Int, fixed: Bool = false) async {
     guard !running else { return }
     running = true
     phase = .loading
@@ -106,7 +128,9 @@ final class WatchPlayer: ObservableObject {
     // Up to the setting; starting one below it (when there is one) for a quick, steady start,
     // going up once the downloads show the connection carries it.
     topStep = videos.lastIndex { found[$0].height <= maxHeight } ?? 0
-    step = max(0, topStep - 1)
+    // (Picked in Settings: that one, as it is.)
+    lockedQuality = fixed
+    step = fixed ? topStep : max(0, topStep - 1)
     ActivityLog.shared.add("Watch player: \(login) at \(qualityLabel)")
     loop = Task { [weak self] in await self?.run(session: session) }
   }
@@ -279,7 +303,7 @@ final class WatchPlayer: ObservableObject {
   /// barely faster than this quality needs, up after a run of them well over the next one's
   /// (never past the setting). From the next playlist on (Twitch's qualities share segment numbers).
   private func measure(bytes: Int, seconds: Double) {
-    guard seconds > 0.05, videos.indices.contains(step) else { return }
+    guard !lockedQuality, seconds > 0.05, videos.indices.contains(step) else { return }
     let speed = Double(bytes * 8) / seconds  // bits a second
     let needs = Double(max(variants[videos[step]].bandwidth, 1))
     if speed < needs * 1.4 {
