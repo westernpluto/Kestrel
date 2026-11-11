@@ -15,6 +15,8 @@ final class KestrelController {
   private(set) var engine: KestrelEngine?
   /// The renditions the session offers (video ones, best first: what the quality menu lists).
   private var videoIndices: [Int] = []
+  /// The audio-only rendition, when Twitch offers one (not for multi-view's tiles).
+  private var audioIndex: Int?
   private var variants: [HLSVariant] = []
   private var adTimeline = AdTimeline()
   private var stopped = false
@@ -69,7 +71,12 @@ final class KestrelController {
       let preferred = model?.takePreferredQualityLabel().flatMap { label in videoIndices.first { found[$0].label == label } }
       let start = preferred ?? best
       model?.route = await session.route
-      model?.qualities = videoIndices.map { PlayerModel.Quality(id: $0, label: found[$0].label) } + [PlayerModel.Quality(id: nil, label: "Auto")]
+      audioIndex = model?.isTile == true ? nil : found.firstIndex { $0.isAudioOnly }
+      // (A fresh start plays the picture.)
+      if model?.audioOnly != nil { model?.audioOnly = nil }
+      model?.qualities = videoIndices.map { PlayerModel.Quality(id: $0, label: found[$0].label) }
+        + (audioIndex.map { [PlayerModel.Quality(id: $0, label: "Audio only")] } ?? [])
+        + [PlayerModel.Quality(id: nil, label: "Auto")]
       // Auto unless a quality was picked (it moves between them: showing the best as picked was
       // wrong whenever it had stepped down).
       model?.selectedQuality = preferred == nil ? nil : start
@@ -253,6 +260,21 @@ final class KestrelController {
 
   func select(_ id: Int?) {
     guard let engine else { return }
+    if let id, id == audioIndex {
+      engine.playAudioOnly(rendition: id)
+      model?.audioOnly = .chosen
+      updateAutomaticPictureInPicture()
+      ActivityLog.shared.add("Kestrel player: audio only")
+      return
+    }
+    if engine.audioOnly {
+      // Back to the picture, at the quality picked (or Auto).
+      engine.leaveAudioOnly(rendition: id)
+      model?.audioOnly = nil
+      updateAutomaticPictureInPicture()
+      ActivityLog.shared.add("Kestrel player: back to \(id.flatMap { variants.indices.contains($0) ? variants[$0].label : nil } ?? "Auto") from audio only")
+      return
+    }
     guard let id else {
       engine.setAuto()
       ActivityLog.shared.add("Kestrel player: Auto quality (the best that plays smoothly)")
@@ -272,12 +294,20 @@ final class KestrelController {
   private var pipObservation: NSKeyValueObservation?
   private var pipWanted = false
 
+  /// Leaving the app opens Picture in Picture by itself, except with audio only: a still picture
+  /// in a window is no use, the sound just carries on in the background. (The button still opens it.)
+  private var startsPictureInPictureByItself: Bool { model?.audioOnly != .chosen }
+
+  private func updateAutomaticPictureInPicture() {
+    pip?.canStartPictureInPictureAutomaticallyFromInline = startsPictureInPictureByItself
+  }
+
   private func setUpPictureInPicture(_ engine: KestrelEngine) {
     guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
     let delegate = KestrelPictureInPicture(controller: self)
     let controller = AVPictureInPictureController(
       contentSource: .init(sampleBufferDisplayLayer: engine.makeMirror(), playbackDelegate: delegate))
-    controller.canStartPictureInPictureAutomaticallyFromInline = true
+    controller.canStartPictureInPictureAutomaticallyFromInline = startsPictureInPictureByItself
     controller.delegate = delegate
     pipObservation = controller.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
       let active = pip.isPictureInPictureActive
@@ -336,7 +366,7 @@ final class KestrelController {
     callContent.view.backgroundColor = .black
     let delegate = KestrelCallPictureInPicture(controller: self)
     let controller = AVPictureInPictureController(contentSource: .init(activeVideoCallSourceView: view, contentViewController: callContent))
-    controller.canStartPictureInPictureAutomaticallyFromInline = true
+    controller.canStartPictureInPictureAutomaticallyFromInline = startsPictureInPictureByItself
     controller.delegate = delegate
     pipObservation = controller.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
       let active = pip.isPictureInPictureActive

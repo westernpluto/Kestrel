@@ -281,6 +281,9 @@ final class KestrelEngine: NSObject {
   /// Steps down after stalls and back up later (at the start and with Auto); off for a quality
   /// picked by hand.
   private(set) var autoQuality = true
+  /// Playing the audio-only rendition: its sound frames stand in for the picture's in the timing
+  /// (what's in hand, the start, the live edge), and the picture showing stays as it was.
+  private(set) var audioOnly = false
 
   // How the video arrives (for the stats, and to tell bursts from hiccups).
   private var lastArrival: Date?
@@ -498,6 +501,30 @@ final class KestrelEngine: NSObject {
   }
 
   /// Auto: the best quality that plays smoothly.
+  /// The sound alone, from the audio-only rendition (`index`): a fresh start at live with it, the
+  /// last picture left up. (Auto never steps into or out of it.)
+  func playAudioOnly(rendition index: Int) {
+    guard !audioOnly || index != rendition else { return }
+    audioOnly = true
+    autoQuality = false
+    rendition = index
+    restart()
+  }
+
+  /// Back to the picture, at `index` (nil: Auto), from a fresh start at live.
+  func leaveAudioOnly(rendition index: Int?) {
+    guard audioOnly else { return }
+    audioOnly = false
+    if let index {
+      autoQuality = false
+      rendition = index
+    } else {
+      autoQuality = true
+      applyFit()
+    }
+    restart()
+  }
+
   func setAuto() {
     autoQuality = true
     fit = ConnectionFit(count: renditions.count)
@@ -857,6 +884,8 @@ final class KestrelEngine: NSObject {
     }
     switch frame {
     case .video(let video):
+      // (Audio only: a picture frame from before the switch isn't shown.)
+      if audioOnly { return }
       let mapped = timeline.map(video.pts, isVideo: true)
       // The decode time moves with it (streams with B-frames decode in another order than they
       // show: each frame has both times, and the decoder needs the decode one).
@@ -887,6 +916,21 @@ final class KestrelEngine: NSObject {
       let time = timeline.map(audio.pts, isVideo: false)
       let length = Int64(1024 * 90_000 / max(audio.config.sampleRate, 8000))
       if newestAudio.map({ time + length > $0 }) ?? true { newestAudio = time + length }
+      if audioOnly {
+        // The sound is all there is: it marks what's in hand and when it was broadcast.
+        if !load.dated, let date = load.planned.programDate {
+          load.dated = true
+          anchor = (time, date)
+        }
+        if firstVideoTime == nil { firstVideoTime = time }
+        if lastVideoTime.map({ time > $0 }) ?? true { lastVideoTime = time }
+        if !clockRunning, load.planned.live {
+          let at = Date()
+          liveArrivals.append((at, time))
+          liveArrivals.removeAll { at.timeIntervalSince($0.at) > 1.5 }
+          if liveSince == nil { liveSince = at }
+        }
+      }
       if clockRunning {
         enqueueAudio(audio, time: time)
       } else {
@@ -1451,7 +1495,8 @@ final class KestrelEngine: NSObject {
   }
 
   private func startIfReady() {
-    guard !clockRunning, !paused, let first = heldVideo.first?.pts, let last = newestPlayable else { return }
+    guard !clockRunning, !paused, let first = audioOnly ? heldAudio.first?.pts : heldVideo.first?.pts, let last = newestPlayable
+    else { return }
     // Whole segments: a segment's worth more, to last until the next one is listed (started at
     // the margin alone, it ran dry before the next one came, every start).
     let margin = Int64((max(catchUp.targetBuffer, 0.5) + (deliversWhole ? Self.segmentLength : 0)) * Double(Self.clock))
@@ -1497,7 +1542,7 @@ final class KestrelEngine: NSObject {
   /// before it runs dry. (Only stalls stepped it down before, two of them: on a train that was
   /// stall after stall first.)
   private func checkPace(ahead: Double) {
-    guard let newest = newestPlayable, speed > 0 else { return }
+    guard !audioOnly, let newest = newestPlayable, speed > 0 else { return }
     let at = Date()
     paceHistory.append((at, newest))
     paceHistory.removeAll { at.timeIntervalSince($0.at) > 8 }
