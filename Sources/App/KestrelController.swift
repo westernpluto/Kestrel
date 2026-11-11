@@ -295,11 +295,51 @@ final class KestrelController {
   private var pipWanted = false
 
   /// Leaving the app opens Picture in Picture by itself, except with audio only: a still picture
-  /// in a window is no use, the sound just carries on in the background. (The button still opens it.)
+  /// in a window is no use, the sound just carries on in the background (and the button's hidden).
   private var startsPictureInPictureByItself: Bool { model?.audioOnly != .chosen }
 
+  /// With audio only, there's no Picture in Picture controller at all: turning off its "start by
+  /// itself" wasn't enough, the window still opened with a still picture when the app was swiped
+  /// away. It's made again when the picture comes back.
   private func updateAutomaticPictureInPicture() {
-    pip?.canStartPictureInPictureAutomaticallyFromInline = startsPictureInPictureByItself
+    if startsPictureInPictureByItself {
+      if pip == nil { rebuildPictureInPicture() } else { pip?.canStartPictureInPictureAutomaticallyFromInline = true }
+    } else if pip?.isPictureInPictureActive == true {
+      pip?.canStartPictureInPictureAutomaticallyFromInline = false
+    } else {
+      dropPictureInPicture()
+    }
+  }
+
+  private func dropPictureInPicture() {
+    guard pip != nil else { return }
+    pipObservation = nil
+    pip = nil
+    pipDelegate = nil
+    callDelegate = nil
+    callSource = nil
+    pictureInPictureActive = false
+    engine?.feedMirror(false)
+  }
+
+  private func rebuildPictureInPicture() {
+    guard pip == nil, let engine, model?.isTile != true else { return }
+    if AppSettings.shared.pipControls {
+      setUpPictureInPicture(engine)
+    } else if let view = lastCallView {
+      setUpCallPictureInPicture(on: view)
+    }
+  }
+
+  /// The window closed after audio only was picked while it was up: the controller goes now.
+  private func windowClosedMaybeDrop() {
+    guard !startsPictureInPictureByItself else { return }
+    DispatchQueue.main.async { [weak self] in
+      MainActor.assumeIsolated {
+        guard let self, self.pip?.isPictureInPictureActive != true else { return }
+        self.dropPictureInPicture()
+      }
+    }
   }
 
   private func setUpPictureInPicture(_ engine: KestrelEngine) {
@@ -315,7 +355,10 @@ final class KestrelController {
         self?.pictureInPictureActive = active
         self?.engine?.screenNote(active ? "window up" : "window gone")
         self?.engine?.windowUp = active
-        if !active { self?.mirrorMaybeNotNeeded() }
+        if !active {
+          self?.mirrorMaybeNotNeeded()
+          self?.windowClosedMaybeDrop()
+        }
 
       }
     }
@@ -330,6 +373,8 @@ final class KestrelController {
     // The copy for the window is only decoded when it may be needed: from the moment the app
     // starts to go (Picture in Picture starts on its own then) until it's back and the window's
     // gone. Decoding it all the time doubled the video decoding (1440p60 twice over).
+    // (Once: the controller is made again after audio only.)
+    guard mirrorTokens.isEmpty else { return }
     let center = NotificationCenter.default
     mirrorTokens.append(
       center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -358,8 +403,13 @@ final class KestrelController {
   private let callContent = AVPictureInPictureVideoCallViewController()
   private var callDelegate: KestrelCallPictureInPicture?
   private weak var callSource: UIView?
+  /// The screen's view, for making the window's controller again (see `rebuildPictureInPicture`).
+  private weak var lastCallView: UIView?
 
   private func setUpCallPictureInPicture(on view: UIView) {
+    lastCallView = view
+    // (Audio only: none, see `updateAutomaticPictureInPicture`.)
+    guard startsPictureInPictureByItself else { return }
     guard AVPictureInPictureController.isPictureInPictureSupported(), view !== callSource, pip?.isPictureInPictureActive != true else { return }
     callSource = view
     callContent.preferredContentSize = CGSize(width: 1920, height: 1080)
@@ -370,7 +420,10 @@ final class KestrelController {
     controller.delegate = delegate
     pipObservation = controller.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
       let active = pip.isPictureInPictureActive
-      Task { @MainActor in self?.pictureInPictureActive = active }
+      Task { @MainActor in
+        self?.pictureInPictureActive = active
+        if !active { self?.windowClosedMaybeDrop() }
+      }
     }
     pip = controller
     callDelegate = delegate

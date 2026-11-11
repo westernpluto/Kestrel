@@ -569,7 +569,8 @@ struct PlayerControls: View {
       } else {
         Color.clear.frame(width: 44, height: 44)
       }
-      if AVPictureInPictureController.isPictureInPictureSupported() {
+      // (Not with audio only: there's no picture for a window, the sound plays on in the background.)
+      if AVPictureInPictureController.isPictureInPictureSupported(), model.audioOnly != .chosen || model.pictureInPictureActive {
         button(model.pictureInPictureActive ? "pip.exit" : "pip.enter", label: "Picture in Picture") {
           model.togglePictureInPicture()
         }
