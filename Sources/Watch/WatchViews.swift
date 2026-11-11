@@ -2,6 +2,7 @@
 
 import AVKit
 import SwiftUI
+import WatchKit
 
 struct HomeView: View {
   @EnvironmentObject private var store: WatchStore
@@ -187,34 +188,58 @@ struct PlayerView: View {
   @EnvironmentObject private var store: WatchStore
   @StateObject private var player = WatchPlayer()
   @StateObject private var chat = WatchChat()
+  /// The picture on the whole screen, and zoomed to fill it (the sides cropped).
+  @State private var full = false
+  @State private var zoomed = false
+  /// Full screen: the controls showing (a tap brings them up; they go after a few seconds).
+  @State private var controlsShown = false
+  @State private var hideControls: Task<Void, Never>?
 
   var body: some View {
+    Group {
+      if full {
+        fullScreen
+      } else {
+        page
+      }
+    }
+    .navigationTitle(stream.channel.name)
+    .toolbar(full ? .hidden : .automatic, for: .navigationBar)
+    .task {
+      await player.start(login: stream.channel.login, maxHeight: store.maxHeight)
+    }
+    .onChange(of: player.phase) { _, phase in
+      // Chat's connection is allowed while sound plays (watchOS keeps other connections for that).
+      if store.chatShown, phase == .playing { chat.connect(to: stream.channel.login) }
+    }
+    .onDisappear {
+      player.stop()
+      chat.disconnect()
+    }
+  }
+
+  private var page: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 6) {
-        ZStack {
-          // The system's controls off (their Done button did nothing here): a tap pauses and plays.
-          VideoPlayer(player: player.player)
-            .aspectRatio(16 / 9, contentMode: .fit)
-            .allowsHitTesting(false)
-          Color.clear
-            .contentShape(Rectangle())
+        GeometryReader { geometry in
+          picture(width: geometry.size.width, height: geometry.size.width * 9 / 16, fill: false)
             .onTapGesture { player.togglePause() }
-          if player.userPaused {
-            Image(systemName: "play.fill").font(.title2).padding(10).background(.black.opacity(0.5), in: Circle())
-              .allowsHitTesting(false)
-          }
-          switch player.phase {
-          case .loading:
-            ProgressView()
-          case .offline:
-            Text("Offline").font(.footnote)
-          case .failed(let message):
-            Text(message).font(.caption2).multilineTextAlignment(.center).padding(4)
-          case .playing:
-            if player.buffering { ProgressView() }
-          }
         }
+        .aspectRatio(16 / 9, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        HStack(spacing: 6) {
+          VolumeControl().frame(width: 30, height: 30)
+          Spacer()
+          Button {
+            withAnimation { full = true }
+            showControls()
+          } label: {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+          }
+          .buttonStyle(.bordered)
+          .frame(width: 44, height: 30)
+          .accessibilityLabel("Full screen")
+        }
         Text(player.qualityLabel.isEmpty ? stream.title : "\(player.qualityLabel) · \(stream.title)")
           .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
         if player.phase == .playing {
@@ -232,19 +257,120 @@ struct PlayerView: View {
         }
       }
     }
-    .navigationTitle(stream.channel.name)
-    .task {
-      await player.start(login: stream.channel.login, maxHeight: store.maxHeight)
+  }
+
+  private var fullScreen: some View {
+    GeometryReader { geometry in
+      ZStack {
+        Color.black
+        picture(width: geometry.size.width, height: geometry.size.height, fill: zoomed)
+        if controlsShown {
+          VStack {
+            HStack {
+              controlButton("xmark", label: "Exit full screen") {
+                withAnimation { full = false }
+                zoomed = false
+              }
+              Spacer()
+              controlButton(zoomed ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                label: zoomed ? "Fit" : "Fill") {
+                withAnimation { zoomed.toggle() }
+              }
+            }
+            Spacer()
+            HStack {
+              VolumeControl().frame(width: 32, height: 32)
+              Spacer()
+              controlButton(player.userPaused ? "play.fill" : "pause.fill", label: player.userPaused ? "Play" : "Pause") {
+                player.togglePause()
+              }
+            }
+          }
+          .padding(6)
+          .transition(.opacity)
+        }
+      }
+      .contentShape(Rectangle())
+      .onTapGesture { controlsShown ? hideNow() : showControls() }
     }
-    .onChange(of: player.phase) { _, phase in
-      // Chat's connection is allowed while sound plays (watchOS keeps other connections for that).
-      if store.chatShown, phase == .playing { chat.connect(to: stream.channel.login) }
+    .ignoresSafeArea()
+  }
+
+  /// The video, `width` wide in a `height` tall space: fitted, or filling it (cropped).
+  ///
+  /// watchOS draws video only through its own player view, which puts a Done button in its top
+  /// left corner that does nothing here (and can't be turned off). The view is made taller than the
+  /// picture, which it centres, and the extra cut off: the picture shows whole, the button doesn't.
+  private func picture(width: CGFloat, height: CGFloat, fill: Bool) -> some View {
+    let aspect: CGFloat = 16 / 9
+    // The picture's own size in the space.
+    let fitsWidth = width / height < aspect
+    let fitWidth = fitsWidth ? width : height * aspect
+    let fillWidth = fitsWidth ? height * aspect : width
+    let videoWidth = fill ? fillWidth : fitWidth
+    let videoHeight = videoWidth / aspect
+    let margin: CGFloat = 60
+    return ZStack {
+      VideoPlayer(player: player.player)
+        .frame(width: videoWidth, height: videoHeight + margin * 2)
+        .allowsHitTesting(false)
+        .frame(width: videoWidth, height: videoHeight)
+        .clipped()
+      if player.userPaused, !full || !controlsShown {
+        Image(systemName: "play.fill").font(.title2).padding(10).background(.black.opacity(0.5), in: Circle())
+          .allowsHitTesting(false)
+      }
+      switch player.phase {
+      case .loading:
+        ProgressView()
+      case .offline:
+        Text("Offline").font(.footnote)
+      case .failed(let message):
+        Text(message).font(.caption2).multilineTextAlignment(.center).padding(4)
+      case .playing:
+        if player.buffering { ProgressView() }
+      }
     }
-    .onDisappear {
-      player.stop()
-      chat.disconnect()
+    .frame(width: width, height: height)
+    .clipped()
+    .contentShape(Rectangle())
+  }
+
+  private func controlButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
+    Button {
+      action()
+      showControls()
+    } label: {
+      Image(systemName: symbol).font(.system(size: 15, weight: .semibold)).frame(width: 34, height: 34)
+        .background(.black.opacity(0.55), in: Circle())
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(label)
+  }
+
+  private func showControls() {
+    withAnimation { controlsShown = true }
+    hideControls?.cancel()
+    hideControls = Task { @MainActor in
+      try? await Task.sleep(nanoseconds: 4_000_000_000)
+      guard !Task.isCancelled else { return }
+      withAnimation { controlsShown = false }
     }
   }
+
+  private func hideNow() {
+    hideControls?.cancel()
+    withAnimation { controlsShown = false }
+  }
+}
+
+/// The watch's own volume (the Digital Crown turns it once it's tapped).
+struct VolumeControl: WKInterfaceObjectRepresentable {
+  func makeWKInterfaceObject(context: Context) -> WKInterfaceVolumeControl {
+    WKInterfaceVolumeControl(origin: .local)
+  }
+
+  func updateWKInterfaceObject(_ object: WKInterfaceVolumeControl, context: Context) {}
 }
 
 struct ChatLine: View {

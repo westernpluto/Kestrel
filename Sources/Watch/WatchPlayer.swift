@@ -36,12 +36,20 @@ final class WatchPlayer: ObservableObject {
     return URLSession(configuration: configuration)
   }()
 
-  /// More files queued than this, about 24 s (a long pause, or a burst of downloads): the oldest
-  /// are dropped, to stay within reach of live. (At 8 s it dropped some after every slow patch.)
-  private static let mostQueued = 6
-  /// Files in hand before playing starts, and again after running out (each two segments, about
-  /// four seconds).
-  private static let startWith = 2
+  // How much is kept in hand (seconds queued ahead of what's playing):
+  /// before playing starts, and again after running out;
+  private static let startAt = 4.0
+  /// above this, segments go two to a file (fewer joins); below, one at a time, sooner;
+  private static let pairAbove = 6.0
+  /// above this it plays a little faster (pitch kept) until it's back down to `settleAt`, instead of
+  /// staying further behind live for good;
+  private static let catchUpAbove = 9.0
+  private static let settleAt = 6.5
+  private static let catchUpRate: Float = 1.1
+  /// above this (a long pause), the oldest are dropped.
+  private static let dropAbove = 25.0
+  /// Each queued file's length.
+  private var fileSeconds: [ObjectIdentifier: Double] = [:]
 
   /// The stream's renditions, and the ones with a picture, smallest first.
   private var variants: [HLSVariant] = []
@@ -87,7 +95,9 @@ final class WatchPlayer: ObservableObject {
     guard running else { return }
     self.session = session
     variants = found
-    videos = found.indices.filter { !found[$0].isAudioOnly && found[$0].height > 0 }
+    // H.264 only (what the watch decodes; Twitch can list HEVC and AV1 ones too).
+    let h264 = found.indices.filter { !found[$0].isAudioOnly && found[$0].height > 0 && (found[$0].codecs.isEmpty || found[$0].codecs.contains("avc1")) }
+    videos = (h264.isEmpty ? found.indices.filter { !found[$0].isAudioOnly && found[$0].height > 0 } : h264)
       .sorted { (found[$0].height, found[$0].bandwidth) < (found[$1].height, found[$1].bandwidth) }
     guard !videos.isEmpty else {
       phase = .failed("No quality this watch can play.")
@@ -118,7 +128,7 @@ final class WatchPlayer: ObservableObject {
 
   private func run(session: LowLatencySession) async {
     // Two complete segments back from the newest, plus the ones being made: a few seconds in hand.
-    var planner = LiveSegmentPlanner(startBack: 2)
+    var planner = LiveSegmentPlanner(startBack: 1)
     var failures = 0
     // (With the quality each came from: only the same quality goes in one file.)
     var pending: [(segment: LiveSegmentPlanner.Planned, step: Int)] = []
@@ -139,11 +149,14 @@ final class WatchPlayer: ObservableObject {
       // Two at a time (each request's round trip, through the iPhone over Bluetooth especially,
       // added up one after another), and the two in one file: half as many joins between files,
       // where the player can hitch.
-      // (A lone one waits for the next to be listed, unless what's queued is running low.)
-      while running, !Task.isCancelled, pending.count >= 2 || (pending.count == 1 && started && player.items().count < 2) {
+      // Only with enough in hand: at the start, or running low, one at a time, sooner. (Pairing, a
+      // lone one waits for the next to be listed.)
+      while running, !Task.isCancelled, !pending.isEmpty {
+        let pairing = started && queuedSeconds >= Self.pairAbove
+        if pairing, pending.count == 1 { break }
         let (first, firstStep) = pending.removeFirst()
         var parts: [Frames] = []
-        if let (second, secondStep) = pending.first, !second.discontinuity, secondStep == firstStep {
+        if pairing, let (second, secondStep) = pending.first, !second.discontinuity, secondStep == firstStep {
           pending.removeFirst()
           async let a = load(first)
           async let b = load(second)
@@ -155,7 +168,7 @@ final class WatchPlayer: ObservableObject {
         }
         guard !parts.isEmpty, running else { continue }
         if first.discontinuity { recentAudio = [] }
-        if let file = await write(parts, name: "\(first.sequence)") { enqueue(file) }
+        if let (file, seconds) = await write(parts, name: "\(first.sequence)") { enqueue(file, seconds: seconds) }
       }
       try? await Task.sleep(nanoseconds: 700_000_000)
     }
@@ -183,12 +196,27 @@ final class WatchPlayer: ObservableObject {
       }
     }
     guard let data = fetched, running else { return nil }
+    // Fragmented MP4 (some channels, "enhanced broadcasting": everything comes that way, H.264
+    // too) needs the stream's init segment; transport streams don't. Only transport streams were
+    // unpacked before: those channels' segments came out empty, and it loaded for ever.
+    var initSegment: FMP4Init?
+    if let map = segment.mapURI {
+      initSegment = await fragmentInit(map)
+      guard initSegment != nil else { return nil }
+    }
     // Unpacked away from the main thread.
     return await Task.detached(priority: .userInitiated) { () -> Frames in
-      var demuxer = TSDemuxer()
+      var frames: [DemuxedFrame]
+      if let initSegment {
+        var demuxer = FMP4Demuxer(initSegment: initSegment)
+        frames = demuxer.feed(data) + demuxer.flush()
+      } else {
+        var demuxer = TSDemuxer()
+        frames = demuxer.feed(data) + demuxer.flush()
+      }
       var video: [VideoFrame] = []
       var audio: [AudioFrame] = []
-      for frame in demuxer.feed(data) + demuxer.flush() {
+      for frame in frames {
         switch frame {
         case .video(let v): video.append(v)
         case .audio(let a): audio.append(a)
@@ -198,10 +226,30 @@ final class WatchPlayer: ObservableObject {
     }.value
   }
 
+  /// The init segments of fragmented-MP4 streams, by address.
+  private var inits: [String: FMP4Init] = [:]
+
+  private func fragmentInit(_ address: String) async -> FMP4Init? {
+    if let known = inits[address] { return known }
+    guard let url = URL(string: address) else { return nil }
+    var request = URLRequest(url: url)
+    request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
+    guard let (data, _) = try? await downloads.data(for: request), let parsed = FMP4Init.parse(data) else { return nil }
+    inits[address] = parsed
+    return parsed
+  }
+
+  /// Segments in a row that gave no file (nothing the watch can play in them).
+  private var unplayable = 0
+
   /// Segments (one after another, the same quality) as one MP4 file.
-  private func write(_ parts: [Frames], name: String) async -> URL? {
+  private func write(_ parts: [Frames], name: String) async -> (URL, Double)? {
     let video = parts.flatMap(\.video)
     let audio = parts.flatMap(\.audio)
+    // (Its length: the sound's, which it's cut to; else the picture's.)
+    let rate = Double(audio.first?.config.sampleRate ?? 48_000)
+    let seconds = !audio.isEmpty ? Double(audio.count * 1024) / rate
+      : Double((video.map(\.pts).max() ?? 0) - (video.map(\.pts).min() ?? 0)) / 90_000 + 0.033
     let primers = recentAudio
     recentAudio = Array((recentAudio + audio).suffix(3))
     let file = folder.appendingPathComponent("\(name)-\(UUID().uuidString.prefix(6)).mp4")
@@ -209,7 +257,23 @@ final class WatchPlayer: ObservableObject {
       guard let mp4 = MP4Writer.file(.init(video: video, audio: audio, audioPrimers: primers)) else { return false }
       return (try? mp4.write(to: file)) != nil
     }.value
-    return written && running ? file : nil
+    // Nothing playable in several in a row: said, instead of loading for ever.
+    if written { unplayable = 0 } else { unplayable += 1 }
+    if unplayable >= 4, !started {
+      phase = .failed("This stream's video can't be played on the watch.")
+      running = false
+    }
+    return written && running ? (file, seconds) : nil
+  }
+
+  /// Seconds queued ahead of what's playing.
+  private var queuedSeconds: Double {
+    var total = 0.0
+    for (index, item) in player.items().enumerated() {
+      let length = fileSeconds[ObjectIdentifier(item)] ?? 2
+      total += index == 0 ? max(0, length - max(0, item.currentTime().seconds)) : length
+    }
+    return total
   }
 
   /// Steps the quality to what the connection carries: down after two segments that came in
@@ -240,7 +304,7 @@ final class WatchPlayer: ObservableObject {
     }
   }
 
-  private func enqueue(_ file: URL) {
+  private func enqueue(_ file: URL, seconds: Double) {
     // (Empty only when it played through everything: paused, it doesn't use up the queue.) Held
     // until there's a little in hand again: the queue would otherwise start on the one file and
     // run dry again as soon as it ended.
@@ -250,20 +314,23 @@ final class WatchPlayer: ObservableObject {
       player.pause()
     }
     let item = AVPlayerItem(url: file)
+    // (Playing a little faster to catch up: the pitch kept.)
+    item.audioTimePitchAlgorithm = .timeDomain
+    fileSeconds[ObjectIdentifier(item)] = seconds
     watch(item)
     player.insert(item, after: nil)
     files.append(file)
-    // Far behind (a long pause, or downloads bunched up): on to the newer ones.
-    while player.items().count > Self.mostQueued {
+    // Far behind (a long pause): on to the newer ones.
+    while queuedSeconds > Self.dropAbove, player.items().count > 1 {
       player.advanceToNextItem()
       dropped += 1
     }
     removePlayedFiles()
-    if !started, player.items().count >= Self.startWith {
+    if !started, queuedSeconds >= Self.startAt {
       started = true
       if !userPaused { player.play() }
       phase = .playing
-    } else if buffering, player.items().count >= Self.startWith {
+    } else if buffering, queuedSeconds >= Self.startAt {
       buffering = false
       if !userPaused { player.play() }
     }
@@ -315,15 +382,18 @@ final class WatchPlayer: ObservableObject {
 
   private func measureAhead() {
     let items = player.items()
-    var seconds = 0.0
-    for (index, item) in items.enumerated() {
-      let length = item.asset.duration.seconds
-      guard length.isFinite else { continue }
-      seconds += index == 0 ? max(0, length - item.currentTime().seconds) : length
+    ahead = queuedSeconds
+    // Catching up: a little faster while more than needed is queued.
+    if started, !buffering, !userPaused {
+      if ahead > Self.catchUpAbove, player.rate > 0, player.rate < Self.catchUpRate {
+        player.rate = Self.catchUpRate
+      } else if ahead < Self.settleAt, player.rate > 1 {
+        player.rate = 1
+      }
     }
-    ahead = seconds
     let live = Set(items.map(ObjectIdentifier.init))
     itemWatches = itemWatches.filter { live.contains($0.key) }
+    fileSeconds = fileSeconds.filter { live.contains($0.key) }
   }
 
   private func removePlayedFiles() {

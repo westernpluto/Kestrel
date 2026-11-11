@@ -50,20 +50,6 @@ jobs:
           xcodebuild -version
           echo "iOS SDK $(xcrun --sdk iphoneos --show-sdk-version)"
 
-      - name: Look at the watchOS SDK (temporary)
-        continue-on-error: true
-        run: |
-          W="$(xcrun --sdk watchos --show-sdk-path)"
-          echo "== AVKit headers"; ls "$W/System/Library/Frameworks/AVKit.framework/Headers" 2>&1 | head -30
-          echo "== AVPlayerItemVideoOutput"; grep -n "API_AVAILABLE\|API_UNAVAILABLE" "$W/System/Library/Frameworks/AVFoundation.framework/Headers/AVPlayerItemOutput.h" | head -12
-          echo "== AVPlayerLayer"; grep -n "API_AVAILABLE\|API_UNAVAILABLE" "$W/System/Library/Frameworks/AVFoundation.framework/Headers/AVPlayerLayer.h" | head -5
-          echo "== AVSampleBufferDisplayLayer"; grep -n "API_AVAILABLE\|API_UNAVAILABLE" "$W/System/Library/Frameworks/AVFoundation.framework/Headers/AVSampleBufferDisplayLayer.h" | head -5
-          echo "== VideoPlayer (SwiftUI/AVKit interface)"; find "$W/System/Library/Frameworks/AVKit.framework" -name "*.swiftinterface" | head -3
-          F="$(find "$W/System/Library/Frameworks/AVKit.framework" -name "arm64_32*.swiftinterface" | head -1)"
-          [ -n "$F" ] && grep -n "VideoPlayer\|watchOS" "$F" | head -40
-          echo "== WKInterfaceVolumeControl"; grep -n "init\|API_AVAILABLE" "$W/System/Library/Frameworks/WatchKit.framework/Headers/WKInterfaceVolumeControl.h" | head -10
-          echo "== VideoToolbox"; ls "$W/System/Library/Frameworks" | grep -i "videotoolbox\|coreimage\|metal" 
-
       - name: Check the watch's video files with AVFoundation
         continue-on-error: true
         run: |
