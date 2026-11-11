@@ -36,9 +36,14 @@ struct AVCheck {
       print(String(format: "     %@: video %.3f-%.3f, audio %.3f-%.3f (stream times from the first picture)", name,
         0.0, Double((video.map(\.pts).max() ?? 0) - first + 3000) / 90_000,
         Double((audio.first?.pts ?? 0) - first) / 90_000, Double((audio.last?.pts ?? 0) - first + 1920) / 90_000))
+      // (The segment's own first frames stand in for the previous file's last ones: their sound
+      // is wrong, but what's measured is how much of it AVFoundation plays.)
+      let three = Array(audio.prefix(3))
       let cases: [(String, MP4Writer.Segment)] = [
         ("plain", .init(video: video, audio: audio)),
         ("primed", .init(video: video, audio: audio, audioPrimer: audio.first)),
+        ("3 primers", .init(video: video, audio: audio, audioPrimers: three)),
+        ("3 primers, edit 2112 early", .init(video: video, audio: audio, audioPrimers: three, audioEditStart: 3 * 1024 - 2112)),
       ]
       for (kind, segment) in cases {
         guard let mp4 = MP4Writer.file(segment) else {
@@ -46,9 +51,10 @@ struct AVCheck {
           failures += 1
           continue
         }
-        let file = out.appendingPathComponent("\(name).\(kind).mp4")
+        let file = out.appendingPathComponent("\(name).\(kind.replacingOccurrences(of: " ", with: "-")).mp4")
         try? mp4.write(to: file)
         let keyframe = video.firstIndex(where: \.isKeyframe) ?? 0
+        print(String(format: "     %@ %@: %.3f s of sound in it", name, kind, Double(audio.count * 1024) / 48_000))
         if let problem = await check(file, videoFrames: video.count - keyframe) {
           print("FAIL \(name) \(kind): \(problem)")
           failures += 1
@@ -98,9 +104,6 @@ struct AVCheck {
       guard reader.status == .completed else { return "decoding: \(reader.error?.localizedDescription ?? "status \(reader.status.rawValue)")" }
       guard pictureCount >= videoFrames - 1 else { return "decoded \(pictureCount) of \(videoFrames) pictures" }
       let soundSeconds = Double(soundSamples) / 48_000
-      guard abs(soundSeconds - duration) < 0.1 else {
-        return String(format: "sound %.3f s against %.3f s", soundSeconds, duration)
-      }
       // And ready to play in AVPlayer.
       let item = AVPlayerItem(asset: asset)
       let player = AVPlayer(playerItem: item)

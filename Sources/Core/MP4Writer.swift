@@ -23,6 +23,10 @@ enum MP4Writer {
     /// edited out of what plays, so the AAC decoder starts already warmed up. Started cold, each
     /// file's first moment of sound came out wrong: a little click at every join between files.
     var audioPrimer: AudioFrame? = nil
+    /// More than one (oldest first), as `audioPrimer` (for decoders that drop more than a frame).
+    var audioPrimers: [AudioFrame] = []
+    /// Where in the sound track playing starts (samples), when not right after the primers.
+    var audioEditStart: Int? = nil
   }
 
   /// The MP4 file for one segment, or nil when it has no H.264 keyframe with its parameter sets
@@ -50,9 +54,10 @@ enum MP4Writer {
 
     let audio = segment.audio
     let audioConfig = audio.first?.config
-    // (Only one in the same format.)
-    let primer = segment.audioPrimer.flatMap { $0.config == audioConfig ? $0 : nil }
-    let audioSamples = (primer.map { [$0] } ?? []) + audio
+    // (Only ones in the same format.)
+    let primers = (segment.audioPrimers + (segment.audioPrimer.map { [$0] } ?? [])).filter { $0.config == audioConfig }
+    let audioSamples = primers + audio
+    let audioEditStart = UInt32(clamping: segment.audioEditStart ?? primers.count * 1024)
     let audioRate = UInt32(audioConfig?.sampleRate ?? 48_000)
 
     // The movie starts with the sound's first frame. Files are played one after another, and each
@@ -88,7 +93,7 @@ enum MP4Writer {
         tracks += audioTrack(
           id: 2, config: audioConfig, sizes: audioSamples.map { UInt32($0.data.count) }, chunk: audioChunk,
           mediaDuration: UInt32(clamping: audioMediaDuration), shown: audioShown, delay: audioDelay,
-          mediaStart: primer == nil ? 0 : 1024)
+          mediaStart: audioEditStart)
       }
       return box("moov", mvhd(duration: movieDuration, nextTrack: 3) + tracks)
     }
