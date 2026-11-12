@@ -888,6 +888,21 @@ final class PlayerModel: ObservableObject {
     notificationTokens = []
   }
 
+  /// The rewind's one retry after it couldn't play (see `rewindItemChanged`).
+  private var rewindRetried = false
+
+  /// Makes sure the local playlist server answers; started again if it doesn't. Returns whether it
+  /// had to be.
+  nonisolated static func reviveLocalServer() async -> Bool {
+    if let port = try? StreamProxy.shared.ensureRunning(), let url = URL(string: "http://127.0.0.1:\(port)/ping") {
+      var request = URLRequest(url: url)
+      request.timeoutInterval = 1.5
+      if (try? await URLSession.shared.data(for: request)) != nil { return false }
+    }
+    _ = try? StreamProxy.shared.restart()
+    return true
+  }
+
   /// Called when the app returns to the foreground.
   func ensureServerAlive() {
     guard isLive, let session, !stopped else { return }
@@ -1179,6 +1194,9 @@ final class PlayerModel: ObservableObject {
 
   /// The VOD loaded out of sight (when the seek bar is touched while live).
   private func preloadRewindItem() {
+    // (The local server checked meanwhile, started again if iOS took it away: see
+    // `reviveLocalServer`.)
+    Task.detached { _ = await Self.reviveLocalServer() }
     guard rewindQuality < rewindVariants.count, let rewindSource,
       let url = StreamProxy.shared.mediaURL(for: rewindSource, index: rewindQuality)
     else { return }
@@ -1245,6 +1263,7 @@ final class PlayerModel: ObservableObject {
     guard isRewinding || status == .failed else { return }
     switch status {
     case .readyToPlay:
+      rewindRetried = false
       guard let target = rewindPendingSeek else { return }
       rewindPendingSeek = nil
       // Loaded before more was recorded and the target is past its end: load it again.
@@ -1269,6 +1288,21 @@ final class PlayerModel: ObservableObject {
       guard isRewinding else {
         rewindItemObservation = nil
         rewindPlayer.replaceCurrentItem(with: nil)
+        return
+      }
+      // The rewind goes through the local playlist server, which iOS can take away while the app's
+      // in the background (Kestrel's own live player doesn't use it, so nothing noticed): "could
+      // not connect" five times in a row. Once: the server checked, started again, and the VOD
+      // asked for again.
+      if !rewindRetried {
+        rewindRetried = true
+        let position = rewindPosition
+        Task { [weak self] in
+          let restarted = await Self.reviveLocalServer()
+          guard let self, self.isRewinding else { return }
+          ActivityLog.shared.add("The VOD didn't play (\(error ?? "error"))\(restarted ? "; local server started again" : ""); trying again")
+          self.startRewindItem(at: position)
+        }
         return
       }
       ActivityLog.shared.add("The VOD stopped playing (\(error ?? "error")); back to live")
