@@ -117,19 +117,37 @@ final class NowPlaying {
     center.changePlaybackPositionCommand.addTarget { [weak self] event in
       guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
       let seconds = event.positionTime
-      Task { @MainActor in self?.model?.seekFromRemote(to: seconds) }
+      Task { @MainActor in
+        // (Not just after the sound's route changed: see `remoteSkip`.)
+        guard Date().timeIntervalSince(AudioRouteWatch.lastChange) > 4 else { return }
+        self?.model?.seekFromRemote(to: seconds)
+      }
       return .success
     }
     center.skipForwardCommand.preferredIntervals = [10]
     center.skipBackwardCommand.preferredIntervals = [10]
     center.skipForwardCommand.addTarget { [weak self] _ in
-      Task { @MainActor in self?.model?.skip(by: 10) }
+      Task { @MainActor in self?.remoteSkip(by: 10) }
       return .success
     }
     center.skipBackwardCommand.addTarget { [weak self] _ in
-      Task { @MainActor in self?.model?.skip(by: -10) }
+      Task { @MainActor in self?.remoteSkip(by: -10) }
       return .success
     }
+  }
+
+  /// Ten seconds back or ahead from the lock screen, Control Center or headphones. Not just after
+  /// the sound's route changed: a Bluetooth headset or car dropping in and out sends these as it
+  /// connects, and on a live stream each one went back into the broadcast's VOD (five "rewinds"
+  /// in ten seconds, none of them asked for).
+  private func remoteSkip(by seconds: Double) {
+    let sinceRouteChange = Date().timeIntervalSince(AudioRouteWatch.lastChange)
+    guard sinceRouteChange > 4 else {
+      ActivityLog.shared.add(String(format: "Skip %@ from headphones or the lock screen ignored (the sound's route changed %.1f s before)", seconds < 0 ? "back" : "ahead", sinceRouteChange))
+      return
+    }
+    ActivityLog.shared.add("Skip \(seconds < 0 ? "back" : "ahead") \(Int(abs(seconds))) s from headphones or the lock screen")
+    model?.skip(by: seconds)
   }
 
   /// Headphones taken out (or Bluetooth gone): paused, as iOS apps do, rather than carrying on
@@ -290,10 +308,13 @@ enum Haptics {
 /// Watches the audio route (see `NowPlaying.pauseForLostRoute`).
 enum AudioRouteWatch {
   nonisolated(unsafe) private static var token: NSObjectProtocol?
+  /// When the sound's route last changed (headphones, Bluetooth, AirPlay, a car).
+  @MainActor static var lastChange = Date.distantPast
 
   static func start() {
     guard token == nil else { return }
     token = NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { note in
+      MainActor.assumeIsolated { lastChange = Date() }
       let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
       guard raw.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:)) == .oldDeviceUnavailable else { return }
       let previous = note.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription
