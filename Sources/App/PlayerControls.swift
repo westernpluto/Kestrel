@@ -47,7 +47,11 @@ struct PlayerVideoArea: View {
   var keyboardUp = false
   /// Pulling the video down (portrait): how far, then where it was let go (and where it was headed).
   var onPull: (CGFloat) -> Void = { _ in }
+  /// The system took the pull's touch away (Notification Center): the player goes back.
+  var onPullCancel: () -> Void = {}
   var onPullEnd: (CGFloat, CGFloat) -> Void = { _, _ in }
+  /// The video's drag is in progress (reset by SwiftUI however the touch ends, taken away too).
+  @GestureState private var swipeActive = false
   @EnvironmentObject private var settings: AppSettings
   @AppStorage("chatOverlay") private var chatOverlay = false
   @State private var controlsVisible = true
@@ -166,6 +170,24 @@ struct PlayerVideoArea: View {
     .clipped()
     .animation(.easeInOut(duration: 0.25), value: model.currentMutedPart)
     .onAppear { scheduleHide(after: 3.5) }
+    // A pull the system took over (Notification Center, Control Center) never ends: start the next
+    // one afresh (the player itself springs back: see PlayerScreen).
+    .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+      if pulling { onPullCancel() }
+      pulling = false
+      swipeTookKeyboard = false
+    }
+    // The touch was taken away mid-pull (no `onEnded`): the player goes back where it was.
+    .onChange(of: swipeActive) { active in
+      guard !active else { return }
+      DispatchQueue.main.async {
+        swipeTookKeyboard = false
+        if pulling {
+          pulling = false
+          onPullCancel()
+        }
+      }
+    }
   }
 
   private var controlsShown: Bool { controlsVisible || model.isPaused || model.phase != .playing }
@@ -313,10 +335,12 @@ struct PlayerVideoArea: View {
   private var swipe: some Gesture {
     // Screen coordinates: the video shrinks under the finger while it's pulled.
     DragGesture(minimumDistance: 14, coordinateSpace: .global)
+      .updating($swipeActive) { _, active, _ in active = true }
       .onChanged { value in
         guard !landscape || largeWindow, !swipeTookKeyboard, Date().timeIntervalSince(lastPinch) > 0.5 else { return }
         let dx = value.translation.width, dy = value.translation.height
-        if pulling || (dy > 8 && dy > abs(dx) * 1.2) {
+        // (From the very top edge of the screen it's the system's: Notification Center.)
+        if pulling || (dy > 8 && dy > abs(dx) * 1.2 && value.startLocation.y > PlayerScreen.systemEdge) {
           // Typing: a swipe down puts the keyboard away (letting it slide off), rather than
           // starting to shrink the player under it.
           if !pulling, keyboardUp {

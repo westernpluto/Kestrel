@@ -1,7 +1,7 @@
 // Kestrel for Apple TV: the player. The stream comes through the same ad-free session and local
 // playlist server as the iPhone app's Apple player; chat sits beside the video. On the Siri
-// Remote: play/pause pauses, left or right shows or hides chat, a click shows what's playing, and
-// Back closes the player.
+// Remote: play/pause pauses, left or right shows or hides chat, up writes in chat (signed in), a
+// click shows what's playing, and Back closes the player.
 
 import AVFoundation
 import SwiftUI
@@ -263,6 +263,9 @@ struct TVPlayerView: View {
   @StateObject private var model = TVPlayerModel()
   @StateObject private var chat = TVChat()
   @State private var chatShown = true
+  /// Typing a message (up on the remote, signed in).
+  @State private var composing = false
+  @State private var draft = ""
   @State private var infoShown = false
   @State private var hideInfo: Task<Void, Never>?
 
@@ -277,7 +280,7 @@ struct TVPlayerView: View {
         overlay
       }
       if chatShown {
-        TVChatPanel(chat: chat, channel: channel)
+        TVChatPanel(chat: chat, channel: channel, signedIn: TwitchAuth.shared.session != nil)
           .frame(width: 560)
           .transition(.move(edge: .trailing))
       }
@@ -287,14 +290,33 @@ struct TVPlayerView: View {
     .focusable()
     .onPlayPauseCommand { model.togglePause() }
     .onMoveCommand { direction in
-      guard direction == .left || direction == .right else { return }
-      withAnimation(.easeInOut(duration: 0.3)) { chatShown.toggle() }
+      switch direction {
+      case .left, .right:
+        withAnimation(.easeInOut(duration: 0.3)) { chatShown.toggle() }
+      case .up:
+        // Up: write in chat (signed in), with chat showing.
+        guard chat.canSend else { return }
+        if !chatShown { withAnimation(.easeInOut(duration: 0.3)) { chatShown = true } }
+        composing = true
+      default:
+        break
+      }
+    }
+    .alert("Chat in \(channel.name)", isPresented: $composing) {
+      TextField("Message", text: $draft)
+      Button("Send") {
+        chat.send(draft)
+        draft = ""
+      }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("Emotes by name work too (KEKW, catJAM…).")
     }
     .onTapGesture { showInfo() }
     .onExitCommand { dismiss() }
     .task {
       chatShown = store.chatShown
-      chat.start(channel.login)
+      chat.start(channel)
       await model.start(channel, adBlocking: store.adBlocking, lowLatency: store.lowLatencyPlayer)
       showInfo()
     }
@@ -379,32 +401,67 @@ struct TVPlayerView: View {
 
 // MARK: - Chat
 
-/// The channel's chat, read-only (anonymously over Twitch's IRC WebSocket): the last couple of
-/// hundred messages, starting with the recent ones from before it was opened.
+/// The channel's chat over Twitch's IRC WebSocket: the last couple of hundred messages, starting
+/// with the recent ones from before it was opened, with Twitch's emotes and the channel's 7TV, BTTV
+/// and FFZ ones (moving, as on the iPhone). Signed in, it joins as you and you can chat (up on the
+/// remote); otherwise it reads anonymously.
 @MainActor
 final class TVChat: ObservableObject {
   @Published private(set) var messages: [ChatMessage] = []
+  /// 7TV, BTTV and FFZ emotes by name (channel and global).
+  @Published private(set) var emotes: [String: URL] = [:]
+  /// Joined as the signed-in account (messages can be sent).
+  @Published private(set) var canSend = false
   private var socket: URLSessionWebSocketTask?
+  private var channel: Channel?
   private var login = ""
   private var stopped = false
+  /// Signed in, but Twitch turned the login away: anonymous from then on.
+  private var anonymousOnly = false
+  /// How you look in this chat (from Twitch's USERSTATE), for your own messages.
+  private var me: (displayName: String, color: String?, badges: String) = ("", nil, "")
   private static let keep = 200
 
-  func start(_ login: String) {
-    self.login = login.lowercased()
+  func start(_ channel: Channel) {
+    self.channel = channel
+    login = channel.login.lowercased()
     stopped = false
+    let login = self.login
     Task { [weak self] in
-      let recent = await ThirdPartyEmotes.recentMessages(login: login.lowercased(), http: URLSessionHTTPClient(timeout: 8))
+      let recent = await ThirdPartyEmotes.recentMessages(login: login, http: URLSessionHTTPClient(timeout: 8))
       guard let self, !self.stopped else { return }
       let earlier = recent.compactMap { ChatMessage(irc: $0) }.filter { $0.kind != .notice }
       self.messages = Array((earlier + self.messages).suffix(Self.keep))
+    }
+    Task { [weak self] in
+      let sets = await ThirdPartyEmotes.load(channelID: channel.id.isEmpty ? nil : channel.id, http: URLSessionHTTPClient(timeout: 10))
+      guard let self, !self.stopped else { return }
+      self.emotes = sets.byName
     }
     connect()
   }
 
   func stop() {
     stopped = true
+    canSend = false
     socket?.cancel(with: .goingAway, reason: nil)
     socket = nil
+  }
+
+  /// Sends a message as the signed-in account; it shows in chat straight away (Twitch doesn't
+  /// echo your own messages back).
+  func send(_ raw: String) {
+    let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard canSend, !text.isEmpty, let socket, let session = TwitchAuth.shared.session else { return }
+    socket.send(.string("PRIVMSG #\(login) :\(text)")) { _ in }
+    let name = me.displayName.isEmpty ? session.login : me.displayName
+    var tags = "display-name=\(name);id=local-\(UUID().uuidString);login=\(session.login);badges=\(me.badges)"
+    if let color = me.color { tags += ";color=\(color)" }
+    if let line = IRCMessage.parse("@\(tags) :\(session.login)!\(session.login)@\(session.login).tmi.twitch.tv PRIVMSG #\(login) :\(text)"),
+      let message = ChatMessage(irc: line)
+    {
+      messages = Array((messages + [message]).suffix(Self.keep))
+    }
   }
 
   private func connect() {
@@ -412,12 +469,14 @@ final class TVChat: ObservableObject {
     let task = URLSession.shared.webSocketTask(with: URL(string: "wss://irc-ws.chat.twitch.tv:443")!)
     socket = task
     task.resume()
-    for line in [
-      "CAP REQ :twitch.tv/tags twitch.tv/commands", "PASS SCHMOOPIIE", "NICK justinfan\(Int.random(in: 10_000...99_999))",
-      "JOIN #\(login)",
-    ] {
-      task.send(.string(line)) { _ in }
+    var lines = ["CAP REQ :twitch.tv/tags twitch.tv/commands"]
+    if !anonymousOnly, let session = TwitchAuth.shared.session {
+      lines += ["PASS oauth:\(session.token)", "NICK \(session.login.lowercased())"]
+    } else {
+      lines += ["PASS SCHMOOPIIE", "NICK justinfan\(Int.random(in: 10_000...99_999))"]
     }
+    lines.append("JOIN #\(login)")
+    for line in lines { task.send(.string(line)) { _ in } }
     receive(task)
   }
 
@@ -432,6 +491,7 @@ final class TVChat: ObservableObject {
         case .failure:
           // Dropped: join again in a moment.
           self.socket = nil
+          self.canSend = false
           try? await Task.sleep(nanoseconds: 3_000_000_000)
           self.connect()
         }
@@ -448,6 +508,25 @@ final class TVChat: ObservableObject {
         task.send(.string("PONG :\(irc.trailing ?? "tmi.twitch.tv")")) { _ in }
       case "PRIVMSG", "USERNOTICE":
         if let message = ChatMessage(irc: irc) { added.append(message) }
+      case "GLOBALUSERSTATE", "USERSTATE":
+        // Joined as you: what you look like here, and you can chat.
+        if TwitchAuth.shared.session != nil, !anonymousOnly {
+          me = (irc.tags["display-name"] ?? me.displayName, irc.tags["color"].flatMap { $0.isEmpty ? nil : $0 } ?? me.color, irc.tags["badges"] ?? me.badges)
+          canSend = true
+        }
+      case "NOTICE":
+        let notice = irc.trailing ?? ""
+        if notice.localizedCaseInsensitiveContains("authentication failed") || notice.localizedCaseInsensitiveContains("improperly formatted auth") {
+          // The sign-in wasn't accepted for chat: read anonymously instead.
+          anonymousOnly = true
+          canSend = false
+          socket?.cancel(with: .goingAway, reason: nil)
+          socket = nil
+          connect()
+          return
+        }
+        // Twitch saying why a message didn't go (followers-only, slow mode, …): shown in chat.
+        if !notice.isEmpty, let note = Self.notice(notice) { added.append(note) }
       case "CLEARCHAT", "CLEARMSG":
         // Deleted messages and timeouts: taken out of the list.
         if let id = irc.tags["target-msg-id"] {
@@ -462,11 +541,20 @@ final class TVChat: ObservableObject {
     guard !added.isEmpty else { return }
     messages = Array((messages + added).suffix(Self.keep))
   }
+
+  /// One of Twitch's notices, as a line in chat.
+  private static func notice(_ text: String) -> ChatMessage? {
+    // (Tag values can't hold ";" or a space as is.)
+    let safe = text.replacingOccurrences(of: ";", with: ",").replacingOccurrences(of: " ", with: "\\s")
+    guard let irc = IRCMessage.parse("@id=notice-\(UUID().uuidString);system-msg=\(safe) :tmi.twitch.tv USERNOTICE #kestrel :") else { return nil }
+    return ChatMessage(irc: irc)
+  }
 }
 
 struct TVChatPanel: View {
   @ObservedObject var chat: TVChat
   let channel: Channel
+  let signedIn: Bool
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -475,37 +563,87 @@ struct TVChatPanel: View {
         ScrollView {
           LazyVStack(alignment: .leading, spacing: 14) {
             ForEach(chat.messages) { message in
-              TVChatLine(message: message).id(message.id)
+              TVChatLine(message: message, emotes: chat.emotes).id(message.id)
             }
           }
           .padding(.horizontal, 30)
-          .padding(.bottom, 40)
+          .padding(.bottom, 20)
         }
         .onChange(of: chat.messages.last?.id) { _, last in
           guard let last else { return }
           proxy.scrollTo(last, anchor: .bottom)
         }
       }
+      // How to chat from the remote.
+      HStack(spacing: 10) {
+        Image(systemName: chat.canSend ? "chevron.up.circle.fill" : "person.crop.circle.badge.questionmark")
+        Text(chat.canSend ? "Press up to chat" : signedIn ? "Joining chat…" : "Sign in (Settings) to chat")
+      }
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      .padding(.horizontal, 30)
+      .padding(.vertical, 22)
     }
     .frame(maxHeight: .infinity, alignment: .top)
     .background(Color(white: 0.07))
   }
 }
 
+/// One message: the name, then its words and emotes, wrapping like text.
 struct TVChatLine: View {
   let message: ChatMessage
+  let emotes: [String: URL]
+
+  static let fontSize: CGFloat = 24
+  static let emoteHeight: CGFloat = 34
 
   var body: some View {
     if message.kind == .system {
       Text(message.systemText ?? message.text)
-        .font(.system(size: 24))
+        .font(.system(size: Self.fontSize))
         .foregroundStyle(.purple)
     } else {
-      (Text(message.displayName).bold().foregroundColor(Self.color(message.color))
-        + Text(message.kind == .action ? " " : ": ")
-        + Text(message.text).foregroundColor(message.kind == .action ? Self.color(message.color) : .white))
-        .font(.system(size: 24))
+      let color = Self.color(message.color)
+      let textColor = message.kind == .action ? color : Color.white
+      TVFlow(spacing: 0, lineSpacing: 4) {
+        Text(message.displayName).bold().foregroundColor(color)
+        Text(message.kind == .action ? " " : ": ").foregroundColor(.white)
+        ForEach(Array(pieces.enumerated()), id: \.offset) { _, piece in
+          switch piece {
+          case .word(let word): Text(word).foregroundColor(textColor)
+          case .emote(let name, let url, let gif): TVEmote(url: url, name: name, height: gif ? Self.emoteHeight * 2.4 : Self.emoteHeight)
+          }
+        }
+      }
+      .font(.system(size: Self.fontSize))
     }
+  }
+
+  private enum Piece {
+    case word(String)
+    case emote(name: String, url: URL, gif: Bool)
+  }
+
+  /// Words (each keeping its space, so lines wrap between words) and emotes.
+  private var pieces: [Piece] {
+    var out: [Piece] = []
+    for fragment in message.fragments(thirdParty: emotes) {
+      switch fragment {
+      case .text(let text):
+        var word = ""
+        for character in text {
+          word.append(character)
+          if character == " " {
+            out.append(.word(word))
+            word = ""
+          }
+        }
+        if !word.isEmpty { out.append(.word(word)) }
+      case .emote(let name, let url): out.append(.emote(name: name, url: url, gif: false))
+      case .gif(let name, let url): out.append(.emote(name: name, url: url, gif: true))
+      }
+    }
+    return out
   }
 
   /// A name's colour from chat (#RRGGBB), lightened a little if it's too dark on black.
@@ -521,5 +659,82 @@ struct TVChatLine: View {
       b = b + (1 - b) * 0.45
     }
     return Color(red: r, green: g, blue: b)
+  }
+}
+
+/// An emote in a chat line, at its own width (wide 7TV ones too) once its picture is in, moving
+/// if it's animated (the iPhone app's image pipeline).
+struct TVEmote: View {
+  let url: URL
+  let name: String
+  let height: CGFloat
+  @State private var aspect: CGFloat = 1
+
+  var body: some View {
+    CachedImage(url: url, maxPixels: height * 3, contentMode: .scaleAspectFit, placeholder: nil)
+      .frame(width: height * aspect, height: height)
+      .padding(.trailing, 4)
+      .accessibilityLabel(name)
+      .onAppear {
+        if let cached = ImagePipeline.shared.cached(url, maxPixels: height * 3), cached.size.height > 0 {
+          aspect = min(4, cached.size.width / cached.size.height)
+          return
+        }
+        ImagePipeline.shared.load(url, maxPixels: height * 3) { image in
+          guard let image, image.size.height > 0 else { return }
+          aspect = min(4, image.size.width / image.size.height)
+        }
+      }
+  }
+}
+
+/// Lays its items out in lines, starting a new line when one is full (words and emotes in chat).
+struct TVFlow: Layout {
+  var spacing: CGFloat = 0
+  var lineSpacing: CGFloat = 4
+
+  func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    let width = proposal.width ?? .infinity
+    var x: CGFloat = 0
+    var y: CGFloat = 0
+    var lineHeight: CGFloat = 0
+    var widest: CGFloat = 0
+    for subview in subviews {
+      let size = subview.sizeThatFits(.unspecified)
+      if x > 0, x + size.width > width {
+        y += lineHeight + lineSpacing
+        x = 0
+        lineHeight = 0
+      }
+      x += size.width + spacing
+      lineHeight = max(lineHeight, size.height)
+      widest = max(widest, x - spacing)
+    }
+    return CGSize(width: proposal.width ?? widest, height: subviews.isEmpty ? 0 : y + lineHeight)
+  }
+
+  func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    // Each line's items sit on a shared centre line (text and emotes level with each other).
+    var lines: [[(index: Int, size: CGSize)]] = [[]]
+    var x: CGFloat = 0
+    for (index, subview) in subviews.enumerated() {
+      let size = subview.sizeThatFits(.unspecified)
+      if x > 0, x + size.width > bounds.width {
+        lines.append([])
+        x = 0
+      }
+      lines[lines.count - 1].append((index, size))
+      x += size.width + spacing
+    }
+    var y = bounds.minY
+    for line in lines where !line.isEmpty {
+      let height = line.map(\.size.height).max() ?? 0
+      var x = bounds.minX
+      for item in line {
+        subviews[item.index].place(at: CGPoint(x: x, y: y + (height - item.size.height) / 2), proposal: ProposedViewSize(item.size))
+        x += item.size.width + spacing
+      }
+      y += height + lineSpacing
+    }
   }
 }

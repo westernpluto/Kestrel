@@ -700,6 +700,8 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     var sent: Bool
     var error: String?
     var secondsUntilCanSend: Int
+    /// Twitch's whole answer (shortened), for the Activity log when it says no more than "ERROR".
+    var raw: String = ""
   }
 
   /// Sends a GIF from Twitch's GIF keyboard. `headers`: an integrity token for a website sign-in
@@ -737,7 +739,8 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     let error = result["error"].string.flatMap { $0.isEmpty ? nil : $0 }
     return GifSendResult(
       sent: error == nil && result["message"]["id"].string != nil, error: error,
-      secondsUntilCanSend: result["secondsUntilCanSend"].int ?? 0)
+      secondsUntilCanSend: result["secondsUntilCanSend"].int ?? 0,
+      raw: String((String(data: data, encoding: .utf8) ?? "").prefix(400)))
   }
 
   static func describeFollowError(_ code: String) -> String {

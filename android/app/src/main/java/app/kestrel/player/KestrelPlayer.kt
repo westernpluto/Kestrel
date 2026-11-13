@@ -49,8 +49,11 @@ object KestrelPlayer {
 
     private fun create(): ExoPlayer {
         val context = Kestrel.app
+        // Live, the buffer can't run ahead of the newest segment anyway; these matter after a stall:
+        // it resumes with 1.5 s in hand (like the iPhone player), not 2 s, so a stall costs less
+        // latency, with enough to ride out the next segment's arrival.
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(15_000, 50_000, 1_000, 2_000)
+            .setBufferDurationsMs(15_000, 50_000, 1_000, 1_500)
             .build()
         val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
         val audio = AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build()

@@ -23,10 +23,15 @@
 // And it learns the margin each stream needs from how its video actually arrives: it keeps track of
 // how far delivery falls behind playback when the stream hiccups (whatever playing faster or slower
 // accounts for aside), and keeps that much in hand plus a little air. It starts from the least the
-// connection allows (0.6 s on Wi-Fi), or what the channel needed lately. A hiccup bigger
-// than any lately raises the margin at once; once none that big has come for a few minutes, the
-// margin comes back down within a minute or two. A steady stream on good Wi-Fi ends up around a
-// second from live; a shaky one a little further back, but without the stalls and skips.
+// connection allows (1 s on Wi-Fi), or what the channel needed lately. A hiccup bigger than any
+// lately raises the margin at once; once none that big has come for a few minutes, the margin comes
+// back down within a minute or two. A steady stream on good Wi-Fi ends up a second or so of video in
+// hand; a shaky one a little more, but without the stalls and skips.
+//
+// The least is 1 s, not the 0.6 s it was: a steady channel's video arrives with gaps of up to about
+// half a second, so 0.6 s left a tenth to spare and most streams stalled in their first minute;
+// each stall then raised the margin to about 1.4 s anyway. Simulated, a steady stream stalled 0.39
+// times every ten minutes at 0.6 s and 0.03 times at 1 s, for the same latency on average.
 //
 // Tuned against a simulation of Twitch's low-latency delivery (steady Wi-Fi, small hiccups, a shaky
 // broadcaster, cellular with dropouts, video in big pieces): a hiccup is remembered in full for a
@@ -78,11 +83,14 @@ struct LiveCatchUp: Sendable {
   private(set) var level: Double?
   private var levelAt: Date?
   /// The least to keep in hand on this connection (more on cellular: see `setFloor`).
-  private(set) var floor = LiveCatchUp.minBuffer
+  private(set) var floor = LiveCatchUp.standardFloor
   /// When playback (re)started: the first seconds catch up straight away (see `startWindow`).
   private var startedAt: Date
 
+  /// The least it can ever be told to keep.
   static let minBuffer = 0.6
+  /// The least kept unless the connection calls for more (see the top, and `setFloor`).
+  static let standardFloor = 1.0
   static let maxBuffer = 3.5
   /// A margin above this (plus a little) means the stream's video arrives unevenly.
   static let startBuffer = 1.0
@@ -147,7 +155,7 @@ struct LiveCatchUp: Sendable {
   /// - Parameter noise: shortfalls up to this are ignored (see `noise`).
   init(targetBuffer: Double? = nil, noise: Double = 0.2, now: Date = Date()) {
     self.noise = noise
-    self.targetBuffer = min(Self.maxBuffer, max(Self.minBuffer, targetBuffer ?? Self.minBuffer))
+    self.targetBuffer = min(Self.maxBuffer, max(Self.standardFloor, targetBuffer ?? Self.standardFloor))
     holdUntil = now.addingTimeInterval(1)
     lastShrink = now
     startedAt = now
@@ -168,6 +176,16 @@ struct LiveCatchUp: Sendable {
     return min(Self.maxBuffer, max(floor, recent.map { $0 + Self.air } ?? 0))
   }
 
+  /// Steady enough to try a better quality: at normal speed (not slowed down to build the margin
+  /// back up, nor speeding to catch up) with the margin in hand on average. A better quality's
+  /// first segments take longer to come in; tried while the margin was short (or mid-stall, or
+  /// while catching up) they ran it dry, and that stall sent it straight back down, held there for
+  /// longer each time. Low-latency players (Owncast's, hls.js's) hold quality up the same way.
+  var readyForBetterQuality: Bool {
+    guard rate == 1, let level else { return false }
+    return level >= targetBuffer - 0.05
+  }
+
   /// How much of a gap is learned (see `outage`).
   static func learnable(_ depth: Double) -> Double { depth > outage ? min(depth, outageLearned) : depth }
 
@@ -177,8 +195,11 @@ struct LiveCatchUp: Sendable {
   /// The least to keep in hand on this connection: a cellular one hiccups more than Wi-Fi, so a
   /// little more is kept from the start rather than learned from a stall.
   mutating func setFloor(_ value: Double) {
+    let old = floor
     floor = min(Self.maxBuffer, max(Self.minBuffer, value))
-    targetBuffer = max(targetBuffer, floor)
+    // Still just the old least (nothing learned above it, e.g. back on Wi-Fi from cellular): it
+    // follows, down as well as up. Otherwise never below the new least.
+    targetBuffer = targetBuffer <= old + 0.001 ? floor : max(targetBuffer, floor)
   }
 
   /// - Parameters:
@@ -227,6 +248,12 @@ struct LiveCatchUp: Sendable {
     }
 
     let excess = average - targetBuffer
+    // The average trails what's in hand by the speed's drain over its time (a catch-up at 1.1x
+    // drains 0.1 s a second; a 3 s average reads 0.3 s high): judged by the average alone, a
+    // catch-up ended with that much less in hand than the margin, just when a hiccup after a start
+    // could least afford it. Whether a catch-up goes on is judged by where it actually is. (Not a
+    // slow-down: the same lag ends one with a little more in hand than the margin, the safe side.)
+    let corrected = excess - Double(max(0, rate - 1)) * Self.levelTime
     // Already well behind live (e.g. after a long outage): never slower.
     let wellBehind = latency > targetBuffer + 2.5
     let starting = now.timeIntervalSince(startedAt) < Self.startWindow
@@ -237,7 +264,7 @@ struct LiveCatchUp: Sendable {
     } else if excess < -(rate < 1 ? Self.settle : Self.slowDownBand), !wellBehind {
       // Less in hand than needed: slower in proportion, building it back up.
       next = max(Double(Self.rates.slow), 1 + min(-Self.minStep, excess * Self.gain))
-    } else if excess > (rate > 1 ? Self.settle : Self.speedUpBand),
+    } else if (rate > 1 ? corrected : excess) > (rate > 1 ? Self.settle : Self.speedUpBand),
       // Sticky like the surplus: it starts 0.3 s over and goes on until 0.1 s over. Without that it
       // flipped on and off with each wobble while latency hovered right at the line, and each speed
       // change briefly held the picture (a judder every second or so on 60 fps streams).
@@ -429,6 +456,12 @@ struct LiveCatchUp: Sendable {
     hiccups.removeAll { now.timeIntervalSince($0.at) < 300 }
     let needed = neededBuffer(now: now)
     if targetBuffer > needed { targetBuffer = needed }
+  }
+
+  /// Nothing learned for a while: the video now comes from elsewhere (an ad-free copy standing in
+  /// during an ad, or back from it), and a gap at the switch isn't the stream's rhythm.
+  mutating func quiet(for seconds: TimeInterval, now: Date = Date()) {
+    quietUntil = max(quietUntil, now.addingTimeInterval(seconds))
   }
 
   mutating func hold(for seconds: TimeInterval, now: Date = Date()) {

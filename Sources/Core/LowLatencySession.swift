@@ -31,6 +31,11 @@ struct LowLatencyConfig: Sendable {
   /// start) and use the ad-free servers only for a copy of the stream during a stitched ad
   /// (asked first among the copies). Off: the stream comes through an ad-free server throughout.
   var adFreeServersForAdsOnly = false
+  /// Keeps Twitch's low latency (the segment it's still making) through ad breaks. Kestrel's own
+  /// player sets it: it mutes and covers any ad video it's handed (by the ad times the playlists
+  /// give, the segment being made included), so holding that segment back (as for the Amazon
+  /// player) only cost latency, and with about a second in hand, every break became a stall.
+  var lowLatencyThroughAds = false
 }
 
 struct LowLatencyUpdate: Sendable {
@@ -256,13 +261,13 @@ actor LowLatencySession: PlaylistSource {
       let marker = main.playlist.adMarkerActive
       noteMarkers(marker)
       if marker, config.backupStreams { prewarm(target: target) }
-      // The segment still being made is handed over during an announced break too. Holding it back
-      // (in case an ad got stitched into it) made the player run dry at every break, stall, fall
-      // ~2 s behind and catch up after, and the breaks seen are Twitch's own-player ones, clean.
-      // If an ad is stitched in after all, what the player was already handed of it is covered
-      // when it plays (see below: the player is about a second behind, so the cover is known in
-      // time).
-      let body = LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: false)
+      // While Twitch announces an ad break, hold back the segment it's still producing: if the ad
+      // gets stitched in, that segment would be ad video the player shows before Kestrel can
+      // tell (costs ~2 s of latency during the break, saves the ad flash). Only where ads can be
+      // stitched in at all: through an ad-free server (or an ad-free account) it would only cost
+      // latency, and a stream that started during the announcement stayed behind afterwards.
+      let body = LowLatencyPlaylist.filter(
+        main.text, base: main.url, dropPrefetch: marker && route.adsPossible && !config.lowLatencyThroughAds)
       return serve(index, body)
     }
 
@@ -305,10 +310,11 @@ actor LowLatencySession: PlaylistSource {
       }
     }
     // No ad-free copy (yet): give the player the ad, without prefetch so it can't run ahead into
-    // it, and let the app hide it.
+    // it, and let the app hide it. (Kestrel's player keeps it: the app hides the segment being made
+    // too, and dropping it stalled the player.)
     ads.update(with: main.playlist)
     publish(.covering)
-    return serve(index, LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: true))
+    return serve(index, LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: !config.lowLatencyThroughAds))
   }
 
   private func serve(_ index: Int, _ body: String) -> (status: Int, body: String) {

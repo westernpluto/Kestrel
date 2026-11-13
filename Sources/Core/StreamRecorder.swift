@@ -100,6 +100,9 @@ actor StreamRecorder {
   private var finished = false
 
   static let playlistName = "index.m3u8"
+  /// The playlists' target duration: Twitch's (its segments are at most this long), so it never
+  /// changes while a recording is watched (see playlistText).
+  static let stableTargetDuration = 6
   static let infoName = "recording.json"
 
   /// - Parameters:
@@ -324,19 +327,26 @@ actor StreamRecorder {
     ).write(to: directory.appendingPathComponent(Self.playlistName), atomically: true, encoding: .utf8)
   }
 
-  /// The recording's playlist: an event playlist (it grows) while recording, a finished one after.
-  /// With the segments' broadcast times (`dates`), each stretch is dated, so the player knows when
-  /// in the stream every moment was (the recording's own clock restarts at zero).
+  /// The recording's playlist: an event playlist that grows while recording and gets its end
+  /// added when it's done. With the segments' broadcast times (`dates`), each stretch is dated, so
+  /// the player knows when in the stream every moment was (the recording's own clock restarts at
+  /// zero).
+  ///
+  /// The header is the same from the first segment to the end: a player watching it while it's
+  /// made reloads it, and AVPlayer stalls a playlist whose target duration or type changes between
+  /// reloads (HLS allows only adding segments and the end). So the target duration is Twitch's own
+  /// bound (6 s), not the longest segment so far (2 s, then 3 when one ran a little long), and the
+  /// type stays EVENT once it's ended (an event with its end plays like a finished video).
   static func playlistText(
     entries: [(file: String, duration: Double, discontinuity: Bool, map: String?)], dates: [Date?] = [], ended: Bool
   ) -> String {
     let longest = entries.map(\.duration).max() ?? 2
     var lines = [
-      "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:\(max(1, Int(longest.rounded(.up))))",
-      "#EXT-X-PLAYLIST-TYPE:\(ended ? "VOD" : "EVENT")", "#EXT-X-MEDIA-SEQUENCE:0",
+      "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:\(max(stableTargetDuration, Int(longest.rounded(.up))))",
+      "#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-MEDIA-SEQUENCE:0",
+      // Start from the beginning, not at the newest part like a live stream.
+      "#EXT-X-START:TIME-OFFSET=0",
     ]
-    // Still being made: start from the beginning, not at the newest part like a live stream.
-    if !ended { lines.append("#EXT-X-START:TIME-OFFSET=0") }
     var currentMap: String?
     for (index, entry) in entries.enumerated() {
       if entry.discontinuity, index > 0 { lines.append("#EXT-X-DISCONTINUITY") }
@@ -377,7 +387,6 @@ actor StreamRecorder {
     guard info.endedAt == nil else { return info }
     let playlistURL = directory.appendingPathComponent(playlistName)
     if var text = try? String(contentsOf: playlistURL, encoding: .utf8), !text.contains("#EXT-X-ENDLIST") {
-      text = text.replacingOccurrences(of: "#EXT-X-PLAYLIST-TYPE:EVENT", with: "#EXT-X-PLAYLIST-TYPE:VOD")
       text += "#EXT-X-ENDLIST\n"
       try? text.write(to: playlistURL, atomically: true, encoding: .utf8)
     }

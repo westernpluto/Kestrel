@@ -4,6 +4,11 @@
 // BackgroundKeepAlive) and the checks going with the phone locked; without it, iOS only lets it
 // check now and then (Background App Refresh). New streams become notifications; tapping one
 // opens the stream. (Instant alerts through ntfy work even with Kestrel closed: InstantAlerts.)
+//
+// While Kestrel runs, alerts don't wait for the minute's check: Twitch's live-event socket (the one
+// twitch.tv uses) says "stream-up" for a followed channel the moment its broadcast starts (see
+// LiveWatch), and the alert goes then. Through the follows list alone it came a minute or two
+// after (Twitch lists a stream a while after it starts), and at a check every minute.
 
 import BackgroundTasks
 import Foundation
@@ -37,6 +42,14 @@ final class LiveNotifier: NSObject, ObservableObject {
   private var seeded: Bool
   private var timer: Timer?
   private var lastCheck = Date.distantPast
+  /// The live-event sockets for followed channels, and the channels they watch.
+  private var events: [LiveWatch] = []
+  private var eventChannels: [String] = []
+  /// Channels announced from a live event, with when (the follows list's check doesn't announce
+  /// the same broadcast again).
+  private var upAnnounced: [String: Date]
+  /// The most channels watched for live events (four sockets).
+  static let mostWatched = 200
   /// The last complete look at who's live (to tell a catch-up after a pause from a regular check).
   private var lastObserved: Date
 
@@ -47,6 +60,7 @@ final class LiveNotifier: NSObject, ObservableObject {
     knownLive = Set(defaults.stringArray(forKey: "liveAlerts.known") ?? [])
     announced = (defaults.dictionary(forKey: "liveAlerts.announced") as? [String: Date]) ?? [:]
     seeded = defaults.bool(forKey: "liveAlerts.seeded")
+    upAnnounced = (defaults.dictionary(forKey: "liveAlerts.upAnnounced") as? [String: Date]) ?? [:]
     super.init()
   }
 
@@ -92,6 +106,7 @@ final class LiveNotifier: NSObject, ObservableObject {
       defaults.set(false, forKey: "liveAlerts.enabled")
       timer?.invalidate()
       timer = nil
+      watchLiveEvents([])
       BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskID)
       ActivityLog.shared.add("Go-live alerts off")
       AutoRecorder.shared.updateKeepAlive()
@@ -147,6 +162,13 @@ final class LiveNotifier: NSObject, ObservableObject {
       var fresh: [LiveStream] = []
       for stream in live where !knownLive.contains(stream.channel.id) && announced[stream.id] == nil {
         if case .live(let channel)? = watching, channel.id == stream.channel.id { continue }
+        // Announced already, the moment it started (a live event): not again.
+        if let up = upAnnounced[stream.channel.id],
+          stream.startedAt.map({ abs($0.timeIntervalSince(up)) < 600 }) ?? (now.timeIntervalSince(up) < 3600)
+        {
+          announced[stream.id] = now
+          continue
+        }
         // Started a while ago (seen late, e.g. after the phone was off): still worth a heads-up,
         // but not for streams that have been on for hours.
         if let started = stream.startedAt, now.timeIntervalSince(started) > 3 * 3600 { continue }
@@ -174,6 +196,46 @@ final class LiveNotifier: NSObject, ObservableObject {
     knownLive = ids
     defaults.set(Array(knownLive), forKey: "liveAlerts.known")
     defaults.set(announced, forKey: "liveAlerts.announced")
+    // Watch who's offline for the moment they go live: the ones live most lately first.
+    let offline = FollowingStore.shared.offline.sorted { ($0.lastLive ?? .distantPast) > ($1.lastLive ?? .distantPast) }
+    watchLiveEvents(offline.prefix(Self.mostWatched).map(\.channel.id).filter { !ids.contains($0) })
+  }
+
+  // MARK: Live events
+
+  /// Watches these channels for going live (sockets of up to 50 each), replacing what was watched.
+  private func watchLiveEvents(_ channels: [String]) {
+    guard channels != eventChannels else { return }
+    events.forEach { $0.stop() }
+    events = []
+    eventChannels = channels
+    guard enabled, !channels.isEmpty else { return }
+    var start = 0
+    while start < channels.count {
+      let group = Array(channels[start..<min(start + LiveWatch.perSocket, channels.count)])
+      let watch = LiveWatch(channelIDs: group) { id in
+        LiveNotifier.shared.streamUp(channelID: id)
+      }
+      watch.start()
+      events.append(watch)
+      start += LiveWatch.perSocket
+    }
+  }
+
+  /// A followed channel's broadcast just started: alerted now, not at the next check.
+  private func streamUp(channelID id: String) {
+    guard enabled, seeded, !knownLive.contains(id) else { return }
+    let now = Date()
+    // (A broadcaster whose connection dropped and came back isn't news.)
+    if let up = upAnnounced[id], now.timeIntervalSince(up) < 30 * 60 { return }
+    if case .live(let channel)? = AppModel.shared.playing, channel.id == id { return }
+    guard let channel = FollowingStore.shared.offline.first(where: { $0.channel.id == id })?.channel else { return }
+    upAnnounced = upAnnounced.filter { now.timeIntervalSince($0.value) < 24 * 3600 }
+    upAnnounced[id] = now
+    defaults.set(upAnnounced, forKey: "liveAlerts.upAnnounced")
+    ActivityLog.shared.add("\(channel.name) went live (Twitch's live events)")
+    // (Its title and game come with the next look at the follows list; the alert goes now.)
+    post(LiveStream(id: "up-\(id)-\(Int(now.timeIntervalSince1970))", title: "", viewers: 0, startedAt: now, channel: channel))
   }
 
   private func post(_ stream: LiveStream) {

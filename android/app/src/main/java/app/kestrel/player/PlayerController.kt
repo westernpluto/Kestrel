@@ -181,6 +181,7 @@ class PlayerController(val target: PlaybackTarget) {
     private var lastArchiveCheck = 0L
     private var checkingArchive = false
     private var lastCatchUp = 0L
+    private var farBehindSince: Long? = null
     private var lastSaved = 0L
     private var lastSynced = 0L
     private var lastExtended = 0L
@@ -365,16 +366,28 @@ class PlayerController(val target: PlaybackTarget) {
 
     private fun liveTargetOffsetMs(): Long = if (AppSettings.lowLatency) 3500 else 7000
 
+    /**
+     * How far behind live ExoPlayer may let the target drift after stalls (it adds half a second
+     * per stall, and only slowly takes it back): bounded, so a few stalls don't leave it seconds
+     * further back for the rest of the stream.
+     */
+    private fun liveMaxOffsetMs(): Long = liveTargetOffsetMs() + if (AppSettings.lowLatency) 2500 else 5000
+
     private fun playLive() {
         val session = session ?: return
         val item = MediaItem.Builder()
             .setUri(PlaylistServer.masterUrl(session.id, selectedQuality))
             .setMimeType(MimeTypes.APPLICATION_M3U8)
             .setLiveConfiguration(
+                // ExoPlayer steers the speed to hold the target: slower while it's short of it,
+                // faster while it's behind. The same range as the iPhone player's (0.95x to 1.06x,
+                // where speech still sounds natural): at 1.03x, ten seconds behind took over five
+                // minutes to win back.
                 MediaItem.LiveConfiguration.Builder()
                     .setTargetOffsetMs(liveTargetOffsetMs())
-                    .setMinPlaybackSpeed(0.97f)
-                    .setMaxPlaybackSpeed(1.03f)
+                    .setMaxOffsetMs(liveMaxOffsetMs())
+                    .setMinPlaybackSpeed(0.95f)
+                    .setMaxPlaybackSpeed(1.06f)
                     .build(),
             )
             .setMediaMetadata(metadata())
@@ -752,11 +765,21 @@ class PlayerController(val target: PlaybackTarget) {
             noVideoSince = null
         }
 
-        // No speed-up tricks. Only if stalls have left playback far behind, jump ahead once in a while.
+        // ExoPlayer catches up by speed (see playLive). Far behind for a while (a long stall, back
+        // from the background), that would take minutes: jump to live instead, at most once a
+        // minute so a shaky stream doesn't turn into a loop of jumps and refills. (It waited for
+        // half a minute behind before.)
         val current = latency
-        if (current != null && current > 30 && player.isPlaying && !inAd && now - lastCatchUp > 60_000) {
-            ActivityLog.add("${current.roundToInt()} s behind live, jumping ahead")
-            goLive()
+        val farBehind = liveMaxOffsetMs() / 1000.0 + 6
+        if (current != null && current > farBehind && player.isPlaying && !inAd) {
+            val since = farBehindSince ?: now.also { farBehindSince = it }
+            if (now - since > 5_000 && now - lastCatchUp > 60_000) {
+                farBehindSince = null
+                ActivityLog.add("${current.roundToInt()} s behind live, jumping ahead")
+                goLive()
+            }
+        } else {
+            farBehindSince = null
         }
     }
 

@@ -237,7 +237,13 @@ final class RecordingStore: ObservableObject {
   }
 
   func playbackURL(_ group: RecordingGroup) -> URL? {
-    group.pieces.count == 1
+    // Still being recorded: what's recorded so far, as a finished video (the player asks for a
+    // fresh one as it nears the end). Given the growing playlist itself, Apple's player kept
+    // loading until Kestrel was closed (which finished the recording's files).
+    if group.pieces.contains(where: { active[$0.id] != nil && $0.videoID == nil }) {
+      return try? StreamProxy.shared.snapshotURL(ids: group.pieces.map(\.id))
+    }
+    return group.pieces.count == 1
       ? playbackURL(group.pieces[0]) : try? StreamProxy.shared.joinedRecordingURL(ids: group.pieces.map(\.id))
   }
 
@@ -611,9 +617,10 @@ struct RecordingPlayerScreen: View {
     .onAppear {
       OrientationLock.playerVisible(true)
       AppModel.shared.watchingRecording = true
-      if let url { playback.start(url: url, id: positionKey ?? info.id) }
+      if let url { playback.start(url: url, id: positionKey ?? info.id, growing: recording) }
       scheduleHide()
     }
+    .onChange(of: recording) { playback.setGrowing($0) }
     .onDisappear {
       playback.finish()
       AppModel.shared.watchingRecording = false
@@ -889,13 +896,22 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
   private var id = ""
   private var statusObservation: NSKeyValueObservation?
   private var pipObservation: NSKeyValueObservation?
-  private var timeObserver: Any?
+  private var ticker: Timer?
   private var pip: AVPictureInPictureController?
   private weak var view: PlayerLayerView?
   private var detached = false
   private var seekingTo: Double?
   private var lastSaved = Date.distantPast
   private var tokens: [NSObjectProtocol] = []
+  private var url: URL?
+  /// Where to go once the item is ready (the start, where it was left, or where it stalled).
+  private var pendingSeek: Double?
+  /// Waiting for video since then (not seeking).
+  private var stalledSince: Date?
+  private var lastReload = Date.distantPast
+  /// Each load's number (a load waits for the server check; only the newest goes ahead).
+  private var loadGeneration = 0
+  private var loadStartedAt = Date.distantPast
 
   nonisolated override init() {
     super.init()
@@ -906,53 +922,167 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
   var atNewest: Bool { end - position < 15 }
   var canSkipForward: Bool { end - position > 3 }
 
-  func start(url: URL, id: String) {
+  func start(url: URL, id: String, growing: Bool = false) {
     self.id = id
+    self.url = url
+    self.growing = growing
     try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
     try? AVAudioSession.sharedInstance().setActive(true)
-    let item = AVPlayerItem(url: url)
     let resume = UserDefaults.standard.double(forKey: Self.positionKey(id))
-    statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
-      guard item.status == .readyToPlay else { return }
-      Task { @MainActor in
-        guard let playback = self, playback.statusObservation != nil else { return }
-        playback.statusObservation = nil
-        // Where it was left, or the start (a recording still being made would otherwise start at
-        // its end, like a live stream).
-        playback.seek(to: resume > 5 ? resume - 3 : 0)
-      }
-    }
     player.automaticallyWaitsToMinimizeStalling = true
-    player.replaceCurrentItem(with: item)
-    timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) {
-      [weak self] _ in
+    // Where it was left, or the start (a recording still being made would otherwise start at its
+    // end, like a live stream).
+    load(url, at: resume > 5 ? resume - 3 : 0)
+    // On the wall clock, not the player's (a periodic time observer goes quiet while the video
+    // doesn't move, which is just when a stall needs noticing).
+    let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
       Task { @MainActor in self?.tick() }
     }
+    RunLoop.main.add(timer, forMode: .common)
+    ticker = timer
     let center = NotificationCenter.default
     tokens.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { Task { @MainActor in self?.settleInBackground() } }
     })
     tokens.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
-      Task { @MainActor in self?.reattach() }
+      Task { @MainActor in
+        self?.reattach()
+        await self?.checkServer()
+      }
+    })
+    tokens.append(center.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] note in
+      guard let ended = (note.object as AnyObject?).map(ObjectIdentifier.init) else { return }
+      Task { @MainActor in
+        // Played to the end of what was recorded when it was loaded, and it's still recording:
+        // on with what's been recorded since.
+        guard let playback = self, playback.growing, let item = playback.player.currentItem, ObjectIdentifier(item) == ended else { return }
+        playback.refreshSnapshot(at: playback.position)
+      }
+    })
+    tokens.append(center.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: nil, queue: .main) { [weak self] note in
+      guard let failed = (note.object as AnyObject?).map(ObjectIdentifier.init) else { return }
+      Task { @MainActor in
+        guard let playback = self, let item = playback.player.currentItem, ObjectIdentifier(item) == failed else { return }
+        playback.recover("it stopped playing")
+      }
     })
   }
 
+  /// A fresh item for the recording, going to `seconds` once it's ready. Kestrel's local server
+  /// (which serves recordings) is checked first: iOS can take its socket while Kestrel is in the
+  /// background, and then nothing loads until it's restarted (as quitting Kestrel did).
+  private func load(_ url: URL, at seconds: Double) {
+    pendingSeek = seconds
+    stalledSince = nil
+    loadStartedAt = Date()
+    loadGeneration += 1
+    let generation = loadGeneration
+    Task { @MainActor in
+      await StreamProxy.shared.ensureResponsive()
+      guard self.url != nil, generation == self.loadGeneration else { return }
+      let address = (try? StreamProxy.shared.currentAddress(of: url)) ?? url
+      if address != url {
+        ActivityLog.shared.add("Recording playback: Kestrel's local server moved, following it")
+        self.url = address
+      }
+      self.makeItem(address)
+    }
+  }
+
+  /// Back from the background: the local server may have been taken meanwhile (and restarted by
+  /// another player, maybe on another port). Loaded again where it was if so.
+  private func checkServer() async {
+    guard let url, pendingSeek == nil else { return }
+    await StreamProxy.shared.ensureResponsive()
+    let moved = (try? StreamProxy.shared.currentAddress(of: url)).map { $0 != url } ?? false
+    if moved || player.currentItem?.status == .failed {
+      lastReload = .distantPast
+      recover("Kestrel's local server was restarted")
+    }
+  }
+
+  private func makeItem(_ url: URL) {
+    let item = AVPlayerItem(url: url)
+    let identity = ObjectIdentifier(item)
+    statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+      let status = item.status
+      let error = item.error?.localizedDescription ?? "no reason given"
+      Task { @MainActor in
+        guard let playback = self, let current = playback.player.currentItem, ObjectIdentifier(current) == identity else { return }
+        if status == .failed {
+          playback.recover("it failed (\(error))")
+        } else if status == .readyToPlay, let target = playback.pendingSeek {
+          playback.pendingSeek = nil
+          if target.isInfinite {
+            // The newest part: a little before the end of this fresh snapshot.
+            let length = item.duration.seconds
+            playback.seek(to: length.isFinite ? max(0, length - 8) : 0)
+          } else {
+            playback.seek(to: target)
+          }
+        }
+      }
+    }
+    player.replaceCurrentItem(with: item)
+  }
+
+  /// The player gave up on the recording, or has waited for video it has: load it again where it
+  /// was. (AVPlayer can stop following a playlist that's still growing, or fail on a part read
+  /// while it was being saved.) At most every few seconds, so a recording that really can't play
+  /// doesn't spin.
+  private func recover(_ why: String) {
+    guard let url, Date().timeIntervalSince(lastReload) > 6 else { return }
+    lastReload = Date()
+    let current = player.currentTime().seconds
+    // Where it was going, or a second before where it stopped.
+    let at = seekingTo ?? pendingSeek ?? max(0, (current.isFinite && current > 0 ? current : position) - 1)
+    ActivityLog.shared.add("Recording playback: \(why); loading it again at \(at.isFinite ? Format.duration(Int(at)) : "the newest part")")
+    seekingTo = nil
+    load(url, at: at)
+  }
+
   private func tick() {
+    // Loaded but never ready, or failed (and not loaded again yet: at most every few seconds).
+    if pendingSeek != nil, Date().timeIntervalSince(loadStartedAt) > 20 {
+      recover("it didn't load")
+      return
+    }
     guard let item = player.currentItem else { return }
+    if item.status == .failed {
+      recover("it failed (\(item.error?.localizedDescription ?? "no reason given"))")
+      return
+    }
     let seekable = item.seekableTimeRanges.map(\.timeRangeValue).last.map { CMTimeRangeGetEnd($0).seconds } ?? 0
     let length = item.duration.seconds.isFinite ? item.duration.seconds : 0
     let newEnd = max(seekable, length)
     if newEnd.isFinite, abs(newEnd - end) >= 0.5 { end = newEnd.rounded(.down) }
     let current = player.currentTime().seconds
-    if let target = seekingTo {
+    if let target = seekingTo ?? pendingSeek, target.isFinite {
       position = target
-    } else if current.isFinite {
+    } else if current.isFinite, seekingTo == nil, pendingSeek == nil {
       position = current
     }
-    if seekingTo == nil, let date = item.currentDate(), date != currentDate { currentDate = date }
-    let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate || seekingTo != nil
+    // Still recording, and playing near the end of what was recorded when this snapshot was made:
+    // a fresh one, where it is (with what's been recorded since).
+    if growing, seekingTo == nil, pendingSeek == nil, end > 0, position > end - Self.snapshotAhead,
+      player.timeControlStatus != .paused, Date().timeIntervalSince(lastSnapshot) > Self.snapshotEvery
+    {
+      refreshSnapshot(at: position)
+    }
+    if seekingTo == nil, pendingSeek == nil, let date = item.currentDate(), date != currentDate { currentDate = date }
+    let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate || seekingTo != nil || pendingSeek != nil
     if waiting != buffering { buffering = waiting }
-    let paused = player.timeControlStatus == .paused && seekingTo == nil
+    // Stuck: waiting with more recorded ahead (or for long at the newest part, where new video
+    // should turn up every couple of seconds).
+    if player.timeControlStatus == .waitingToPlayAtSpecifiedRate, seekingTo == nil, pendingSeek == nil {
+      let since = stalledSince ?? Date()
+      stalledSince = since
+      let stuck = Date().timeIntervalSince(since)
+      if (end - position > 8 && stuck > 8) || stuck > 25 { recover("it waited \(Int(stuck)) s for video") }
+    } else {
+      stalledSince = nil
+    }
+    let paused = player.timeControlStatus == .paused && seekingTo == nil && pendingSeek == nil
     if paused != isPaused { isPaused = paused }
     if Date().timeIntervalSince(lastSaved) > 5, current.isFinite, current > 0 {
       lastSaved = Date()
@@ -979,8 +1109,39 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
 
   func skip(by seconds: Double) { seek(to: position + seconds) }
 
-  /// The newest part recorded (a few seconds back, so it doesn't run straight into the end).
-  func jumpToNewest() { seek(to: max(0, end - 4)) }
+  /// The newest part recorded (a little back, so it doesn't run straight into the end). Still
+  /// recording: a fresh snapshot first, with everything recorded up to now.
+  func jumpToNewest() {
+    if growing, let url {
+      lastSnapshot = Date()
+      load(url, at: .infinity)
+      return
+    }
+    seek(to: max(0, end - 8))
+  }
+
+  /// Still being recorded: played as what's been recorded so far (see RecordingJoin.snapshot),
+  /// reloaded as it nears the end.
+  private(set) var growing = false
+  private var lastSnapshot = Date()
+  /// How close to the end of a snapshot a fresh one is asked for, and how often at most.
+  static let snapshotAhead: Double = 15
+  static let snapshotEvery: TimeInterval = 10
+
+  /// The recording stopped (or started) while it's being watched. Stopped: one last snapshot, so
+  /// the end of it is in.
+  func setGrowing(_ value: Bool) {
+    let was = growing
+    growing = value
+    if was, !value { refreshSnapshot(at: position) }
+  }
+
+  /// A fresh snapshot of the recording, at `seconds`.
+  func refreshSnapshot(at seconds: Double) {
+    guard let url, pendingSeek == nil else { return }
+    lastSnapshot = Date()
+    load(url, at: max(0, seconds))
+  }
 
   func togglePause() {
     if isPaused {
@@ -1033,10 +1194,11 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
     let seconds = player.currentTime().seconds
     if seconds.isFinite, seconds > 0 { UserDefaults.standard.set(seconds, forKey: Self.positionKey(id)) }
     pip?.stopPictureInPicture()
+    url = nil
     player.pause()
     player.replaceCurrentItem(with: nil)
-    if let timeObserver { player.removeTimeObserver(timeObserver) }
-    timeObserver = nil
+    ticker?.invalidate()
+    ticker = nil
     statusObservation = nil
     pipObservation = nil
     tokens.forEach(NotificationCenter.default.removeObserver)

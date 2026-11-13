@@ -11,7 +11,8 @@ BUILD_NUMBER="${BUILD_NUMBER:-$(date +%Y%m%d%H%M)}"
 MIN_TVOS=17.0
 OUT=build-tv
 BUNDLE="$OUT/Payload/$APP.app"
-SOURCES=(Sources/Core/*.swift Sources/Twitch/*.swift Sources/Player/*.swift Sources/TV/*.swift)
+# (The iPhone app's image pipeline too: chat's emotes, moving ones included.)
+SOURCES=(Sources/Core/*.swift Sources/Twitch/*.swift Sources/Player/*.swift Sources/TV/*.swift Sources/App/Images.swift)
 
 xcrun --sdk appletvos --show-sdk-path >/dev/null 2>&1 || { echo "Xcode with the tvOS SDK is needed (macOS)" >&2; exit 1; }
 SDK="$(xcrun --sdk appletvos --show-sdk-path)"

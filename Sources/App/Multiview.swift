@@ -405,7 +405,7 @@ struct MultiviewPresenter: View {
 
 struct MultiviewScreen: View {
   @ObservedObject var model: MultiviewModel
-  @StateObject private var keyboard = KeyboardObserver()
+  @ObservedObject private var keyboard = KeyboardObserver.shared
   @EnvironmentObject private var app: AppModel
   @Environment(\.displayScale) private var displayScale
   @AppStorage("multiview.chat") private var chatShown = true

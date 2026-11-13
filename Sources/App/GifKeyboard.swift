@@ -2,6 +2,11 @@
 // with the key and content rating Twitch hands out for the channel, sent through Twitch's own
 // sendGifMessage. Twitch only takes GIFs found that way, at that rating, sent with the address
 // GIPHY gave (it carries the search's key): others are turned away, so none are offered.
+//
+// Even so, Twitch turns some away with a bare "ERROR" (no reason given), and which can't be told
+// beforehand: so each channel remembers (GifMemory) the GIFs that went through there, offered first
+// as sure to send, and hides the ones Twitch turned away there. What Twitch said, and the GIF's
+// size, rating and place in the results, go in the Activity log, to learn what it objects to.
 
 import SwiftUI
 
@@ -19,6 +24,42 @@ final class GifKeyboardModel: ObservableObject {
     let preview: URL
     let aspect: CGFloat
     let title: String
+    /// What it was found with (Twitch is sent the same).
+    var term: String = ""
+    /// For the Activity log: the original's size and dimensions, its rating, where it was in the
+    /// results.
+    var bytes: Int? = nil
+    var width: Int? = nil
+    var height: Int? = nil
+    var rating: String? = nil
+    var position: Int? = nil
+
+    var details: String {
+      var parts: [String] = []
+      if let bytes { parts.append(String(format: "%.1f MB", Double(bytes) / 1_000_000)) }
+      if let width, let height { parts.append("\(width)x\(height)") }
+      if let rating { parts.append("rated \(rating)") }
+      if let position { parts.append("#\(position + 1) in " + (term.isEmpty ? "trending" : "\"\(term)\"")) }
+      return parts.isEmpty ? "sent here before" : parts.joined(separator: ", ")
+    }
+
+    var remembered: GifMemory.Sent {
+      GifMemory.Sent(id: id, url: url, preview: preview.absoluteString, aspect: Double(aspect), title: title, term: term)
+    }
+
+    init(id: String, url: String, preview: URL, aspect: CGFloat, title: String) {
+      self.id = id
+      self.url = url
+      self.preview = preview
+      self.aspect = aspect
+      self.title = title
+    }
+
+    init?(_ sent: GifMemory.Sent) {
+      guard let preview = URL(string: sent.preview) else { return nil }
+      self.init(id: sent.id, url: sent.url, preview: preview, aspect: CGFloat(sent.aspect), title: sent.title)
+      term = sent.term
+    }
   }
 
   enum Availability: Equatable {
@@ -27,6 +68,14 @@ final class GifKeyboardModel: ObservableObject {
 
   @Published private(set) var availability: Availability = .unknown
   @Published private(set) var gifs: [Gif] = []
+  /// GIFs that went through in this channel, newest first: sure to send.
+  @Published private(set) var sentHere: [Gif] = []
+  private static let memoryKey = "kestrel.gifMemory"
+  private var memory: GifMemory = {
+    guard let data = UserDefaults.standard.data(forKey: memoryKey), let saved = try? JSONDecoder().decode(GifMemory.self, from: data)
+    else { return GifMemory() }
+    return saved
+  }()
   @Published private(set) var loading = false
   @Published var query = ""
   @Published private(set) var notice: String?
@@ -35,6 +84,8 @@ final class GifKeyboardModel: ObservableObject {
   private var config: TwitchAPI.GifPickerConfig?
   private var channelID = ""
   private var total = Int.max
+  /// GIPHY's offset for the next page (past what was hidden, not just what's shown).
+  private var nextOffset = 0
   private var searchTask: Task<Void, Never>?
   private var generation = 0
   private var waitTimer: Timer?
@@ -43,6 +94,7 @@ final class GifKeyboardModel: ObservableObject {
   func prepare(channelID: String) {
     guard channelID != self.channelID || availability == .unknown else { return }
     self.channelID = channelID
+    sentHere = memory.sentHere(channelID).compactMap(Gif.init)
     guard TwitchAuth.shared.session != nil else {
       availability = .signedOut
       return
@@ -75,6 +127,8 @@ final class GifKeyboardModel: ObservableObject {
     generation += 1
     gifs = []
     total = .max
+    nextOffset = 0
+    hiddenPages = 0
     let generation = self.generation
     searchTask = Task {
       if debounce { try? await Task.sleep(nanoseconds: 350_000_000) }
@@ -89,7 +143,7 @@ final class GifKeyboardModel: ObservableObject {
   }
 
   private func loadMore() async {
-    guard let config, !loading, gifs.count < total else { return }
+    guard let config, !loading, nextOffset < total else { return }
     loading = true
     defer { loading = false }
     let generation = self.generation
@@ -99,7 +153,7 @@ final class GifKeyboardModel: ObservableObject {
       URLQueryItem(name: "api_key", value: config.apiKey),
       URLQueryItem(name: "rating", value: config.giphyRating),
       URLQueryItem(name: "limit", value: "24"),
-      URLQueryItem(name: "offset", value: String(gifs.count)),
+      URLQueryItem(name: "offset", value: String(nextOffset)),
     ]
     if !term.isEmpty { items.append(URLQueryItem(name: "q", value: term)) }
     components.queryItems = items
@@ -112,9 +166,17 @@ final class GifKeyboardModel: ObservableObject {
     guard generation == self.generation else { return }
     let json = JSONValue(object)
     total = json["pagination"]["total_count"].int ?? 0
+    let shownBefore = gifs.count
     var seen = Set(gifs.map(\.id))
+    // (Those already under Sent here before aren't shown twice with no search.)
+    if term.isEmpty { seen.formUnion(sentHere.map(\.id)) }
+    var position = json["pagination"]["offset"].int ?? nextOffset
+    nextOffset = position + max(1, json["data"].array.count)
     for item in json["data"].array {
+      defer { position += 1 }
       guard let id = item["id"].string, seen.insert(id).inserted else { continue }
+      // Turned away in this channel before: not offered again.
+      guard !memory.isRefused(id, channel: channelID) else { continue }
       let images = item["images"]
       // Twitch wants the original's address exactly as the search gave it.
       guard let original = images["original"]["url"].string, !original.isEmpty else { continue }
@@ -122,18 +184,35 @@ final class GifKeyboardModel: ObservableObject {
       guard let preview = URL(string: small) else { continue }
       let width = Double(images["fixed_width"]["width"].string ?? "") ?? 200
       let height = Double(images["fixed_width"]["height"].string ?? "") ?? 150
-      gifs.append(
-        Gif(id: id, url: original, preview: preview, aspect: CGFloat(width / max(1, height)), title: item["title"].string ?? "GIF"))
+      var gif = Gif(id: id, url: original, preview: preview, aspect: CGFloat(width / max(1, height)), title: item["title"].string ?? "GIF")
+      gif.term = term
+      gif.bytes = images["original"]["size"].string.flatMap(Int.init)
+      gif.width = images["original"]["width"].string.flatMap(Int.init)
+      gif.height = images["original"]["height"].string.flatMap(Int.init)
+      gif.rating = item["rating"].string
+      gif.position = position
+      gifs.append(gif)
     }
+    // A page that was all hidden shows nothing new to scroll to (which asks for the next): the
+    // next page is asked for straight away, a few at most.
+    if gifs.count == shownBefore, nextOffset < total, hiddenPages < 3 {
+      hiddenPages += 1
+      Task { [weak self] in await self?.loadMore() }
+      return
+    }
+    hiddenPages = 0
     notice = gifs.isEmpty ? (term.isEmpty ? "No GIFs right now." : "No GIFs found. Try another search.") : nil
   }
+
+  private var hiddenPages = 0
 
   /// Sends it to chat; it shows up there as everyone sees it.
   func send(_ gif: Gif, done: @escaping () -> Void) {
     guard !sending, waitSeconds == 0, !channelID.isEmpty else { return }
     sending = true
     let channelID = self.channelID
-    let term = query
+    // The search it was found with (a GIF from Sent here before: the one it was found with then).
+    let term = gif.term
     Task {
       defer { sending = false }
       do {
@@ -155,17 +234,24 @@ final class GifKeyboardModel: ObservableObject {
         }
         if result.secondsUntilCanSend > 0 { startWait(result.secondsUntilCanSend) }
         if result.sent {
-          ActivityLog.shared.add("Sent a GIF to chat")
+          ActivityLog.shared.add("Sent a GIF to chat (\(gif.details))")
+          remember(sent: gif, channel: channelID)
           notice = nil
           // Twitch allows one every 30 seconds.
           if waitSeconds == 0 { startWait(30) }
           done()
           return
         }
-        ActivityLog.shared.add("GIF not sent: \(result.error ?? "no error, no message") (wait \(result.secondsUntilCanSend) s)")
+        ActivityLog.shared.add(
+          "GIF not sent: \(result.error ?? "no error, no message") (wait \(result.secondsUntilCanSend) s) for \"\(gif.title)\" (\(gif.details)); Twitch said: \(result.raw)")
         switch result.error {
         case "TEMPORARILY_UNAVAILABLE": notice = "GIFs are unavailable right now. Try again later."
-        case .some(let error): notice = "Twitch didn't take that GIF (\(error.lowercased().replacingOccurrences(of: "_", with: " ")))."
+        case .some(let error):
+          // Twitch gives no reason; this one isn't offered here again.
+          remember(refused: gif, channel: channelID)
+          let reason = error == "ERROR" ? "" : " (\(error.lowercased().replacingOccurrences(of: "_", with: " ")))"
+          notice = "Twitch didn't take that GIF here\(reason), so it's hidden now."
+            + (sentHere.isEmpty ? "" : " The ones under Sent here before are sure to go through.")
         case .none: notice = result.secondsUntilCanSend > 0 ? "Wait a moment before the next GIF." : "Couldn't tell whether it was sent: check chat."
         }
       } catch {
@@ -173,6 +259,23 @@ final class GifKeyboardModel: ObservableObject {
         ActivityLog.shared.add("GIF not sent: \(error.localizedDescription)")
       }
     }
+  }
+
+  private func remember(sent gif: Gif, channel: String) {
+    memory.noteSent(gif.remembered, channel: channel)
+    saveMemory()
+    if channel == channelID { sentHere = memory.sentHere(channel).compactMap(Gif.init) }
+  }
+
+  private func remember(refused gif: Gif, channel: String) {
+    memory.noteRefused(gif.id, channel: channel)
+    saveMemory()
+    guard channel == channelID, memory.isRefused(gif.id, channel: channel) else { return }
+    gifs.removeAll { $0.id == gif.id }
+  }
+
+  private func saveMemory() {
+    if let data = try? JSONEncoder().encode(memory) { UserDefaults.standard.set(data, forKey: Self.memoryKey) }
   }
 
   private func startWait(_ seconds: Int) {
@@ -221,24 +324,18 @@ struct GifKeyboard: View {
           Text(notice).font(.caption).foregroundColor(.secondary).multilineTextAlignment(.center).padding(.horizontal, 12)
         }
         ScrollView {
-          LazyVGrid(columns: columns, spacing: 4) {
-            ForEach(model.gifs) { gif in
-              Button {
-                model.send(gif, done: sent)
-              } label: {
-                CachedImage(url: gif.preview, maxPixels: 300, contentMode: .scaleAspectFill, placeholder: nil)
-                  .frame(maxWidth: .infinity)
-                  .frame(height: 86)
-                  .background(Color.white.opacity(0.06))
-                  .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                  .contentShape(Rectangle())
-              }
-              .buttonStyle(PressableStyle(scale: 0.92))
-              .disabled(model.sending || model.waitSeconds > 0)
-              .opacity(model.waitSeconds > 0 ? 0.5 : 1)
-              .accessibilityLabel(gif.title)
-              .onAppear { model.loadMoreIfNeeded(gif) }
+          // With no search: the ones that went through in this channel first (sure to send).
+          let searching = !model.query.trimmingCharacters(in: .whitespaces).isEmpty
+          if !searching, !model.sentHere.isEmpty {
+            sectionTitle("Sent here before")
+            LazyVGrid(columns: columns, spacing: 4) {
+              ForEach(model.sentHere) { gif in cell(gif, loadsMore: false) }
             }
+            .padding(.horizontal, 8)
+            sectionTitle("Trending")
+          }
+          LazyVGrid(columns: columns, spacing: 4) {
+            ForEach(model.gifs) { gif in cell(gif, loadsMore: true) }
           }
           .padding(.horizontal, 8)
           if model.loading { ProgressView().padding(8) }
@@ -257,6 +354,30 @@ struct GifKeyboard: View {
         message("Couldn't check GIFs here: \(error)")
       }
     }
+  }
+
+  private func cell(_ gif: GifKeyboardModel.Gif, loadsMore: Bool) -> some View {
+    Button {
+      model.send(gif, done: sent)
+    } label: {
+      CachedImage(url: gif.preview, maxPixels: 300, contentMode: .scaleAspectFill, placeholder: nil)
+        .frame(maxWidth: .infinity)
+        .frame(height: 86)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(PressableStyle(scale: 0.92))
+    .disabled(model.sending || model.waitSeconds > 0)
+    .opacity(model.waitSeconds > 0 ? 0.5 : 1)
+    .accessibilityLabel(gif.title)
+    .onAppear { if loadsMore { model.loadMoreIfNeeded(gif) } }
+  }
+
+  private func sectionTitle(_ text: String) -> some View {
+    Text(text).font(.caption.weight(.semibold)).foregroundColor(.secondary)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.horizontal, 12).padding(.top, 6)
   }
 
   private func message(_ text: String) -> some View {

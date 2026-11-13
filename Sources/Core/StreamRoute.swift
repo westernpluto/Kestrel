@@ -27,6 +27,19 @@ enum StreamRoute: Equatable, Sendable {
     case .twitch: return "Kestrel filter"
     }
   }
+
+  /// Where the video actually comes from, for the stats (the ad-blocking setting alone read
+  /// "ad-free server" while the stream came straight from Twitch). `adFreeForAdsOnly`: an ad-free
+  /// server's copy stands in only while Twitch stitches in an ad.
+  func source(adFreeForAdsOnly: Bool) -> String {
+    switch self {
+    case .twitchAdFree(let reason): return "straight from Twitch, no ads (\(reason))"
+    case .adFreeServer(let host): return "ad-free server \(host)"
+    case .twitch:
+      return adFreeForAdsOnly
+        ? "straight from Twitch (an ad-free server's copy only during an ad)" : "straight from Twitch (Kestrel's ad filter)"
+    }
+  }
 }
 
 extension PlaybackToken {

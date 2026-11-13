@@ -449,6 +449,36 @@ enum SegmentDemuxer {
 
   static func isTransportStream(_ first: Data) -> Bool { first.first == 0x47 }
 
+  /// MPEG-TS: how far a segment's picture and sound reach so far, and where they start (see
+  /// TSDemuxer.reach); nil for fragmented MP4.
+  var transportReach: (video: Int64?, audioEnd: Int64?)? {
+    if case .ts(let demuxer) = self { return demuxer.reach() }
+    return nil
+  }
+
+  var transportStart: (video: Int64?, audio: Int64?)? {
+    if case .ts(let demuxer) = self { return demuxer.start() }
+    return nil
+  }
+
+  /// Whether a segment that reaches `end` runs right up to one that starts at `next`: the picture
+  /// to within a couple of frames (`frame`, 90 kHz), the sound to within one of its frames (about
+  /// 2,100 ticks). Nil when it can't be told (a stream missing on either side).
+  static func joins(
+    end: (video: Int64?, audioEnd: Int64?), next: (video: Int64?, audio: Int64?), frame: Int64
+  ) -> Bool? {
+    var verdicts: [Bool] = []
+    if let last = end.video, let first = next.video {
+      let gap = first - last
+      verdicts.append(gap >= -frame && gap <= 2 * frame)
+    }
+    if let last = end.audioEnd, let first = next.audio {
+      let gap = first - last
+      verdicts.append(abs(gap) <= 2100)
+    }
+    return verdicts.isEmpty ? nil : verdicts.allSatisfy { $0 }
+  }
+
   mutating func feed(_ data: Data) -> [DemuxedFrame] {
     switch self {
     case .ts(var demuxer):

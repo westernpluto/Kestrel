@@ -192,6 +192,7 @@ final class KestrelEngine: NSObject {
   private var lastHeardMoved = Date()
   private(set) var lateAudio = 0
   private(set) var audioGaps = 0
+  private var lastAudioGapNoted = Date.distantPast
   private(set) var largestAudioGap = 0.0
   private(set) var audioOverlaps = 0
   private var inAudioOverlap = false
@@ -299,6 +300,16 @@ final class KestrelEngine: NSObject {
     handoffWaits.filter { Date().timeIntervalSince($0.at) < 60 }.map(\.wait).max() ?? 0
   }
 
+  /// The main thread held up (this player's network, unpacking and timing all run on it): ticks
+  /// due every quarter second that came late, and by how much.
+  private var holdUps: [(at: Date, length: Double)] = []
+  var longestHoldUp: Double {
+    holdUps.filter { Date().timeIntervalSince($0.at) < 60 }.map(\.length).max() ?? 0
+  }
+  private var lastTick = Date()
+  /// When the app last went to or came back from the background (Picture in Picture included).
+  private var lifecycleChangedAt = Date.distantPast
+
   static let clock: Int32 = 90_000
   /// The fastest it plays (the sound pitch-corrected).
   static let maxRate: Float = 1.2
@@ -328,6 +339,7 @@ final class KestrelEngine: NSObject {
         MainActor.assumeIsolated {
           self?.inBackground = true
           self?.lastScreenChange = Date()
+          self?.lifecycleChangedAt = Date()
         }
       })
     lifecycleTokens.append(
@@ -440,14 +452,17 @@ final class KestrelEngine: NSObject {
   }
 
   /// Another rendition: from the next segment on (Twitch's renditions share their timeline).
-  /// Picked by hand, it stays (no stepping down).
-  func setRendition(_ index: Int, byHand: Bool = true) {
+  /// Picked by hand, it stays (no stepping down). `forSize`: lower because the picture is small
+  /// (the mini player, a multi-view tile), not because the connection couldn't carry it: what the
+  /// stream taught about its hiccups is kept. (Forgotten, every trip to the mini player and back
+  /// put the margin back to the least, and the switch back up then stalled.)
+  func setRendition(_ index: Int, byHand: Bool = true, forSize: Bool = false) {
     if byHand { autoQuality = false }
     guard index != rendition else { return }
     // (Best first: further along the list is lower.)
     let lowered = (renditions.firstIndex(of: index) ?? 0) > (renditions.firstIndex(of: rendition) ?? 0)
     rendition = index
-    catchUp.qualityChanged(lowered: lowered)
+    catchUp.qualityChanged(lowered: lowered && !forSize)
   }
 
   /// The best Auto may play, as a place in `renditions` (multi-view: no sharper than the picture
@@ -486,6 +501,16 @@ final class KestrelEngine: NSObject {
       jumpAfterAdUntil = Date().addingTimeInterval(10)
     }
   }
+
+  /// The video now comes from elsewhere (an ad-free copy standing in during an ad, or back from
+  /// it): for a few seconds, a stall isn't the connection's (no lower quality, no bigger margin).
+  func sourceChanged() {
+    sourceChangedAt = Date()
+    catchUp.quiet(for: Self.sourceChangeGrace)
+  }
+
+  private var sourceChangedAt = Date.distantPast
+  static let sourceChangeGrace: TimeInterval = 10
 
   /// The least to keep in hand on this connection (cellular: more, see NetworkWatch).
   func setMarginFloor(_ value: Double) {
@@ -852,27 +877,35 @@ final class KestrelEngine: NSObject {
     ActivityLog.shared.add("Kestrel player: starting from the segment being made (it already had enough video)")
   }
 
-  /// The front segment, the one that was being made, has gone quiet for a moment and the next one's
-  /// frames are coming in (so nothing more of this one is on its way: the server keeps its
-  /// connection open a while after the last bytes).
-  /// Only that one: a finished segment downloading slowly (a weak connection, sharing it with the
-  /// next) goes quiet too, with more to come. Going on then cut it off part-way, the last frame
-  /// half in, and the picture smeared into blocks.
+  /// The front segment is complete and the next one's frames are coming in. For MPEG-TS that's
+  /// told from the frames themselves: its picture and sound run right up to where the next one's
+  /// begin (handed over at once). Handed over after a quarter of a second's quiet alone, the end
+  /// of a segment still on its way over a slow or bursty route was dropped when it came: a skip of
+  /// 60 to 100 ms in the sound (three to five of its frames) and in the picture, every minute or
+  /// two. Not joining up, it's given longer for the rest to come in.
+  /// Only the segment being made: a finished one downloading slowly (a weak connection, sharing it
+  /// with the next) goes quiet too, with more to come, and going on then cut it off part-way, the
+  /// last frame half in: the picture smeared into blocks.
   private func readyToHandOver(_ first: SegmentLoad, to next: SegmentLoad) -> Bool {
-    guard first.planned.live, first.demuxer != nil, first.received > 0, let quiet = first.lastArrival, !next.frames.isEmpty
-    else { return false }
-    let quietFor = Date().timeIntervalSince(quiet)
-    guard quietFor > 0.25 else { return false }
-    // Its sound must be all in too: it ends where the next segment's begins. The last packet of
-    // sound can come a moment after the last picture, and going on without it was a skip in the
-    // sound at the seam. (A second of nothing: on without it.)
-    if !next.planned.discontinuity, let end = first.audioEnd, let nextStart = next.firstAudio,
-      nextStart - end > 900, nextStart - end < 90_000, quietFor < 1
-    {
-      return false
-    }
-    return true
+    guard first.planned.live, let demuxer = first.demuxer, first.received > 0, let quiet = first.lastArrival, !next.frames.isEmpty else { return false }
+    let idle = Date().timeIntervalSince(quiet)
+    // (A jump in the timeline between them, e.g. to an ad-free copy: they can't join up.)
+    guard !next.planned.discontinuity, let reach = demuxer.transportReach, let start = next.demuxer?.transportStart,
+      let joined = SegmentDemuxer.joins(end: reach, next: start, frame: frameLength)
+    else { return idle > 0.25 }
+    if joined { return idle > 0.05 }
+    // Not joining up: waited for while there's plenty in hand, never into a stall. (The next
+    // segment's frames don't count toward what's in hand until it's handed over: waiting the full
+    // 0.8 s with about a second in hand ran it dry.) A small skip beats a stall.
+    let inHand = clockRunning ? (bufferAhead ?? 0) : 0
+    return idle > Self.handOverWait || (idle > 0.25 && inHand < Self.handOverReserve)
   }
+
+  /// The longest a segment that doesn't yet join up with the next one is waited for (its end may
+  /// never come: a dropped connection, a gap in the stream itself), and the least kept in hand
+  /// while waiting.
+  static let handOverWait: TimeInterval = 0.8
+  static let handOverReserve: Double = 0.5
 
   private func enqueue(_ frame: DemuxedFrame, from load: SegmentLoad) {
     if !load.timed {
@@ -962,19 +995,21 @@ final class KestrelEngine: NSObject {
       }
       payload = frame.data
     case .h264:
-      if frame.isKeyframe, let sets = H264.parameterSets(units) {
-        let key = sets.sps + sets.pps
+      // Every parameter set the keyframe carries, not just the first of each (see
+      // H264.parameterSetList).
+      if frame.isKeyframe, let sets = H264.parameterSetList(units) {
+        let key = sets.reduce(Data(), +)
         if key != parameterSets || videoFormat == nil {
-          videoFormat = Self.h264Format(sps: sets.sps, pps: sets.pps)
+          videoFormat = Self.h264Format(sets: sets)
           parameterSets = key
         }
       }
       payload = H264.sample(units)
     case .hevc:
-      if frame.isKeyframe, let sets = HEVC.parameterSets(units) {
-        let key = sets.vps + sets.sps + sets.pps
+      if frame.isKeyframe, let sets = HEVC.parameterSetList(units) {
+        let key = sets.reduce(Data(), +)
         if key != parameterSets || videoFormat == nil {
-          videoFormat = Self.hevcFormat(vps: sets.vps, sps: sets.sps, pps: sets.pps)
+          videoFormat = Self.hevcFormat(sets: sets)
           parameterSets = key
         }
       }
@@ -1181,6 +1216,7 @@ final class KestrelEngine: NSObject {
   private func enteringForeground() {
     screenNote("app back")
     inBackground = false
+    lifecycleChangedAt = Date()
     // Decoding comes back with the app being active: catching up before that only reset the screen.
     guard UIApplication.shared.applicationState == .active else { return }
     guard running, decodeInLayer, screenBehind || displayLayer.requiresFlushToResumeDecoding else { return }
@@ -1324,7 +1360,9 @@ final class KestrelEngine: NSObject {
       // What the stats show about the sound: arriving after its time, or not following on. Sound
       // past its time is left out (it would only push the sound behind the picture).
       if clockRunning, time + 1920 < now {
-        lateAudio += 1
+        // (Not while settling: the skip to the margin after a start passes over sound still coming
+        // in, unheard, which isn't a gap anyone hears.)
+        if !settling { lateAudio += 1 }
         lastAudioTime = time
         return
       }
@@ -1574,6 +1612,13 @@ final class KestrelEngine: NSObject {
 
   private func tick() {
     guard running else { return }
+    let tickedAt = Date()
+    let late = tickedAt.timeIntervalSince(lastTick) - 0.25
+    lastTick = tickedAt
+    if late > 0.3 {
+      holdUps.append((tickedAt, late))
+      if holdUps.count > 200 { holdUps.removeFirst(100) }
+    }
     retireOldLayer()
     // A segment whose frames are all in can hand over to the next before its download closes.
     pump()
@@ -1593,6 +1638,7 @@ final class KestrelEngine: NSObject {
       if let last = lastArrival { why.append(String(format: "nothing in for %.1f s", Date().timeIntervalSince(last))) }
       why.append(String(format: "margin %.1f s", catchUp.targetBuffer))
       setSpeed(0)
+      state = .stalled
       // A low-latency stream that's just now sending whole segments (Twitch leaves out the
       // segment being made around ad breaks, sometimes for a while after one ends): it ran dry
       // waiting for a whole segment, which no margin the connection needs would cover. Learned,
@@ -1602,22 +1648,29 @@ final class KestrelEngine: NSObject {
       // move held things up for a moment. Learned, one put 0.7 s on the margin (3.9 s behind).
       let screenMoved = Date().timeIntervalSince(lastScreenChange) < 5
       if screenMoved { why.append("just after Picture in Picture or switching apps") }
-      catchUp.stalled(learn: !twitchsDoing && !screenMoved)
-      if twitchsDoing || screenMoved { why.append("not learned") }
+      // Whether the main thread (where this player's network and unpacking run) was just held
+      // up, the app was going to or coming back from the background, or the video's source just
+      // changed (to or from an ad-free copy).
+      let sinceArrival = lastArrival.map { Date().timeIntervalSince($0) }
+      let heldUp = late > 0.3 ? late : 0
+      let atLifecycle = Date().timeIntervalSince(lifecycleChangedAt) < 4
+      let atSwitch = Date().timeIntervalSince(sourceChangedAt) < Self.sourceChangeGrace
+      if heldUp > 0 { why.append(String(format: "main thread held up %.2f s", heldUp)) }
+      if atLifecycle, !screenMoved { why.append(inBackground ? "app just went to the background" : "app just came back") }
+      if atSwitch { why.append("video just switched to or from an ad-free copy") }
+      // Not the connection's in any of those (the arrivals wait for the main thread too, so a
+      // hold-up's own length doesn't count): no lower quality, no bigger margin. Otherwise, twice
+      // in a few minutes: the connection can't carry this quality, one lower from the next segment.
+      let quietBefore = (sinceArrival ?? 0) - heldUp
+      let excused = twitchsDoing || screenMoved || atSwitch || ((heldUp > 0 || atLifecycle) && quietBefore < 1.0)
+      if excused { why.append("not learned") }
       ActivityLog.shared.add("Kestrel player: ran out of video (\(why.joined(separator: ", ")))")
-      state = .stalled
-      // Twice in a few minutes while the video kept arriving: the connection can't carry this
-      // quality; one lower from the next segment.
-      if autoQuality, !twitchsDoing, !screenMoved, fit.stalled(), fit.step < renditions.count {
+      catchUp.stalled(learn: !excused)
+      if !excused, autoQuality, fit.stalled(), fit.step < renditions.count {
         applyFit()
         ActivityLog.shared.add("Kestrel player: stalling at this quality; one lower for now (trying again in a few minutes)")
       }
       return
-    }
-    // (Never past the cap: at it, there's nothing better to try.)
-    if autoQuality, fit.step > (capPosition ?? 0), fit.tick(), fit.step < renditions.count {
-      applyFit()
-      ActivityLog.shared.add("Kestrel player: trying the better quality again")
     }
     if let since = stalledSince {
       // (Whole segments: enough to last until the next one is listed, or it runs dry again.)
@@ -1671,7 +1724,70 @@ final class KestrelEngine: NSObject {
       buffer: steering, latency: steering + Self.deliveryDelay, playing: true, position: Double(now) / Double(Self.clock),
       maxRate: Self.maxRate)
     if speed != rate { setSpeed(rate) }
+    // A better quality again once the wait is over, but only from steady playback: not mid-stall,
+    // not while slowed down to rebuild the margin or catching up, not while coming in slowly
+    // (see LiveCatchUp.readyForBetterQuality). Otherwise it waits.
+    // (Never past the cap: at it, there's nothing better to try.)
+    if autoQuality, fit.step > (capPosition ?? 0), !settling, slowSince == nil, catchUp.readyForBetterQuality, fit.tick(), fit.step < renditions.count {
+      applyFit()
+      ActivityLog.shared.add("Kestrel player: trying the better quality again")
+    }
+    watchPicture()
     syncClock()
+  }
+
+  // MARK: The picture's own watch
+
+  /// The picture on screen, and since when it's been that one.
+  private var shownPicture: CVPixelBuffer?
+  private var shownSince = Date()
+  private var videoFramesAtShown = 0
+  private var lastPictureRescue = Date.distantPast
+  private var pictureRescues = 0
+
+  /// Playing, frames going in, yet the picture on screen hasn't changed: the display layer is
+  /// showing keyframes only (it drops the frames between when it can't decode them in time, or at
+  /// all). Seen on a 1440p60 HEVC stream: the picture held for each two-second segment while the
+  /// sound played on. Each time it's seen, one step: the Picture in Picture copy stops decoding (if
+  /// it's going without a window), then decoding moves to VideoToolbox here (every frame decoded
+  /// in order, and any it can't read goes in the log), then (Auto) a quality lower.
+  private func watchPicture() {
+    guard #available(iOS 17.4, tvOS 17.4, *) else { return }
+    let now = Date()
+    guard clockRunning, speed > 0, stalledSince == nil, !settling, !inBackground,
+      UIApplication.shared.applicationState == .active, !screenHiddenForPictureInPicture, !displayLayer.isHidden,
+      retiringLayer == nil, now.timeIntervalSince(caughtUpAt) > 2,
+      let since = playingSince, now.timeIntervalSince(since) > 4
+    else {
+      shownPicture = nil
+      return
+    }
+    let current = displayLayer.sampleBufferRenderer.displayedPixelBuffer()
+    if current == nil || shownPicture == nil || current! !== shownPicture! {
+      shownPicture = current
+      shownSince = now
+      videoFramesAtShown = videoFramesQueued
+      return
+    }
+    // The same picture for most of a second while a second's worth of frames went in.
+    guard now.timeIntervalSince(shownSince) > 0.75, videoFramesQueued - videoFramesAtShown >= 20,
+      now.timeIntervalSince(lastPictureRescue) > 4
+    else { return }
+    lastPictureRescue = now
+    shownPicture = nil
+    pictureRescues += 1
+    if mirrorLayer != nil, mirrorFed, !windowUp {
+      feedMirror(false)
+      ActivityLog.shared.add("Kestrel player: the picture held while frames came in; stopped decoding the Picture in Picture copy")
+    } else if decodeInLayer {
+      setDecodeHere(true)
+      ActivityLog.shared.add("Kestrel player: the picture held while frames came in (keyframes only); decoding with VideoToolbox from the next keyframe")
+    } else if autoQuality, fit.tooSlow(), fit.step < renditions.count {
+      applyFit()
+      ActivityLog.shared.add("Kestrel player: the picture still held (decoded \(framesDecoded), shown \(framesShown), \(decodeErrors) errors); one quality lower")
+    } else {
+      ActivityLog.shared.add("Kestrel player: the picture still held (decoded \(framesDecoded), shown \(framesShown), \(decodeErrors) errors)")
+    }
   }
 
   // MARK: Sample buffers
@@ -1688,6 +1804,39 @@ final class KestrelEngine: NSObject {
       CMBlockBufferReplaceDataBytes(with: bytes.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: data.count)
     }
     return status == kCMBlockBufferNoErr ? block : nil
+  }
+
+  /// Several parameter sets' bytes where Core Media can read them (pointers and sizes).
+  private static func withParameterSets<T>(_ sets: [Data], _ body: ([UnsafePointer<UInt8>], [Int]) -> T) -> T {
+    let buffers = sets.map { set -> UnsafeMutablePointer<UInt8> in
+      let pointer = UnsafeMutablePointer<UInt8>.allocate(capacity: max(1, set.count))
+      set.copyBytes(to: pointer, count: set.count)
+      return pointer
+    }
+    defer { buffers.forEach { $0.deallocate() } }
+    return body(buffers.map { UnsafePointer($0) }, sets.map(\.count))
+  }
+
+  /// H.264 from all of its SPSs and PPSs.
+  static func h264Format(sets: [Data]) -> CMVideoFormatDescription? {
+    var format: CMVideoFormatDescription?
+    let status = withParameterSets(sets) { pointers, sizes in
+      CMVideoFormatDescriptionCreateFromH264ParameterSets(
+        allocator: kCFAllocatorDefault, parameterSetCount: sets.count, parameterSetPointers: pointers, parameterSetSizes: sizes,
+        nalUnitHeaderLength: 4, formatDescriptionOut: &format)
+    }
+    return status == noErr ? format : nil
+  }
+
+  /// HEVC from all of its VPSs, SPSs and PPSs.
+  static func hevcFormat(sets: [Data]) -> CMVideoFormatDescription? {
+    var format: CMVideoFormatDescription?
+    let status = withParameterSets(sets) { pointers, sizes in
+      CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+        allocator: kCFAllocatorDefault, parameterSetCount: sets.count, parameterSetPointers: pointers, parameterSetSizes: sizes,
+        nalUnitHeaderLength: 4, extensions: nil, formatDescriptionOut: &format)
+    }
+    return status == noErr ? format : nil
   }
 
   static func h264Format(sps: Data, pps: Data) -> CMVideoFormatDescription? {

@@ -41,14 +41,27 @@ enum RecordingJoin {
       first = false
       body += pieceBody
     }
+    // The same header while the last piece is recorded and after (see StreamRecorder.playlistText):
+    // a player watching it reloads it, and stalls if its target duration or type changes.
     var lines = [
-      "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:\(longest)",
-      "#EXT-X-PLAYLIST-TYPE:\(allEnded ? "VOD" : "EVENT")", "#EXT-X-MEDIA-SEQUENCE:0",
+      "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:\(max(StreamRecorder.stableTargetDuration, longest))",
+      "#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-START:TIME-OFFSET=0",
     ]
-    if !allEnded { lines.append("#EXT-X-START:TIME-OFFSET=0") }
     lines += body
     if allEnded { lines.append("#EXT-X-ENDLIST") }
     return lines.joined(separator: "\n") + "\n"
+  }
+
+  /// A recording still being made, as a finished video of what's been recorded so far: the same
+  /// playlist (its pieces joined, its files pointed at as above) with its end on and marked as a
+  /// finished video. Apple's player, given the growing playlist itself, kept loading for good; a
+  /// finished one (the same files, after Kestrel had been closed) played. The player asks for a
+  /// fresh one as it nears the end (see RecordingPlayback).
+  static func snapshot(_ pieces: [(id: String, text: String)]) -> String {
+    let ended = pieces.map { piece in
+      (id: piece.id, text: piece.text.contains("#EXT-X-ENDLIST") ? piece.text : piece.text + (piece.text.hasSuffix("\n") ? "" : "\n") + "#EXT-X-ENDLIST\n")
+    }
+    return playlist(ended).replacingOccurrences(of: "#EXT-X-PLAYLIST-TYPE:EVENT", with: "#EXT-X-PLAYLIST-TYPE:VOD")
   }
 
   private static func rewriteMap(_ line: String, id: String) -> String {

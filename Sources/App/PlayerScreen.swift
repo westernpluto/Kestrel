@@ -303,6 +303,11 @@ final class InterfaceOrientationObserver: ObservableObject {
 /// keyboard's own notifications. (A probe on UIKit's keyboard layout guide reported nonsense
 /// inside SwiftUI and threw the message box to the top of the screen.)
 final class KeyboardObserver: ObservableObject {
+  /// One for the whole app, listening from launch (see KestrelApp): each screen made its own when
+  /// it appeared, and a screen rebuilt while the keyboard came up (back from Picture in Picture,
+  /// say) never heard it come, so it laid the message box out under the keyboard.
+  static let shared = KeyboardObserver()
+
   @Published private(set) var overlap: CGFloat = 0
   /// The keyboard's height the last time it was up (the emote picker takes its place).
   private(set) static var lastHeight: CGFloat?
@@ -319,7 +324,8 @@ final class KeyboardObserver: ObservableObject {
     let center = NotificationCenter.default
     for name in [
       UIResponder.keyboardWillChangeFrameNotification, UIResponder.keyboardWillHideNotification,
-      UIResponder.keyboardDidChangeFrameNotification,
+      UIResponder.keyboardDidChangeFrameNotification, UIResponder.keyboardWillShowNotification,
+      UIResponder.keyboardDidShowNotification, UIResponder.keyboardDidHideNotification,
     ] {
       tokens.append(
         center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
@@ -341,7 +347,9 @@ final class KeyboardObserver: ObservableObject {
       frame = end
     }
     let bounds = window?.bounds ?? AppWindow.bounds
-    let hiding = note.name == UIResponder.keyboardWillHideNotification || end.isEmpty || frame.minY >= bounds.maxY - 1
+    let hiding =
+      note.name == UIResponder.keyboardWillHideNotification || note.name == UIResponder.keyboardDidHideNotification || end.isEmpty
+      || frame.minY >= bounds.maxY - 1
     // Never more than the keyboard can be (guards against a bogus frame).
     let value = hiding ? 0 : min(bounds.height * 0.62, max(0, bounds.maxY - frame.minY))
     if value > 40 { Self.lastHeight = value }
@@ -349,7 +357,9 @@ final class KeyboardObserver: ObservableObject {
     guard abs(value - overlap) > 0.5 else { return }
     // "Did" notifications only correct a missed "will"; a zero duration means the keyboard itself
     // isn't animating (moving with it is the point).
-    if note.name == UIResponder.keyboardDidChangeFrameNotification || duration <= 0.01 {
+    if note.name == UIResponder.keyboardDidChangeFrameNotification || note.name == UIResponder.keyboardDidShowNotification
+      || note.name == UIResponder.keyboardDidHideNotification || duration <= 0.01
+    {
       var transaction = Transaction()
       transaction.disablesAnimations = true
       withTransaction(transaction) { overlap = value }
@@ -1052,7 +1062,7 @@ struct PlayerScreen: View {
   private var model: PlayerModel { session.model }
   private var chat: ChatController { session.chat }
   private var raids: RaidWatcher { session.raids }
-  @StateObject private var keyboard = KeyboardObserver()
+  @ObservedObject private var keyboard = KeyboardObserver.shared
   @StateObject private var orientation = InterfaceOrientationObserver()
   @EnvironmentObject private var app: AppModel
   @AppStorage("landscapeChat") private var landscapeChat = true
@@ -1066,6 +1076,11 @@ struct PlayerScreen: View {
   @State private var resizedWidth: CGFloat? = nil
   /// 0 = full screen … 1 = mini player, while a finger is moving it.
   @State private var dragProgress: CGFloat? = nil
+  /// A pull starting this close to the top of the screen is the system's (Notification Center).
+  static let systemEdge: CGFloat = 40
+  /// The backdrop's pull is in progress (SwiftUI resets this when the touch ends or is taken away,
+  /// which `onEnded` doesn't hear about).
+  @GestureState private var backdropDragging = false
   /// The mini player following a finger (to throw it away).
   @State private var miniOffset: CGSize = .zero
   @State private var closing = false
@@ -1151,9 +1166,11 @@ struct PlayerScreen: View {
           // The black around the video (theater mode's bars) pulls the player down too.
           .gesture(
             DragGesture(minimumDistance: 14, coordinateSpace: .global)
+              .updating($backdropDragging) { _, dragging, _ in dragging = true }
               .onChanged { value in
                 let dx = value.translation.width, dy = value.translation.height
-                guard dragProgress != nil || (dy > 8 && dy > abs(dx) * 1.2) else { return }
+                // (From the very top edge it's the system's: Notification Center.)
+                guard dragProgress != nil || (dy > 8 && dy > abs(dx) * 1.2 && value.startLocation.y > Self.systemEdge) else { return }
                 if dragProgress == nil { dismissKeyboard() }
                 dragProgress = min(1, max(0, dy / pullDistance))
               }
@@ -1263,6 +1280,7 @@ struct PlayerScreen: View {
             if dragProgress == nil { dismissKeyboard() }
             dragProgress = min(1, max(0, dy / pullDistance))
           },
+          onPullCancel: { settleCancelledDrag() },
           onPullEnd: { dy, predicted in
             let finish = (dragProgress ?? 0) > 0.5 || predicted / pullDistance > 0.55
             if finish { Haptics.tap() }
@@ -1318,6 +1336,12 @@ struct PlayerScreen: View {
                 miniOffset = translation
               }
             },
+            onDragCancel: {
+              withAnimation(Self.spring) {
+                dragProgress = nil
+                miniOffset = .zero
+              }
+            },
             onDragEnd: { translation, predicted in
               if dragProgress != nil {
                 let expandIt = (dragProgress ?? 1) < 0.55 || predicted.height / pullDistance < -0.5
@@ -1357,6 +1381,20 @@ struct PlayerScreen: View {
     .preferredColorScheme(.dark)
     .animation(Self.spring, value: landscapeChat)
     .background(ChatFollower(model: model, chat: chat))
+    // A drag the system takes over (Notification Center or Control Center pulled down over the
+    // player) never ends: the player was left part-way to the mini player, glitching until it was
+    // dragged again. The app goes inactive as the system's sheet comes down: the player springs
+    // back to where it was.
+    .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+      guard dragProgress != nil else { return }
+      withAnimation(Self.spring) { dragProgress = nil }
+    }
+    // The system took the backdrop's touch away (Notification Center pulled, even part-way and
+    // back, with the app never going inactive): `onEnded` never comes, so the player was left
+    // part-way to the mini player. Back to where it was.
+    .onChange(of: backdropDragging) { dragging in
+      if !dragging { settleCancelledDrag() }
+    }
     .task {
       orientation.start()
       // (Opened straight into the mini player when following a raid from it.)
@@ -1410,6 +1448,15 @@ struct PlayerScreen: View {
       raids.stop()
       // (Multi-view taking over keeps the phone free to turn.)
       if app.multiview == nil || app.multiviewMinimized { OrientationLock.playerVisible(false) }
+    }
+  }
+
+  /// A drag the system took away (no `onEnded`): the player back to where it was, after this run
+  /// of the loop (a drag that ended normally has settled itself by then).
+  private func settleCancelledDrag() {
+    DispatchQueue.main.async {
+      guard dragProgress != nil else { return }
+      withAnimation(Self.spring) { dragProgress = nil }
     }
   }
 
@@ -1542,7 +1589,11 @@ struct MiniPlayerOverlay: View {
   var expand: () -> Void
   var close: () -> Void
   var onDrag: (CGSize) -> Void
+  /// The system took the touch away mid-drag: back to where it was.
+  var onDragCancel: () -> Void = {}
   var onDragEnd: (CGSize, CGSize) -> Void
+  @GestureState private var dragging = false
+  @State private var moving = false
 
   var body: some View {
     ZStack(alignment: .top) {
@@ -1553,9 +1604,26 @@ struct MiniPlayerOverlay: View {
           // Measured on the screen, not on the mini player (which moves with the finger: measuring
           // on it made it shake).
           DragGesture(minimumDistance: 6, coordinateSpace: .global)
-            .onChanged { onDrag($0.translation) }
-            .onEnded { onDragEnd($0.translation, $0.predictedEndTranslation) }
+            .updating($dragging) { _, state, _ in state = true }
+            .onChanged {
+              moving = true
+              onDrag($0.translation)
+            }
+            .onEnded {
+              moving = false
+              onDragEnd($0.translation, $0.predictedEndTranslation)
+            }
         )
+        .onChange(of: dragging) { now in
+          // (Ended normally, `onEnded` has run by the time this looks.)
+          guard !now else { return }
+          DispatchQueue.main.async {
+            if moving {
+              moving = false
+              onDragCancel()
+            }
+          }
+        }
       LinearGradient(colors: [.black.opacity(0.45), .clear], startPoint: .top, endPoint: .center)
         .allowsHitTesting(false)
       HStack {

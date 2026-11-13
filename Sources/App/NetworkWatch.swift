@@ -62,8 +62,9 @@ final class NetworkWatch: @unchecked Sendable {
   var floor: Double {
     lock.lock()
     defer { lock.unlock() }
-    if current.constrained { return 1.2 }
-    return current.kind == .cellular ? 0.9 : LiveCatchUp.minBuffer
+    // (Each 0.4 s more than it was, as on Wi-Fi: see LiveCatchUp's top.)
+    if current.constrained { return 1.6 }
+    return current.kind == .cellular ? 1.3 : LiveCatchUp.standardFloor
   }
 
   /// A short name for remembering what each channel needed on this kind of connection.

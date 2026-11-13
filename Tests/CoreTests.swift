@@ -358,7 +358,10 @@ func testCatchUpHoldsOneSpeed() {
   let changes = zip(rates, rates.dropFirst()).filter { $0 != $1 }.count
   check(changes <= 2 && Set(rates).isSubset(of: [1, LiveCatchUp.rates.gentle, LiveCatchUp.startRate, LiveCatchUp.rates.fast]),
     "one catch-up, one speed: \(changes) changes, speeds \(Set(rates).sorted())")
-  check(buffer < 1.3, "caught up: \(buffer) s in hand")
+  check(buffer < catchUp.targetBuffer + 0.3, "caught up: \(buffer) s in hand")
+  // And not past the margin: the average it steers by trails what's in hand while it drains, and
+  // ending on the average alone left 0.3 s less than the margin, right after a start.
+  check(buffer >= catchUp.targetBuffer - 0.12, "not under the margin: \(buffer) s in hand, margin \(catchUp.targetBuffer)")
 }
 
 func testAV1Init() {
@@ -893,7 +896,9 @@ func testLowLatencySession() {
     fake.advance(4)  // the announced break reaches the live edge
     let announced = await session.mediaPlaylist(0)
     check(!announced.body.contains("DATERANGE:ID=\"stitched"), "ad marker removed")
-    check(announced.body.contains("TWITCH-PREFETCH"), "prefetch kept while an ad is announced (held back, the player stalled every break)")
+    // (The Apple player's way, where an ad could be stitched in; Kestrel's player keeps it, see
+    // lowLatencyThroughAds below.)
+    check(!announced.body.contains("TWITCH-PREFETCH"), "prefetch held back while an ad is announced")
     check(announced.body.contains("#EXTINF:2.000,live") && announced.body.contains("https://edge.test/"), "segments kept")
     check(box.last?.state == .skipped, "client-side break shown as skipped: \(String(describing: box.last?.state))")
     let main = fake.mainToken!
@@ -1220,7 +1225,7 @@ func testLiveCatchUp() {
   check((rates.first ?? 9) <= LiveCatchUp.rates.medium, "gently")
   check(abs(buffer - catchUp.targetBuffer) < 0.3, "ends at the margin: \(buffer)")
   check(lowest >= catchUp.targetBuffer - 0.2, "without overshooting: \(lowest)")
-  check(catchUp.targetBuffer <= LiveCatchUp.minBuffer + 0.001, "spending the extra on purpose isn't a hiccup")
+  check(catchUp.targetBuffer <= LiveCatchUp.standardFloor + 0.001, "spending the extra on purpose isn't a hiccup")
   // Paused or buffering: normal speed. Close to live already: leave it.
   check(catchUp.update(buffer: 3, latency: 4, playing: false, now: t) == 1)
   check(catchUp.update(buffer: catchUp.targetBuffer + 0.3, latency: catchUp.targetBuffer + 0.3, playing: true, now: t + 0.5) == 1)
@@ -1334,15 +1339,16 @@ func testLiveCatchUp() {
   check(stall.update(buffer: 6, latency: 7, playing: true, maxRate: LiveCatchUp.rates.gentle, now: t0.addingTimeInterval(9.5)) == LiveCatchUp.rates.gentle)
   check(stall.update(buffer: 6, latency: 7, playing: true, maxRate: 1, now: t0.addingTimeInterval(10)) == 1)
 
-  // A given starting margin (what the channel needed last time), within bounds; none: the least.
+  // A given starting margin (what the channel needed last time), within bounds; none: the least
+  // (a second: see LiveCatchUp's top).
   check(LiveCatchUp(targetBuffer: 1.5).targetBuffer == 1.5)
   check(LiveCatchUp(targetBuffer: 9).targetBuffer == LiveCatchUp.maxBuffer)
-  check(LiveCatchUp(targetBuffer: 0.1).targetBuffer == LiveCatchUp.minBuffer)
-  check(LiveCatchUp().targetBuffer == LiveCatchUp.minBuffer)
+  check(LiveCatchUp(targetBuffer: 0.1).targetBuffer == LiveCatchUp.standardFloor)
+  check(LiveCatchUp().targetBuffer == LiveCatchUp.standardFloor && LiveCatchUp.standardFloor == 1.0)
   // On cellular: a little more kept from the start, and never less.
   var cellular = LiveCatchUp()
-  cellular.setFloor(0.9)
-  check(cellular.targetBuffer == 0.9 && cellular.neededBuffer() == 0.9)
+  cellular.setFloor(1.3)
+  check(cellular.targetBuffer == 1.3 && cellular.neededBuffer() == 1.3)
 
   // No hiccups for long enough: the margin comes back down within a minute or so (spending what's
   // in hand by playing faster, read from the playhead), never under the minimum.
@@ -1350,7 +1356,7 @@ func testLiveCatchUp() {
   var c = t0
   var inHand = 2.0
   var position = 0.0
-  while calm.targetBuffer > LiveCatchUp.minBuffer + 0.001, c < t0.addingTimeInterval(600) {
+  while calm.targetBuffer > LiveCatchUp.standardFloor + 0.001, c < t0.addingTimeInterval(600) {
     c += 0.5
     let rate = calm.update(buffer: inHand, latency: inHand + 1, playing: true, position: position, now: c)
     inHand -= Double(rate - 1) * 0.5
@@ -1459,9 +1465,16 @@ func testRecordingPlaylist() {
   let live = StreamRecorder.playlistText(entries: entries, ended: false)
   check(live.contains("#EXT-X-PLAYLIST-TYPE:EVENT") && !live.contains("ENDLIST"), live)
   check(live.contains("#EXTINF:2.000,\n000002.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:1.500,\n000003.ts"), live)
-  check(live.contains("#EXT-X-TARGETDURATION:2"), live)
+  check(live.contains("#EXT-X-TARGETDURATION:6"), live)
   let done = StreamRecorder.playlistText(entries: entries, ended: true)
-  check(done.contains("#EXT-X-PLAYLIST-TYPE:VOD") && done.hasSuffix("#EXT-X-ENDLIST\n"), done)
+  check(done.contains("#EXT-X-PLAYLIST-TYPE:EVENT") && done.hasSuffix("#EXT-X-ENDLIST\n"), done)
+  // Watched while it's made: each reload only adds segments (and the end), the header never
+  // changes (AVPlayer stalls when the target duration or type does).
+  let first = StreamRecorder.playlistText(entries: [("000001.ts", 2.0, false, nil)], ended: false)
+  let longer = StreamRecorder.playlistText(entries: entries + [("000004.ts", 3.4, false, nil)], ended: true)
+  let header = { (text: String) in text.split(separator: "\n").prefix { !$0.hasPrefix("#EXTINF") && !$0.hasPrefix("#EXT-X-PROGRAM") } }
+  check(header(first) == header(live) && header(live) == header(longer), "\(first)\n\(longer)")
+  check(longer.hasPrefix(live), "only appended:\n\(live)\n\(longer)")
   // Dated: the first stretch and the one after the jump carry when they were broadcast.
   let t0 = Date(timeIntervalSince1970: 1_761_800_000)
   let dated = StreamRecorder.playlistText(entries: entries, dates: [t0, t0 + 2, t0 + 30], ended: true)
@@ -1596,20 +1609,182 @@ func testQualityChangeNotLearned() {
   check(catchUp.targetBuffer < before + 0.05, "after the ad: margin as before (\(catchUp.targetBuffer))")
 }
 
+func testBetterQualityOnlyWhenSteady() {
+  // A better quality is tried only from steady playback: at 1x with the margin in hand.
+  let t0 = Date(timeIntervalSince1970: 5_000_000)
+  var catchUp = LiveCatchUp(targetBuffer: 1.0, now: t0)
+  check(!catchUp.readyForBetterQuality, "no readings yet")
+  var t = 2.0
+  // Steady, at the margin: ready.
+  for _ in 0..<30 {
+    catchUp.update(buffer: 1.0, latency: 1.8, playing: true, now: t0.addingTimeInterval(t))
+    t += 0.5
+  }
+  check(catchUp.rate == 1 && catchUp.readyForBetterQuality, "steady: \(catchUp.rate)")
+  // Running low: slowed down to build it back, not ready.
+  for _ in 0..<10 {
+    catchUp.update(buffer: 0.3, latency: 1.1, playing: true, now: t0.addingTimeInterval(t))
+    t += 0.5
+  }
+  check(catchUp.rate < 1 && !catchUp.readyForBetterQuality, "short: \(catchUp.rate)")
+  // Stalled: not ready until it's steady again.
+  catchUp.stalled(now: t0.addingTimeInterval(t))
+  check(!catchUp.readyForBetterQuality, "just stalled")
+  // Well over the margin: catching up faster, not ready either.
+  var behind = LiveCatchUp(targetBuffer: 1.0, now: t0)
+  var u = 60.0
+  for _ in 0..<30 {
+    behind.update(buffer: 4.0, latency: 5.0, playing: true, now: t0.addingTimeInterval(u))
+    u += 0.5
+  }
+  check(behind.rate > 1 && !behind.readyForBetterQuality, "catching up: \(behind.rate)")
+}
+
+func testStreamSource() {
+  // The stats say where the video comes from, not just the ad-blocking setting.
+  check(StreamRoute.twitch.source(adFreeForAdsOnly: true).hasPrefix("straight from Twitch (an ad-free server's copy only during an ad"))
+  check(StreamRoute.twitch.source(adFreeForAdsOnly: false) == "straight from Twitch (Kestrel's ad filter)")
+  check(StreamRoute.twitchAdFree("subscribed").source(adFreeForAdsOnly: true) == "straight from Twitch, no ads (subscribed)")
+  check(StreamRoute.adFreeServer("proxy.test").source(adFreeForAdsOnly: true) == "ad-free server proxy.test")
+}
+
+func testGifMemory() {
+  // Per channel: what went through is offered first (newest first, no repeats); what Twitch turned
+  // away isn't offered again there (elsewhere it still is); one that went through before stays.
+  func gif(_ id: String) -> GifMemory.Sent {
+    GifMemory.Sent(id: id, url: "https://media.giphy.com/\(id).gif", preview: "https://p/\(id)", aspect: 1.5, title: id, term: "lol")
+  }
+  var memory = GifMemory()
+  memory.noteSent(gif("a"), channel: "1")
+  memory.noteSent(gif("b"), channel: "1")
+  memory.noteSent(gif("a"), channel: "1")
+  check(memory.sentHere("1").map(\.id) == ["a", "b"], "newest first, once: \(memory.sentHere("1").map(\.id))")
+  check(memory.sentHere("2").isEmpty, "per channel")
+  memory.noteRefused("x", channel: "1")
+  memory.noteRefused("x", channel: "1")
+  check(memory.isRefused("x", channel: "1") && !memory.isRefused("x", channel: "2"), "refused here only")
+  memory.noteRefused("a", channel: "1")
+  check(!memory.isRefused("a", channel: "1"), "a GIF that went through isn't hidden for one refusal")
+  memory.noteSent(gif("x"), channel: "1")
+  check(!memory.isRefused("x", channel: "1"), "went through after all: no longer hidden")
+  for i in 0..<40 { memory.noteSent(gif("g\(i)"), channel: "3") }
+  check(memory.sentHere("3").count == GifMemory.keepSent && memory.sentHere("3").first?.id == "g39", "kept to the newest")
+  // Saved and read back.
+  let data = try! JSONEncoder().encode(memory)
+  check(try! JSONDecoder().decode(GifMemory.self, from: data) == memory, "round trip")
+}
+
+func testLowLatencyThroughAds() {
+  // Kestrel's own player: low latency kept through an announced break (holding the segment being
+  // made back stalled it at every break)...
+  runAsync {
+    let fake = FakeTwitch()
+    fake.mainMarkers = 26..<34
+    var config = LowLatencyConfig()
+    config.lowLatencyThroughAds = true
+    let box = UpdateBox()
+    let session = LowLatencySession(login: "streamer", config: config, http: fake, tokens: fake, log: ActivityLog()) { box.add($0) }
+    _ = try! await session.start()
+    _ = await session.mediaPlaylist(0)
+    fake.advance(4)
+    let announced = await session.mediaPlaylist(0)
+    check(announced.body.contains("TWITCH-PREFETCH"), "prefetch kept through an announced break")
+    check(!announced.body.contains("DATERANGE:ID=\"stitched"), "ad marker still removed")
+    check(box.last?.state == .skipped, "still shown as a client-side break")
+  }
+  // ...and through a stitched ad with no ad-free copy: the segment being made still goes to the
+  // player, and the ad's times are still known, so the app still hides it.
+  runAsync {
+    let fake = FakeTwitch()
+    fake.mainAds = 21..<24
+    fake.liveIndex = 24
+    fake.adTitle = "3f0b6c2e-9d1a"
+    fake.backupAds = ["site": 0..<100, "popout": 0..<100, "mobile_web": 0..<100, "embed": 0..<100, "autoplay": 0..<100]
+    var config = LowLatencyConfig()
+    config.firstPollWait = 2
+    config.lowLatencyThroughAds = true
+    let box = UpdateBox()
+    let session = LowLatencySession(login: "streamer", config: config, http: fake, tokens: fake, log: ActivityLog()) { box.add($0) }
+    _ = try! await session.start()
+    let first = await session.mediaPlaylist(0)
+    check(first.body.contains("TWITCH-PREFETCH"), "prefetch kept while the ad is covered")
+    check(box.last?.state == .covering, "app told to cover")
+    check(box.last?.ads.covers(fake.pdt(21).addingTimeInterval(1)) == true, "ad time range known")
+  }
+}
+
+func testQuietAfterSourceChange() {
+  // A stall just after the video's source changed (an ad-free copy standing in) isn't learned.
+  let t0 = Date(timeIntervalSince1970: 7_000_000)
+  var catchUp = LiveCatchUp(now: t0)
+  let before = catchUp.targetBuffer
+  catchUp.quiet(for: 10, now: t0.addingTimeInterval(20))
+  catchUp.stalled(now: t0.addingTimeInterval(22))
+  check(catchUp.targetBuffer == before, "stall at a switch not learned: \(catchUp.targetBuffer)")
+  catchUp.stalled(now: t0.addingTimeInterval(40))
+  check(catchUp.targetBuffer > before, "a later stall still is")
+}
+
+func testParameterSetLists() {
+  // Every parameter set a keyframe carries goes into the decoder's format, each once: an encoder
+  // using a second PPS for the frames between keyframes left the decoder unable to read them
+  // (the picture held for each segment) when only the first was given.
+  let vps = Data([0x40, 0x01, 0x0C]), sps = Data([0x42, 0x01, 0x01]), pps0 = Data([0x44, 0x01, 0xC1]), pps1 = Data([0x44, 0x01, 0xC2])
+  let idr = Data([0x28, 0x01, 0xAF])
+  check(HEVC.parameterSetList([vps, sps, pps0, pps1, pps0, idr]) == [vps, sps, pps0, pps1], "HEVC: all, once each")
+  check(HEVC.parameterSetList([sps, pps0, idr]) == nil, "HEVC without a VPS")
+  let hsps = Data([0x67, 0x64, 0x00]), hpps0 = Data([0x68, 0xEE, 0x3C]), hpps1 = Data([0x68, 0xCE, 0x3C]), slice = Data([0x65, 0x88])
+  check(H264.parameterSetList([hsps, hpps0, hpps1, slice]) == [hsps, hpps0, hpps1], "H.264: both PPSs")
+  check(H264.parameterSetList([hsps, slice]) == nil, "H.264 without a PPS")
+  // The frames themselves still go without them.
+  check(HEVC.sample([vps, sps, pps0, pps1, idr]).count == 4 + idr.count, "parameter sets left out of the frame")
+}
+
+func testSnapshotRoute() {
+  // The local server hands a recording still being made out as a finished video: /snap/<id>/.
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent("kestrel-snap-\(UUID().uuidString)")
+  let folder = root.appendingPathComponent("chan-1")
+  try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+  let text = StreamRecorder.playlistText(entries: [("000001.ts", 2, false, nil)], ended: false)
+  try? text.write(to: folder.appendingPathComponent("index.m3u8"), atomically: true, encoding: .utf8)
+  StreamProxy.shared.serveRecordings(from: root)
+  runAsync {
+    let snap = await StreamProxy.shared.handle(LocalRequest(method: "GET", path: "/snap/chan-1/index.m3u8", query: [:], headers: [:]))
+    let body = String(decoding: snap.body, as: UTF8.self)
+    check(snap.status == 200 && body.contains("#EXT-X-ENDLIST") && body.contains("/rec/chan-1/000001.ts"), "snapshot served: \(snap.status) \(body)")
+    let raw = await StreamProxy.shared.handle(LocalRequest(method: "GET", path: "/rec/chan-1/index.m3u8", query: [:], headers: [:]))
+    check(!String(decoding: raw.body, as: UTF8.self).contains("ENDLIST"), "the recording's own playlist left growing")
+    let bad = await StreamProxy.shared.handle(LocalRequest(method: "GET", path: "/snap/../index.m3u8", query: [:], headers: [:]))
+    check(bad.status == 404, "nothing outside the recordings")
+  }
+  try? FileManager.default.removeItem(at: root)
+}
+
 func testRecordingJoin() {
   let first = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PROGRAM-DATE-TIME:2026-11-04T01:00:00.000Z\n#EXT-X-MAP:URI=\"init0.mp4\"\n#EXTINF:2.000,\nseg0.m4s\n#EXTINF:2.000,\nseg1.m4s\n#EXT-X-ENDLIST\n"
   let second = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-START:TIME-OFFSET=0\n#EXTINF:2.500,\nseg0.ts\n"
   let joined = RecordingJoin.playlist([(id: "a", text: first), (id: "b", text: second)])
   let lines = joined.split(separator: "\n").map(String.init)
   check(lines.filter { $0 == "#EXTM3U" }.count == 1, "one header")
-  check(lines.contains("#EXT-X-TARGETDURATION:3"), "longest target")
+  check(lines.contains("#EXT-X-TARGETDURATION:6"), "stable target")
   check(lines.contains("#EXT-X-MAP:URI=\"/rec/a/init0.mp4\""), "map rewritten: \(joined)")
   check(lines.contains("/rec/a/seg0.m4s") && lines.contains("/rec/b/seg0.ts"), "segments rewritten")
   check(lines.filter { $0 == "#EXT-X-DISCONTINUITY" }.count == 1, "one join")
   check(!lines.contains("#EXT-X-ENDLIST") && lines.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "still recording: no end")
   check(lines.contains("#EXT-X-PROGRAM-DATE-TIME:2026-11-04T01:00:00.000Z"), "dates kept")
   let done = RecordingJoin.playlist([(id: "a", text: first), (id: "b", text: second + "#EXT-X-ENDLIST\n")])
-  check(done.hasSuffix("#EXT-X-ENDLIST\n") && done.contains("PLAYLIST-TYPE:VOD"), "ended")
+  check(done.hasSuffix("#EXT-X-ENDLIST\n") && done.hasPrefix(joined), "ended: only the end added")
+  // Still recording: a snapshot of what's recorded so far, as a finished video (Apple's player
+  // kept loading on the growing playlist itself).
+  let growing = StreamRecorder.playlistText(
+    entries: [("000001.m4s", 2, false, "init-1.mp4"), ("000002.m4s", 2, false, "init-1.mp4")], ended: false)
+  let snap = RecordingJoin.snapshot([(id: "live-1", text: growing)])
+  check(snap.contains("#EXT-X-PLAYLIST-TYPE:VOD") && snap.hasSuffix("#EXT-X-ENDLIST\n"), "finished: \(snap)")
+  check(snap.components(separatedBy: "#EXT-X-ENDLIST").count == 2, "one end")
+  check(snap.contains("/rec/live-1/000002.m4s") && snap.contains("#EXT-X-MAP:URI=\"/rec/live-1/init-1.mp4\""), "files pointed at")
+  let snapJoined = RecordingJoin.snapshot([(id: "a", text: first), (id: "b", text: second)])
+  check(snapJoined.hasSuffix("#EXT-X-ENDLIST\n") && snapJoined.components(separatedBy: "#EXT-X-ENDLIST").count == 2, "pieces: one end")
+  check(snapJoined.contains("/rec/a/seg0.m4s") && snapJoined.contains("/rec/b/seg0.ts") && snapJoined.contains("PLAYLIST-TYPE:VOD"), "pieces joined")
   let t0 = Date(timeIntervalSince1970: 1_000_000)
   let gaps = RecordingJoin.gaps([(t0, 100), (t0.addingTimeInterval(160), 50), (t0.addingTimeInterval(210), 10)])
   check(gaps.count == 2 && gaps[0].at == 100 && gaps[0].missing == 60 && gaps[1].at == 150 && gaps[1].missing == 0, "gaps: \(gaps)")
@@ -1840,6 +2015,17 @@ func testRaids() {
   if case .raid(let e) = go { check(e.kind == .go && e.targetDisplayName == "friend", "go fallback name") } else { check(false, "raid go as object") }
   check(Hermes.parse(#"{"type":"notification","notification":{"pubsub":"{\"type\":\"something_else\"}"}}"#) == .other, "other pubsub")
   check(Hermes.parse("not json") == .other, "garbage")
+  // A channel's playback events: stream-up the moment it goes live, stream-down when it ends; the
+  // rest (viewer counts) aren't acted on.
+  check(Hermes.playbackTopic(channelID: "4242") == "video-playback-by-id.4242", "playback topic")
+  let up = #"{"type":"notification","notification":{"subscription":{"id":"b"},"type":"pubsub","pubsub":"{\"type\":\"stream-up\",\"server_time\":1762500000.5,\"play_delay\":0}"}}"#
+  check(Hermes.parse(up) == .streamUp(subscription: "b"), "stream-up")
+  check(Hermes.parse(#"{"type":"notification","notification":{"pubsub":{"type":"stream-down","server_time":1}}}"#) == .streamDown(subscription: nil), "stream-down")
+  // One socket watches many channels: which one went live is in the subscription's ID.
+  let upID = Hermes.playbackSubscription(channelID: "4242")
+  check(Hermes.channel(ofPlaybackSubscription: upID) == "4242" && Hermes.channel(ofPlaybackSubscription: "b") == nil, "subscription ids")
+  check(Hermes.subscribe(topic: Hermes.playbackTopic(channelID: "4242"), subscriptionID: upID).contains("\"id\":\"up-4242\""), "subscribed with it")
+  check(Hermes.parse(#"{"type":"notification","notification":{"pubsub":"{\"type\":\"viewcount\",\"viewers\":12}"}}"#) == .other, "viewer count ignored")
 }
 
 /// A shaky broadcaster over Twitch's low-latency delivery (hiccups of 0.4–1.5 s about every 25 s,
@@ -1969,6 +2155,8 @@ func testCatchUpSimulation() {
   // (they raised the Kestrel player's margin to over a second with no stalls at all).
   func dip(_ noise: Double) -> Double {
     var c = LiveCatchUp(noise: noise, now: o0)
+    // (The least it can be told to keep: what's tested is the noise level, not the floor.)
+    c.setFloor(LiveCatchUp.minBuffer)
     var t = o0.addingTimeInterval(45)
     var held = 0.9
     c.update(buffer: held, latency: 1.4, playing: true, now: t)
@@ -1990,14 +2178,14 @@ func testCatchUpSimulation() {
   let fresh = fading.neededBuffer(now: o0.addingTimeInterval(60))
   let mid = fading.neededBuffer(now: o0.addingTimeInterval(50 + 375))
   let gone = fading.neededBuffer(now: o0.addingTimeInterval(50 + 601))
-  check(fresh > mid && mid > gone && gone == LiveCatchUp.minBuffer, "fades: \(fresh) \(mid) \(gone)")
+  check(fresh > mid && mid > gone && gone == LiveCatchUp.standardFloor, "fades: \(fresh) \(mid) \(gone)")
   // A lone stall on a steady stream is forgotten within a few minutes, not ten.
   var lone = LiveCatchUp(now: o0)
   lone.stalled(now: o0.addingTimeInterval(50))
   let loneFresh = lone.neededBuffer(now: o0.addingTimeInterval(60))
   let loneLater = lone.neededBuffer(now: o0.addingTimeInterval(50 + 150))
   let loneGone = lone.neededBuffer(now: o0.addingTimeInterval(50 + 241))
-  check(loneFresh > LiveCatchUp.minBuffer + 0.3 && loneLater < loneFresh && loneGone == LiveCatchUp.minBuffer,
+  check(loneFresh > LiveCatchUp.standardFloor + 0.3 && loneLater < loneFresh && loneGone == LiveCatchUp.standardFloor,
     "lone stall: \(loneFresh) \(loneLater) \(loneGone)")
 }
 
@@ -2099,6 +2287,26 @@ func testTSDemux() {
   chunked += pieces.flush()
   check(chunked.count == all.count, "chunked count \(chunked.count) vs \(all.count)")
   check(Set(chunked.map(\.pts)) == Set(all.map(\.pts)), "chunked frames match")
+  // How far a segment reaches as it comes in (held frames included), and where it starts: all of
+  // it in reaches its last picture and the end of its sound; half of it, less.
+  var reaching = TSDemuxer()
+  _ = reaching.feed(segment)
+  let reach = reaching.reach()
+  let soundStep = audio.last.map { Int64((1024.0 * 90_000 / Double($0.config.sampleRate)).rounded()) } ?? 0
+  check(reach.video == video.map(\.pts).max(), "reaches the last picture: \(String(describing: reach.video))")
+  check(reach.audioEnd == audio.last.map { $0.pts + soundStep }, "reaches the end of the sound: \(String(describing: reach.audioEnd))")
+  check(reaching.start().video == video.map(\.pts).min() && reaching.start().audio == audio.first?.pts, "starts")
+  var halfway = TSDemuxer()
+  _ = halfway.feed(segment.prefix(segment.count / 2))
+  check((halfway.reach().video ?? .max) < (reach.video ?? 0) && (halfway.reach().audioEnd ?? .max) < (reach.audioEnd ?? 0), "half in: reaches less")
+  // Joined up with the next segment: the picture a frame on, the sound straight on.
+  if let lastPicture = reach.video, let soundEnd = reach.audioEnd {
+    let frame: Int64 = 3000
+    check(SegmentDemuxer.joins(end: reach, next: (lastPicture + frame, soundEnd), frame: frame) == true, "joins")
+    check(SegmentDemuxer.joins(end: reach, next: (lastPicture + frame, soundEnd + 4 * soundStep), frame: frame) == false, "sound missing at the end")
+    check(SegmentDemuxer.joins(end: reach, next: (lastPicture + 5 * frame, soundEnd), frame: frame) == false, "pictures missing at the end")
+    check(SegmentDemuxer.joins(end: (nil, nil), next: (lastPicture, soundEnd), frame: frame) == nil, "can't tell")
+  }
   // Frames come out as soon as the next one starts (not only at the end).
   var early = TSDemuxer()
   let half = early.feed(segment.prefix(segment.count / 2))
@@ -2316,6 +2524,13 @@ testRecordingPlaylist()
 testMutedParts()
 testMultiviewLayout()
 testRecordingJoin()
+testBetterQualityOnlyWhenSteady()
+testStreamSource()
+testGifMemory()
+testLowLatencyThroughAds()
+testQuietAfterSourceChange()
+testParameterSetLists()
+testSnapshotRoute()
 testWholeSegmentSteering()
 testConnectionFitTooSlow()
 testQualityChangeNotLearned()

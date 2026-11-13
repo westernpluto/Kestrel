@@ -28,6 +28,8 @@ final class PlayerModel: ObservableObject {
       } else {
         offlineWatch?.cancel()
         offlineWatch = nil
+        liveWatch?.stop()
+        liveWatch = nil
         if phase == .playing, expectsOffline {
           // Opened for chat, but live after all: now it needs the sound (see `start`).
           expectsOffline = false
@@ -880,6 +882,8 @@ final class PlayerModel: ObservableObject {
     stopped = true
     offlineWatch?.cancel()
     offlineWatch = nil
+    liveWatch?.stop()
+    liveWatch = nil
     timer?.invalidate()
     timer = nil
     teardownPlayback()
@@ -1448,26 +1452,86 @@ final class PlayerModel: ObservableObject {
 
   // MARK: - Offline: chat, and word when they go live
 
+  /// Within seconds of them going live: Twitch's live-event socket says "stream-up" as the
+  /// broadcast starts (LiveWatch), and Twitch's playlist server is asked every few seconds besides
+  /// (it has the stream within seconds; Twitch's API, asked every half a minute before, listed it
+  /// 40 to 50 seconds late). Once the socket has spoken, the playlist is asked every second, so
+  /// "Live now" comes when the stream can actually be played.
   private func watchForLive() {
-    guard !isTile, offlineWatch == nil, !stopped, case .live(let channel) = target else { return }
+    guard !isTile, offlineWatch == nil, !stopped, case .live(let waiting) = target else { return }
     liveAgain = nil
+    streamUpHeard = nil
+    let channelID = (channel?.id).flatMap { $0.isEmpty ? nil : $0 } ?? waiting.id
+    let watch = LiveWatch(channelIDs: [channelID]) { [weak self] _ in
+      guard let self, self.streamUpHeard == nil else { return }
+      self.streamUpHeard = Date()
+      ActivityLog.shared.add("\(self.channel?.name ?? waiting.name) is going live (Twitch's live events); checking for the stream")
+    }
+    liveWatch = watch
+    watch.start()
     offlineWatch = Task { [weak self] in
+      var token: PlaybackToken?
+      var lastProbe = Date.distantPast
+      var lastPage = Date()
       while !Task.isCancelled {
-        try? await Task.sleep(nanoseconds: 30_000_000_000)
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
         // (Not while Kestrel's in the background: nothing would show it.)
-        guard !Task.isCancelled, UIApplication.shared.applicationState != .background else { continue }
-        guard let page = try? await TwitchAPI.shared.channelPage(login: channel.login), let stream = page.stream else {
-          continue
+        guard !Task.isCancelled, let model = self, !model.stopped, model.phase == .offline else { return }
+        guard UIApplication.shared.applicationState != .background else { continue }
+        let heard = model.streamUpHeard.map { Date().timeIntervalSince($0) < 60 } ?? false
+        var live = false
+        if heard || Date().timeIntervalSince(lastProbe) >= 5 {
+          lastProbe = Date()
+          if token == nil {
+            token = try? await TwitchAPI.shared.streamToken(login: waiting.login, playerType: "site", platform: "web")
+          }
+          if let current = token {
+            switch await Self.playlistStatus(login: waiting.login, token: current) {
+            case 200?: live = true
+            case 403?: token = nil  // the token ran out: a new one next time
+            default: break
+            }
+          }
         }
-        guard let model = self, !model.stopped, model.phase == .offline else { return }
-        model.channel = page.channel
+        // Twitch's API now and then too (should the playlist check be turned away), and once the
+        // socket's said so for a while without the playlist agreeing.
+        let socketLongAgo = model.streamUpHeard.map { Date().timeIntervalSince($0) > 20 } ?? false
+        var page: ChannelPage?
+        if !live, Date().timeIntervalSince(lastPage) >= 30 || socketLongAgo {
+          lastPage = Date()
+          page = try? await TwitchAPI.shared.channelPage(login: waiting.login)
+          live = page?.stream != nil || socketLongAgo
+        }
+        guard live else { continue }
+        guard !model.stopped, model.phase == .offline else { return }
+        if page == nil { page = try? await TwitchAPI.shared.channelPage(login: waiting.login) }
+        let channel = page?.channel ?? model.channel ?? waiting
+        // (Twitch's API may not list the stream yet: what's known of it.)
+        let stream =
+          page?.stream
+          ?? LiveStream(id: "live-\(channel.id)", title: "", viewers: 0, startedAt: Date(), channel: channel)
+        model.channel = channel
         model.stream = stream
         model.liveAgain = stream
-        ActivityLog.shared.add("\(page.channel.name) went live")
+        model.liveWatch?.stop()
+        model.liveWatch = nil
+        ActivityLog.shared.add("\(channel.name) went live")
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         return
       }
     }
+  }
+
+  private var liveWatch: LiveWatch?
+  /// When Twitch's live events said the channel went live (while waiting for it).
+  private var streamUpHeard: Date?
+
+  /// Whether Twitch's playlist server has the stream: 200 live, 404 not (yet), 403 the token's
+  /// run out; nil when it couldn't be asked.
+  private static func playlistStatus(login: String, token: PlaybackToken) async -> Int? {
+    let url = Usher.live(login: login, token: token, codecs: "h264", lowLatency: true)
+    let result = try? await URLSessionHTTPClient(timeout: 6).data(for: Usher.playlistRequest(url))
+    return result?.1.statusCode
   }
 
   /// They're live: start the stream (the player opens back up beside chat).

@@ -19,6 +19,8 @@ final class KestrelController {
   private var audioIndex: Int?
   private var variants: [HLSVariant] = []
   private var adTimeline = AdTimeline()
+  /// Straight from Twitch, with an ad-free server's copy only during an ad (Automatic).
+  private var adFreeForAdsOnly = false
   private var stopped = false
   private var loadTask: Task<Void, Never>?
   private(set) var isPaused = false
@@ -43,9 +45,17 @@ final class KestrelController {
     config.backupStreams = AppSettings.shared.backupStreams
     config.allowLowQualityBackup = AppSettings.shared.allowLowQualityBackup
     config.adFreeProxies = model?.adFreeProxies ?? AppSettings.shared.adFreeProxyHosts
-    // Straight from Twitch (a quick start, and 1440p where Twitch offers it here), with the
-    // ad-free servers' copy only during a stitched ad. A server picked by hand is used throughout.
+    // Straight from Twitch, from its servers near the viewer, with an ad-free server's copy only
+    // during a stitched ad (a server picked by hand is used throughout). Through an ad-free server
+    // from the start, Twitch's server near a viewer in America turned the stream away (403) and the
+    // video came from Europe: latency up to 5 s, a quality lower, stalls (in the background most).
+    // Straight from Twitch it's steady at about a second and a half, and the breaks Twitch
+    // announces leave the stream itself clean (low latency kept through them: see below).
     if case .automatic = AppSettings.shared.adBlocking { config.adFreeServersForAdsOnly = true }
+    adFreeForAdsOnly = config.adFreeServersForAdsOnly
+    // Low latency through ad breaks: this player hides any ad video it's handed (see apply), so
+    // the newest segment isn't held back (that stalled it at every break).
+    config.lowLatencyThroughAds = true
     config.checkAccountFirst = TwitchAuth.shared.session != nil
     config.nearbyServers = AppSettings.shared.nearbyServers
     let session = LowLatencySession(
@@ -74,15 +84,19 @@ final class KestrelController {
       audioIndex = model?.isTile == true ? nil : found.firstIndex { $0.isAudioOnly }
       // (A fresh start plays the picture.)
       if model?.audioOnly != nil { model?.audioOnly = nil }
+      // Through an ad-free server: a better quality only Twitch itself offers (1440p, say) is in
+      // the quality menu, to play straight from Twitch at the viewer's choice.
+      model?.checkDirectQualities(served: found)
       model?.qualities = videoIndices.map { PlayerModel.Quality(id: $0, label: found[$0].label) }
         + (audioIndex.map { [PlayerModel.Quality(id: $0, label: "Audio only")] } ?? [])
         + [PlayerModel.Quality(id: nil, label: "Auto")]
       // Auto unless a quality was picked (it moves between them: showing the best as picked was
       // wrong whenever it had stepped down).
       model?.selectedQuality = preferred == nil ? nil : start
-      // Always from the least margin, as on Apple TV (starting from what the channel needed last
-      // time put the iPhone up to 0.4 s further back every start); hiccups raise it as they come.
-      let margin: Double? = nil
+      // From what this channel needed last time (on this kind of connection, lately), so it
+      // doesn't have to stall again to learn it: always starting from the least, most streams
+      // stalled in their first minute. It comes back down within a minute or two if it isn't needed.
+      let margin = ChannelMargins.margin(for: login, network: NetworkWatch.shared.memoryKey)
       // The best quality, stepped down while the connection can't carry it (a quality picked by
       // hand, or the one handed over, stays).
       let engine = KestrelEngine(rendition: start, renditions: videoIndices, auto: preferred == nil, startMargin: margin) {
@@ -188,6 +202,10 @@ final class KestrelController {
 
   private func apply(_ update: LowLatencyUpdate) {
     adTimeline = update.ads
+    // The video now comes from somewhere else (an ad-free copy standing in for an ad, or back from
+    // it): a gap at the switch isn't the connection's, so it doesn't lower the quality or raise
+    // the margin.
+    if Self.source(of: update.state) != Self.source(of: model?.adState ?? .none) { engine?.sourceChanged() }
     model?.adState = update.state
     // Any ad break: replaced, looked for or covered (an ad-free copy, or hidden), and also one
     // Twitch sends only to its own player ("skipped": its prefetch hints are held back meanwhile,
@@ -196,6 +214,12 @@ final class KestrelController {
     case .replaced, .searching, .covering, .skipped: engine?.setAdBreak(true)
     case .none: engine?.setAdBreak(false)
     }
+  }
+
+  /// Which stream the video comes from in this state: Twitch's own, or an ad-free copy.
+  private static func source(of state: AdState) -> Int {
+    if case .replaced = state { return 1 }
+    return 0
   }
 
   func stop() {
@@ -532,6 +556,8 @@ final class KestrelController {
         value: String(format: "longest gap %.2f s, segment handoff %.2f s (last minute)", engine.longestArrivalGap, engine.longestHandoffWait)
           + String(format: ", %.1f s late, playlists up to %.1f s", engine.arrivalDelay, engine.slowestPlaylist)
           + (engine.reconnects > 0 ? ", \(engine.reconnects) reconnects" : "")))
+    // The main thread (this player's network, unpacking and timing run on it) held up by the app.
+    lines.append(StatLine(label: "Main thread", value: String(format: "longest hold-up %.2f s (last minute)", engine.longestHoldUp)))
     lines.append(StatLine(label: "Quality mode", value: engine.autoQuality ? "best that plays smoothly" : "picked"))
     lines.append(StatLine(label: "Segments", value: "\(engine.segmentsLoaded) (\(engine.container))"))
     // What to look at when a stream won't show: frames handed to the decoder (and how many only
@@ -558,7 +584,17 @@ final class KestrelController {
           + (engine.decodeInLayer ? " (decodes)" : " (pictures from VideoToolbox)")))
     if let error = engine.lastDecoderError { lines.append(StatLine(label: "Decoder error", value: error)) }
     if let behind = engine.startedBehind { lines.append(StatLine(label: "Started", value: String(format: "%.2f s behind newest", behind))) }
-    lines.append(StatLine(label: "Ads", value: AppSettings.shared.adBlockingSummary))
+    // Where the video comes from (not just the ad-blocking setting), and what's happening during
+    // an ad break.
+    let source = model?.route.map { $0.source(adFreeForAdsOnly: adFreeForAdsOnly) } ?? AppSettings.shared.adBlockingSummary
+    lines.append(StatLine(label: "Source", value: source))
+    switch model?.adState ?? .none {
+    case .none: break
+    case .skipped: lines.append(StatLine(label: "Ads", value: "break for Twitch's own player only (stream clean)"))
+    case .searching: lines.append(StatLine(label: "Ads", value: "ad break: finding an ad-free copy"))
+    case .replaced(let copy): lines.append(StatLine(label: "Ads", value: "ad break: ad-free copy (\(copy))"))
+    case .covering: lines.append(StatLine(label: "Ads", value: "ad break: covered"))
+    }
     return lines
   }
 }
