@@ -589,7 +589,11 @@ final class KestrelController {
     if let behind = engine.startedBehind { lines.append(StatLine(label: "Started", value: String(format: "%.2f s behind newest", behind))) }
     // Where the video comes from (not just the ad-blocking setting), and what's happening during
     // an ad break.
-    let source = model?.route.map { $0.source(adFreeForAdsOnly: adFreeForAdsOnly) } ?? AppSettings.shared.adBlockingSummary
+    var source = model?.route.map { $0.source(adFreeForAdsOnly: adFreeForAdsOnly) } ?? AppSettings.shared.adBlockingSummary
+    // (Your own proxy: Twitch's playback requests go through it; the video doesn't.)
+    if case .customProxy = AppSettings.shared.adBlocking {
+      source += AppSettings.shared.playbackProxy.map { "; playback requests through your proxy \($0.description)" } ?? "; your proxy isn't filled in"
+    }
     lines.append(StatLine(label: "Source", value: source))
     switch model?.adState ?? .none {
     case .none: break

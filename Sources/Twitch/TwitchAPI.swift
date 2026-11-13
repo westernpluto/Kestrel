@@ -513,6 +513,12 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     try await playbackToken(login: login, vodID: nil, playerType: playerType, platform: platform)
   }
 
+  /// A token asked for anonymously through `client` (nil: straight, without the user's proxy): for
+  /// checking what Twitch sees through a proxy (the address it came from, whether ads would show).
+  func probeToken(login: String, through client: HTTPClient?) async throws -> PlaybackToken {
+    try await playbackToken(login: login, vodID: nil, playerType: "site", platform: "web", anonymous: true, through: .some(client))
+  }
+
   func videoToken(id: String) async throws -> PlaybackToken {
     try await playbackToken(login: nil, vodID: id, playerType: "site", platform: "web")
   }
@@ -533,11 +539,12 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     }
   }
 
-  private func playbackToken(login: String?, vodID: String?, playerType: String, platform: String, anonymous: Bool)
-    async throws -> PlaybackToken
-  {
+  private func playbackToken(
+    login: String?, vodID: String?, playerType: String, platform: String, anonymous: Bool, through: HTTPClient?? = nil
+  ) async throws -> PlaybackToken {
     let isLive = login != nil
-    let client = playbackHTTP
+    // (`through`: a client asked for, or none at all: straight.)
+    let client: HTTPClient? = through ?? playbackHTTP
     let key = isLive ? "streamPlaybackAccessToken" : "videoPlaybackAccessToken"
     func parse(_ data: JSONValue) -> PlaybackToken? {
       let t = data[key]

@@ -2213,6 +2213,13 @@ func testDeviceLogin() {
   check(session?.clientID == nil && session?.refreshToken == nil && session?.login == "l", "old session decodes")
 }
 
+func testTokenAddress() {
+  // The address Twitch saw (a proxy's, through one), from the token's JSON.
+  let token = PlaybackToken(value: #"{"user_ip":"203.0.113.7","show_ads":false,"hide_ads":true,"user_id":null}"#, signature: "s")
+  check(token.info?.userIP == "203.0.113.7", "token address \(String(describing: token.info?.userIP))")
+  check(PlaybackToken(value: #"{"user_ip":""}"#, signature: "s").info?.userIP == nil, "empty address left out")
+}
+
 func testMP4Writer() {
   let dir = URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent()
   for name in ["twitch_160p_segment.ts", "twitch_1080p_bframes.ts"] {
@@ -2501,6 +2508,7 @@ func testFMP4Demux() {
 testFMP4Demux()
 testTSDemux()
 testMP4Writer()
+testTokenAddress()
 testDeviceLogin()
 testCatchUpSimulation()
 testRestrictedVOD()

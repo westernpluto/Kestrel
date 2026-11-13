@@ -361,10 +361,11 @@ struct AdBlockingView: View {
           TextField("Username (optional)", text: $settings.proxyUsername)
             .textInputAutocapitalization(.never).autocorrectionDisabled()
           SecureField("Password (optional)", text: $settings.proxyPassword)
+          ProxyTestRow(proxy: settings.playbackProxy)
         } header: {
           Text("Your proxy")
         } footer: {
-          Text("Twitch's playback requests go through it; video still comes straight from Twitch.")
+          Text("Twitch's playback requests go through it (the ones that decide about ads, and the playlists); video still comes straight from Twitch. The test asks Twitch for a stream through it and without it, and shows the address Twitch saw each time.")
         }
       }
     }
@@ -441,6 +442,66 @@ struct ActivityLogView: View {
         }
         Button("Clear") { ActivityLog.shared.clear() }
       }
+    }
+  }
+}
+
+/// Checks the user's proxy: a playback token asked for through it and straight, and what Twitch
+/// saw each time (the address it came from; whether it would show ads). The setting alone didn't
+/// show whether anything went through it.
+struct ProxyTestRow: View {
+  let proxy: HTTPProxy?
+  @State private var testing = false
+  @State private var result: (ok: Bool, text: String)?
+
+  var body: some View {
+    Button {
+      Task { await run() }
+    } label: {
+      HStack {
+        Text(testing ? "Testing…" : "Test the proxy")
+        Spacer()
+        if testing { ProgressView() }
+      }
+    }
+    .disabled(testing || proxy == nil)
+    if let result {
+      Label(result.text, systemImage: result.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+        .font(.footnote)
+        .foregroundColor(result.ok ? .green : .orange)
+    } else if proxy == nil {
+      Text("Fill in the host and port to test it.").font(.footnote).foregroundColor(.secondary)
+    }
+  }
+
+  private func run() async {
+    guard let proxy else { return }
+    testing = true
+    defer { testing = false }
+    result = nil
+    let viaProxy = URLSessionHTTPClient(timeout: 12, proxy: proxy)
+    async let direct = try? TwitchAPI.shared.probeToken(login: "twitch", through: nil)
+    let proxied: PlaybackToken
+    do {
+      proxied = try await TwitchAPI.shared.probeToken(login: "twitch", through: viaProxy)
+    } catch {
+      _ = await direct
+      result = (false, "Couldn't get through \(proxy.description): \(error.localizedDescription)")
+      ActivityLog.shared.add("Proxy test: couldn't get through \(proxy.description) (\(error.localizedDescription))")
+      return
+    }
+    let straight = await direct
+    let seen = proxied.info?.userIP
+    let own = straight?.info?.userIP
+    let ads = proxied.info.map { $0.hideAds == true || $0.showAds == false } == true ? "Twitch says no ads through it." : "Twitch may show ads through it."
+    if let seen, let own, seen == own {
+      result = (false, "Twitch saw your own address (\(seen)) through it: requests aren't going through the proxy.")
+      ActivityLog.shared.add("Proxy test: Twitch saw the same address through \(proxy.description) as without it")
+    } else if let seen {
+      result = (true, "Working: Twitch sees \(seen)" + (own.map { " instead of your \($0)" } ?? "") + ". " + ads)
+      ActivityLog.shared.add("Proxy test: \(proxy.description) works (Twitch sees a different address). \(ads)")
+    } else {
+      result = (true, "Got through \(proxy.description) (Twitch didn't say which address it saw). " + ads)
     }
   }
 }

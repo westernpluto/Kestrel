@@ -214,6 +214,8 @@ struct PlaybackToken: Equatable, Sendable {
     var subscriber: Bool?
     var signedIn: Bool
     var restrictedBitrates: [String]
+    /// The address Twitch saw the request come from (a proxy's, when it went through one).
+    var userIP: String? = nil
   }
 
   var info: Info? {
@@ -224,7 +226,8 @@ struct PlaybackToken: Equatable, Sendable {
     let restricted = ((object["chansub"] as? [String: Any])?["restricted_bitrates"] as? [String]) ?? []
     return Info(
       showAds: flag("show_ads"), hideAds: flag("hide_ads"), serverAds: flag("server_ads"), turbo: flag("turbo"),
-      subscriber: flag("subscriber"), signedIn: signedIn, restrictedBitrates: restricted)
+      subscriber: flag("subscriber"), signedIn: signedIn, restrictedBitrates: restricted,
+      userIP: (object["user_ip"] as? String).flatMap { $0.isEmpty ? nil : $0 })
   }
 
   /// One line for the activity log.
