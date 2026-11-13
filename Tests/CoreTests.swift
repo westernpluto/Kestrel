@@ -1729,6 +1729,26 @@ func testParameterSetLists() {
   check(HEVC.sample([vps, sps, pps0, pps1, idr]).count == 4 + idr.count, "parameter sets left out of the frame")
 }
 
+func testSnapshotRoute() {
+  // The local server hands a recording still being made out as a finished video: /snap/<id>/.
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent("kestrel-snap-\(UUID().uuidString)")
+  let folder = root.appendingPathComponent("chan-1")
+  try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+  let text = StreamRecorder.playlistText(entries: [("000001.ts", 2, false, nil)], ended: false)
+  try? text.write(to: folder.appendingPathComponent("index.m3u8"), atomically: true, encoding: .utf8)
+  StreamProxy.shared.serveRecordings(from: root)
+  runAsync {
+    let snap = await StreamProxy.shared.handle(LocalRequest(method: "GET", path: "/snap/chan-1/index.m3u8", query: [:], headers: [:]))
+    let body = String(decoding: snap.body, as: UTF8.self)
+    check(snap.status == 200 && body.contains("#EXT-X-ENDLIST") && body.contains("/rec/chan-1/000001.ts"), "snapshot served: \(snap.status) \(body)")
+    let raw = await StreamProxy.shared.handle(LocalRequest(method: "GET", path: "/rec/chan-1/index.m3u8", query: [:], headers: [:]))
+    check(!String(decoding: raw.body, as: UTF8.self).contains("ENDLIST"), "the recording's own playlist left growing")
+    let bad = await StreamProxy.shared.handle(LocalRequest(method: "GET", path: "/snap/../index.m3u8", query: [:], headers: [:]))
+    check(bad.status == 404, "nothing outside the recordings")
+  }
+  try? FileManager.default.removeItem(at: root)
+}
+
 func testRecordingJoin() {
   let first = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PROGRAM-DATE-TIME:2026-11-04T01:00:00.000Z\n#EXT-X-MAP:URI=\"init0.mp4\"\n#EXTINF:2.000,\nseg0.m4s\n#EXTINF:2.000,\nseg1.m4s\n#EXT-X-ENDLIST\n"
   let second = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-START:TIME-OFFSET=0\n#EXTINF:2.500,\nseg0.ts\n"
@@ -1743,6 +1763,17 @@ func testRecordingJoin() {
   check(lines.contains("#EXT-X-PROGRAM-DATE-TIME:2026-11-04T01:00:00.000Z"), "dates kept")
   let done = RecordingJoin.playlist([(id: "a", text: first), (id: "b", text: second + "#EXT-X-ENDLIST\n")])
   check(done.hasSuffix("#EXT-X-ENDLIST\n") && done.hasPrefix(joined), "ended: only the end added")
+  // Still recording: a snapshot of what's recorded so far, as a finished video (Apple's player
+  // kept loading on the growing playlist itself).
+  let growing = StreamRecorder.playlistText(
+    entries: [("000001.m4s", 2, false, "init-1.mp4"), ("000002.m4s", 2, false, "init-1.mp4")], ended: false)
+  let snap = RecordingJoin.snapshot([(id: "live-1", text: growing)])
+  check(snap.contains("#EXT-X-PLAYLIST-TYPE:VOD") && snap.hasSuffix("#EXT-X-ENDLIST\n"), "finished: \(snap)")
+  check(snap.components(separatedBy: "#EXT-X-ENDLIST").count == 2, "one end")
+  check(snap.contains("/rec/live-1/000002.m4s") && snap.contains("#EXT-X-MAP:URI=\"/rec/live-1/init-1.mp4\""), "files pointed at")
+  let snapJoined = RecordingJoin.snapshot([(id: "a", text: first), (id: "b", text: second)])
+  check(snapJoined.hasSuffix("#EXT-X-ENDLIST\n") && snapJoined.components(separatedBy: "#EXT-X-ENDLIST").count == 2, "pieces: one end")
+  check(snapJoined.contains("/rec/a/seg0.m4s") && snapJoined.contains("/rec/b/seg0.ts") && snapJoined.contains("PLAYLIST-TYPE:VOD"), "pieces joined")
   let t0 = Date(timeIntervalSince1970: 1_000_000)
   let gaps = RecordingJoin.gaps([(t0, 100), (t0.addingTimeInterval(160), 50), (t0.addingTimeInterval(210), 10)])
   check(gaps.count == 2 && gaps[0].at == 100 && gaps[0].missing == 60 && gaps[1].at == 150 && gaps[1].missing == 0, "gaps: \(gaps)")
@@ -2427,6 +2458,7 @@ testGifMemory()
 testLowLatencyThroughAds()
 testQuietAfterSourceChange()
 testParameterSetLists()
+testSnapshotRoute()
 testWholeSegmentSteering()
 testConnectionFitTooSlow()
 testQualityChangeNotLearned()

@@ -237,7 +237,13 @@ final class RecordingStore: ObservableObject {
   }
 
   func playbackURL(_ group: RecordingGroup) -> URL? {
-    group.pieces.count == 1
+    // Still being recorded: what's recorded so far, as a finished video (the player asks for a
+    // fresh one as it nears the end). Given the growing playlist itself, Apple's player kept
+    // loading until Kestrel was closed (which finished the recording's files).
+    if group.pieces.contains(where: { active[$0.id] != nil && $0.videoID == nil }) {
+      return try? StreamProxy.shared.snapshotURL(ids: group.pieces.map(\.id))
+    }
+    return group.pieces.count == 1
       ? playbackURL(group.pieces[0]) : try? StreamProxy.shared.joinedRecordingURL(ids: group.pieces.map(\.id))
   }
 
@@ -611,9 +617,10 @@ struct RecordingPlayerScreen: View {
     .onAppear {
       OrientationLock.playerVisible(true)
       AppModel.shared.watchingRecording = true
-      if let url { playback.start(url: url, id: positionKey ?? info.id) }
+      if let url { playback.start(url: url, id: positionKey ?? info.id, growing: recording) }
       scheduleHide()
     }
+    .onChange(of: recording) { playback.setGrowing($0) }
     .onDisappear {
       playback.finish()
       AppModel.shared.watchingRecording = false
@@ -915,9 +922,10 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
   var atNewest: Bool { end - position < 15 }
   var canSkipForward: Bool { end - position > 3 }
 
-  func start(url: URL, id: String) {
+  func start(url: URL, id: String, growing: Bool = false) {
     self.id = id
     self.url = url
+    self.growing = growing
     try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
     try? AVAudioSession.sharedInstance().setActive(true)
     let resume = UserDefaults.standard.double(forKey: Self.positionKey(id))
@@ -940,6 +948,15 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
       Task { @MainActor in
         self?.reattach()
         await self?.checkServer()
+      }
+    })
+    tokens.append(center.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] note in
+      guard let ended = (note.object as AnyObject?).map(ObjectIdentifier.init) else { return }
+      Task { @MainActor in
+        // Played to the end of what was recorded when it was loaded, and it's still recording:
+        // on with what's been recorded since.
+        guard let playback = self, playback.growing, let item = playback.player.currentItem, ObjectIdentifier(item) == ended else { return }
+        playback.refreshSnapshot(at: playback.position)
       }
     })
     tokens.append(center.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: nil, queue: .main) { [weak self] note in
@@ -996,7 +1013,13 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
           playback.recover("it failed (\(error))")
         } else if status == .readyToPlay, let target = playback.pendingSeek {
           playback.pendingSeek = nil
-          playback.seek(to: target)
+          if target.isInfinite {
+            // The newest part: a little before the end of this fresh snapshot.
+            let length = item.duration.seconds
+            playback.seek(to: length.isFinite ? max(0, length - 8) : 0)
+          } else {
+            playback.seek(to: target)
+          }
         }
       }
     }
@@ -1013,7 +1036,7 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
     let current = player.currentTime().seconds
     // Where it was going, or a second before where it stopped.
     let at = seekingTo ?? pendingSeek ?? max(0, (current.isFinite && current > 0 ? current : position) - 1)
-    ActivityLog.shared.add("Recording playback: \(why); loading it again at \(Format.duration(Int(at)))")
+    ActivityLog.shared.add("Recording playback: \(why); loading it again at \(at.isFinite ? Format.duration(Int(at)) : "the newest part")")
     seekingTo = nil
     load(url, at: at)
   }
@@ -1034,10 +1057,17 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
     let newEnd = max(seekable, length)
     if newEnd.isFinite, abs(newEnd - end) >= 0.5 { end = newEnd.rounded(.down) }
     let current = player.currentTime().seconds
-    if let target = seekingTo ?? pendingSeek {
+    if let target = seekingTo ?? pendingSeek, target.isFinite {
       position = target
-    } else if current.isFinite {
+    } else if current.isFinite, seekingTo == nil, pendingSeek == nil {
       position = current
+    }
+    // Still recording, and playing near the end of what was recorded when this snapshot was made:
+    // a fresh one, where it is (with what's been recorded since).
+    if growing, seekingTo == nil, pendingSeek == nil, end > 0, position > end - Self.snapshotAhead,
+      player.timeControlStatus != .paused, Date().timeIntervalSince(lastSnapshot) > Self.snapshotEvery
+    {
+      refreshSnapshot(at: position)
     }
     if seekingTo == nil, pendingSeek == nil, let date = item.currentDate(), date != currentDate { currentDate = date }
     let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate || seekingTo != nil || pendingSeek != nil
@@ -1079,9 +1109,39 @@ final class RecordingPlayback: NSObject, ObservableObject, AVPictureInPictureCon
 
   func skip(by seconds: Double) { seek(to: position + seconds) }
 
-  /// The newest part recorded (a little back, so it doesn't run straight into the end: the player
-  /// picks up what's been recorded since every few seconds).
-  func jumpToNewest() { seek(to: max(0, end - 8)) }
+  /// The newest part recorded (a little back, so it doesn't run straight into the end). Still
+  /// recording: a fresh snapshot first, with everything recorded up to now.
+  func jumpToNewest() {
+    if growing, let url {
+      lastSnapshot = Date()
+      load(url, at: .infinity)
+      return
+    }
+    seek(to: max(0, end - 8))
+  }
+
+  /// Still being recorded: played as what's been recorded so far (see RecordingJoin.snapshot),
+  /// reloaded as it nears the end.
+  private(set) var growing = false
+  private var lastSnapshot = Date()
+  /// How close to the end of a snapshot a fresh one is asked for, and how often at most.
+  static let snapshotAhead: Double = 15
+  static let snapshotEvery: TimeInterval = 10
+
+  /// The recording stopped (or started) while it's being watched. Stopped: one last snapshot, so
+  /// the end of it is in.
+  func setGrowing(_ value: Bool) {
+    let was = growing
+    growing = value
+    if was, !value { refreshSnapshot(at: position) }
+  }
+
+  /// A fresh snapshot of the recording, at `seconds`.
+  func refreshSnapshot(at seconds: Double) {
+    guard let url, pendingSeek == nil else { return }
+    lastSnapshot = Date()
+    load(url, at: max(0, seconds))
+  }
 
   func togglePause() {
     if isPaused {

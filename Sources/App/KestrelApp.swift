@@ -382,6 +382,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
   func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
     NetworkWatch.shared.start()
     AudioRouteWatch.start()
+    // The keyboard's height, followed from launch (screens made later still know it).
+    _ = KeyboardObserver.shared
     // Go-live alerts: background checks and taps on the notifications.
     LiveNotifier.register()
     AutoRecorder.register()

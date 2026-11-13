@@ -370,13 +370,20 @@ final class StreamProxy: @unchecked Sendable {
     return components.url ?? url
   }
 
+  /// A recording still being made (one piece or several), as a finished video of what's been
+  /// recorded so far (see RecordingJoin.snapshot).
+  func snapshotURL(ids: [String]) throws -> URL {
+    let port = try ensureRunning()
+    return URL(string: "http://127.0.0.1:\(port)/snap/\(ids.joined(separator: "/"))/index.m3u8")!
+  }
+
   /// One broadcast's recordings played as one video (see RecordingJoin).
   func joinedRecordingURL(ids: [String]) throws -> URL {
     let port = try ensureRunning()
     return URL(string: "http://127.0.0.1:\(port)/join/\(ids.joined(separator: "/"))/index.m3u8")!
   }
 
-  private func joinedRecording(ids: [String]) -> LocalResponse {
+  private func joinedRecording(ids: [String], snapshot: Bool = false) -> LocalResponse {
     lock.lock()
     let root = recordingsRoot
     lock.unlock()
@@ -386,7 +393,8 @@ final class StreamProxy: @unchecked Sendable {
       return (try? String(contentsOf: url, encoding: .utf8)).map { (id, $0) }
     }
     guard !pieces.isEmpty else { return .text(404, "not found") }
-    return LocalResponse(status: 200, contentType: "application/vnd.apple.mpegurl", body: Data(RecordingJoin.playlist(pieces).utf8))
+    let body = snapshot ? RecordingJoin.snapshot(pieces) : RecordingJoin.playlist(pieces)
+    return LocalResponse(status: 200, contentType: "application/vnd.apple.mpegurl", body: Data(body.utf8))
   }
 
   private func recordingFile(id: String, file: String) -> LocalResponse {
@@ -429,8 +437,8 @@ final class StreamProxy: @unchecked Sendable {
     let parts = request.path.split(separator: "/").map(String.init)
     if parts == ["ping"] { return .text(200, "pong") }
     if parts.count == 3, parts[0] == "rec" { return recordingFile(id: parts[1], file: parts[2]) }
-    if parts.count >= 3, parts[0] == "join", parts.last == "index.m3u8" {
-      return joinedRecording(ids: Array(parts[1..<(parts.count - 1)]))
+    if parts.count >= 3, parts[0] == "join" || parts[0] == "snap", parts.last == "index.m3u8" {
+      return joinedRecording(ids: Array(parts[1..<(parts.count - 1)]), snapshot: parts[0] == "snap")
     }
     if parts.count == 2, parts[0] == "static", parts[1].hasSuffix(".m3u8") {
       return staticBody(String(parts[1].dropLast(5))).map { .playlist($0) } ?? .text(404, "not found")
