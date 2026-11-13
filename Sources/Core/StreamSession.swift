@@ -57,6 +57,10 @@ actor StreamSession {
   nonisolated let login: String
   private let config: StreamSessionConfig
   private let http: HTTPClient
+  /// For the media playlists (and video), when not `http`: with the user's own proxy, only the token
+  /// and the stream's address need to go through it (where Twitch decides about ads); the
+  /// playlists, asked for every second or so for as long as it plays, go straight.
+  private let mediaHTTP: HTTPClient
   private let tokens: PlaybackTokenProvider
   private let log: ActivityLog
   private let onAdState: @Sendable (AdState, [ClosedRange<Date>]) -> Void
@@ -98,7 +102,7 @@ actor StreamSession {
   }
 
   init(
-    id: String = UUID().uuidString, login: String, config: StreamSessionConfig, http: HTTPClient,
+    id: String = UUID().uuidString, login: String, config: StreamSessionConfig, http: HTTPClient, mediaHTTP: HTTPClient? = nil,
     tokens: PlaybackTokenProvider, log: ActivityLog = .shared,
     onAdState: @escaping @Sendable (AdState, [ClosedRange<Date>]) -> Void = { _, _ in }
   ) {
@@ -106,6 +110,7 @@ actor StreamSession {
     self.login = login.lowercased()
     self.config = config
     self.http = http
+    self.mediaHTTP = mediaHTTP ?? http
     self.tokens = tokens
     self.log = log
     self.onAdState = onAdState
@@ -485,7 +490,7 @@ actor StreamSession {
   private nonisolated func fetchMedia(_ url: URL?) async -> FetchResult {
     guard let url else { return .failure(404) }
     do {
-      let (data, response) = try await http.data(for: Usher.playlistRequest(url, timeout: 5))
+      let (data, response) = try await mediaHTTP.data(for: Usher.playlistRequest(url, timeout: 5))
       guard response.statusCode == 200 else { return .failure(response.statusCode) }
       guard HLS.looksLikePlaylist(data), let text = String(data: data, encoding: .utf8) else { return .failure(502) }
       return .success(HLSMediaPlaylist.parse(text, base: response.url ?? url))

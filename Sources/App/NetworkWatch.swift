@@ -111,6 +111,8 @@ enum PlaybackWarmup {
     guard force || Date().timeIntervalSince(lastRun) > 45 else { return }
     lastRun = Date()
     let settings = AppSettings.shared
+    // (Not through your own proxy: only what playing needs goes through it.)
+    guard settings.playbackProxy == nil else { return }
     let playback = settings.sharedPlaybackClient()
     var hosts = ["usher.ttvnw.net"]
     if let near = NearbyPlaylists.cachedHost { hosts.append(near) }

@@ -135,6 +135,9 @@ final class AppSettings: ObservableObject {
   }
   // The user's own HTTP proxy (AdBlocking.customProxy).
   @Published var proxyHost: String { didSet { defaults.set(proxyHost, forKey: "proxyHost"); applyProxy() } }
+  /// Your own proxy: the media playlists through it too (off: only the token and the stream's
+  /// address go through it, the least it needs; the rest goes straight to Twitch).
+  @Published var proxyPlaylists: Bool { didSet { defaults.set(proxyPlaylists, forKey: "proxyPlaylists") } }
   @Published var proxyPort: String { didSet { defaults.set(proxyPort, forKey: "proxyPort"); applyProxy() } }
   @Published var proxyUsername: String { didSet { defaults.set(proxyUsername, forKey: "proxyUsername"); applyProxy() } }
   @Published var proxyPassword: String {
@@ -172,6 +175,7 @@ final class AppSettings: ObservableObject {
     proxyPort = defaults.string(forKey: "proxyPort") ?? ""
     proxyUsername = defaults.string(forKey: "proxyUsername") ?? ""
     proxyPassword = SecretStore.get("proxy").flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    proxyPlaylists = defaults.bool(forKey: "proxyPlaylists")
     initialized = true
     applyProxy()
   }
@@ -199,6 +203,17 @@ final class AppSettings: ObservableObject {
   func playbackClient(timeout: TimeInterval = 8, givesWay: Bool = false) -> HTTPClient {
     URLSessionHTTPClient(timeout: timeout, proxy: playbackProxy, givesWay: givesWay)
   }
+
+  /// For media playlists and video when your own proxy shouldn't carry them (see
+  /// `proxyPlaylists`): straight to Twitch. nil: the same client as the rest (no proxy set, or the
+  /// playlists through it by choice).
+  func mediaClient() -> HTTPClient? {
+    guard playbackProxy != nil, !proxyPlaylists else { return nil }
+    return Self.direct
+  }
+
+  /// Straight to Twitch, never through a proxy (one for all: its connections stay open).
+  private static let direct = URLSessionHTTPClient(timeout: 10)
 
   private let sharedLock = NSLock()
   private var sharedPlayback: (proxy: HTTPProxy?, client: HTTPClient)?

@@ -100,7 +100,8 @@ final class RecordingStore: ObservableObject {
         started.quality = variant.label
         let downloader = VODDownloader(
           info: started, playlistURL: url, directory: root.appendingPathComponent(id, isDirectory: true),
-          http: AppSettings.shared.playbackClient(timeout: 30)
+          // (A VOD's playlist and video: straight to Twitch, not through your own proxy.)
+          http: AppSettings.shared.mediaClient().map { _ in URLSessionHTTPClient(timeout: 30) } ?? AppSettings.shared.playbackClient(timeout: 30)
         ) { [weak self] status, done in
           Task { @MainActor in self?.updateDownload(status, done: done) }
         }
@@ -183,7 +184,10 @@ final class RecordingStore: ObservableObject {
       // (Giving way to the stream being watched: recording the channel being watched, both at
       // 1080p60 over the same Wi-Fi, the player got under three quarters of what it needed and
       // stalled every few seconds. With the connection to itself, it gets all of it.)
-      http: settings.playbackClient(timeout: 20, givesWay: true), tokens: TwitchAPI.shared
+      http: settings.playbackClient(timeout: 20, givesWay: true),
+      // (Your own proxy: the recording's video and playlists straight to Twitch, not through it.)
+      mediaHTTP: settings.mediaClient().map { _ in URLSessionHTTPClient(timeout: 20, givesWay: true) },
+      tokens: TwitchAPI.shared
     ) { [weak self] status in
       Task { @MainActor in self?.update(status) }
     }

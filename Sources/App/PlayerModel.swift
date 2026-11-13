@@ -324,7 +324,7 @@ final class PlayerModel: ObservableObject {
     config.checkAccountFirst = TwitchAuth.shared.session != nil
     let session = StreamSession(
       login: channel.login, config: config, http: AppSettings.shared.playbackClient(timeout: 8),
-      tokens: TwitchAPI.shared
+      mediaHTTP: AppSettings.shared.mediaClient(), tokens: TwitchAPI.shared
     ) { [weak self] state, ranges in
       guard let model = self else { return }
       Task { @MainActor in

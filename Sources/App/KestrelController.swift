@@ -59,7 +59,8 @@ final class KestrelController {
     config.checkAccountFirst = TwitchAuth.shared.session != nil
     config.nearbyServers = AppSettings.shared.nearbyServers
     let session = LowLatencySession(
-      login: login, config: config, http: AppSettings.shared.sharedPlaybackClient(), tokens: TwitchAPI.shared
+      login: login, config: config, http: AppSettings.shared.sharedPlaybackClient(), mediaHTTP: AppSettings.shared.mediaClient(),
+      tokens: TwitchAPI.shared
     ) { [weak self] update in
       Task { @MainActor in self?.apply(update) }
     }

@@ -361,11 +361,12 @@ struct AdBlockingView: View {
           TextField("Username (optional)", text: $settings.proxyUsername)
             .textInputAutocapitalization(.never).autocorrectionDisabled()
           SecureField("Password (optional)", text: $settings.proxyPassword)
+          Toggle("Playlists through the proxy too", isOn: $settings.proxyPlaylists)
           ProxyTestRow(proxy: settings.playbackProxy)
         } header: {
           Text("Your proxy")
         } footer: {
-          Text("Twitch's playback requests go through it (the ones that decide about ads, and the playlists); video still comes straight from Twitch. The test asks Twitch for a stream through it and without it, and shows the address Twitch saw each time.")
+          Text("Only what decides about ads goes through it: the stream's token and its address, a few small requests when a stream starts. The video, the playlists (asked for every second or so), recordings and downloads go straight to Twitch. Turn on Playlists through the proxy too if ads get through anyway (more data through it). The test asks Twitch for a stream through it and without it, and shows the address Twitch saw each time.")
         }
       }
     }

@@ -76,6 +76,10 @@ actor StreamRecorder {
   private let maxHeight: Int?
   private let config: LowLatencyConfig
   private let http: HTTPClient
+  /// For the media playlists and the video, when not `http`: with the user's own proxy, only the token
+  /// and the stream's address need to go through it (where Twitch decides about ads); the
+  /// playlists, asked for every second or so for as long as it plays, go straight.
+  private let mediaHTTP: HTTPClient
   private let tokens: PlaybackTokenProvider
   private let log: ActivityLog
   private let onStatus: @Sendable (RecorderStatus) -> Void
@@ -109,9 +113,10 @@ actor StreamRecorder {
   ///   - directory: where this recording goes (created).
   ///   - maxHeight: the highest rendition to record (nil: the best).
   init(
-    info: RecordingInfo, directory: URL, maxHeight: Int?, config: LowLatencyConfig, http: HTTPClient,
+    info: RecordingInfo, directory: URL, maxHeight: Int?, config: LowLatencyConfig, http: HTTPClient, mediaHTTP: HTTPClient? = nil,
     tokens: PlaybackTokenProvider, log: ActivityLog = .shared, onStatus: @escaping @Sendable (RecorderStatus) -> Void
   ) {
+    self.mediaHTTP = mediaHTTP ?? http
     id = info.id
     login = info.login.lowercased()
     self.info = info
@@ -249,8 +254,8 @@ actor StreamRecorder {
       index += batch.count
       let results = await withTaskGroup(of: (Int, Data?).self) { group -> [Int: Data] in
         for (position, item) in batch.enumerated() where !item.segment.isAd {
-          group.addTask { [http] in
-            (position, await Self.download(item.segment.uri, http: http))
+          group.addTask { [mediaHTTP] in
+            (position, await Self.download(item.segment.uri, http: mediaHTTP))
           }
         }
         var out: [Int: Data] = [:]
@@ -300,7 +305,7 @@ actor StreamRecorder {
 
   private func saveMap(_ remote: String) async -> String? {
     if let saved = maps[remote] { return saved }
-    guard let data = await Self.download(remote, http: http) else { return nil }
+    guard let data = await Self.download(remote, http: mediaHTTP) else { return nil }
     let file = "init-\(maps.count + 1).mp4"
     guard (try? data.write(to: directory.appendingPathComponent(file))) != nil else { return nil }
     maps[remote] = file
@@ -426,7 +431,7 @@ actor StreamRecorder {
 
   private func fetchPlaylist(_ url: URL) async -> PlaylistResult {
     do {
-      let (data, response) = try await http.data(for: Usher.playlistRequest(url, timeout: 8))
+      let (data, response) = try await mediaHTTP.data(for: Usher.playlistRequest(url, timeout: 8))
       guard response.statusCode == 200 else { return .failure(response.statusCode) }
       guard HLS.looksLikePlaylist(data), let text = String(data: data, encoding: .utf8) else { return .failure(502) }
       return .success(HLSMediaPlaylist.parse(text, base: response.url ?? url))

@@ -51,6 +51,10 @@ actor LowLatencySession: PlaylistSource {
   nonisolated let arrival = StreamArrival()
   private let config: LowLatencyConfig
   private let http: HTTPClient
+  /// For the media playlists (and video), when not `http`: with the user's own proxy, only the token
+  /// and the stream's address need to go through it (where Twitch decides about ads); the
+  /// playlists, asked for every second or so for as long as it plays, go straight.
+  private let mediaHTTP: HTTPClient
   private let tokens: PlaybackTokenProvider
   private let log: ActivityLog
   private let onUpdate: @Sendable (LowLatencyUpdate) -> Void
@@ -92,7 +96,7 @@ actor LowLatencySession: PlaylistSource {
   private var ads = AdTimeline()
 
   init(
-    id: String = UUID().uuidString, login: String, config: LowLatencyConfig, http: HTTPClient,
+    id: String = UUID().uuidString, login: String, config: LowLatencyConfig, http: HTTPClient, mediaHTTP: HTTPClient? = nil,
     tokens: PlaybackTokenProvider, log: ActivityLog = .shared,
     onUpdate: @escaping @Sendable (LowLatencyUpdate) -> Void = { _ in }
   ) {
@@ -100,6 +104,7 @@ actor LowLatencySession: PlaylistSource {
     self.login = login.lowercased()
     self.config = config
     self.http = http
+    self.mediaHTTP = mediaHTTP ?? http
     self.tokens = tokens
     self.log = log
     self.onUpdate = onUpdate
@@ -530,7 +535,7 @@ actor LowLatencySession: PlaylistSource {
   private nonisolated func fetch(_ url: URL?, timeout: TimeInterval = 5) async -> FetchResult {
     guard let url else { return .failure(404) }
     do {
-      let (data, response) = try await http.data(for: Usher.playlistRequest(url, timeout: timeout))
+      let (data, response) = try await mediaHTTP.data(for: Usher.playlistRequest(url, timeout: timeout))
       guard response.statusCode == 200 else { return .failure(response.statusCode) }
       guard HLS.looksLikePlaylist(data), let text = String(data: data, encoding: .utf8) else { return .failure(502) }
       let base = response.url ?? url
