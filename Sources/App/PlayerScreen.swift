@@ -332,26 +332,79 @@ final class KeyboardObserver: ObservableObject {
           self?.handle(note)
         })
     }
+    // The window in front changed (the other display, back from Picture in Picture): the
+    // keyboard's place worked out again against it, without waiting for the keyboard to move.
+    for name in [UIWindow.didBecomeKeyNotification, UIScene.didActivateNotification] {
+      tokens.append(
+        center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+          self?.measureAgain()
+        })
+    }
+  }
+
+  /// The keyboard's last frame (screen coordinates) and the screen it was on, while it's up.
+  private var lastEnd: CGRect?
+  private weak var lastScreen: UIScreen?
+
+  /// The app's window on the screen the keyboard is on. iPhone Duo has two displays, each with its
+  /// own window: measured against the other one, the keyboard seemed to cover nothing, and the
+  /// message box stayed under it until the screen was made again (another stream).
+  private static func window(on screen: UIScreen?) -> UIWindow? {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    if let screen,
+      let scene = scenes.first(where: { $0.screen === screen && $0.activationState == .foregroundActive })
+        ?? scenes.first(where: { $0.screen === screen })
+    {
+      return scene.windows.first { $0.isKeyWindow } ?? scene.windows.first
+    }
+    return AppWindow.current
+  }
+
+  private func measureAgain() {
+    guard let lastEnd else { return }
+    let value = measured(for: lastEnd, screen: lastScreen)
+    guard abs(value - overlap) > 0.5 else { return }
+    var transaction = Transaction()
+    transaction.disablesAnimations = true
+    withTransaction(transaction) { overlap = value }
+  }
+
+  /// How far up from the bottom of the app's window the keyboard reaches (0: not over it).
+  private func measured(for end: CGRect, screen: UIScreen?) -> CGFloat {
+    let window = Self.window(on: screen)
+    let frame: CGRect
+    if let window, let windowScreen = window.windowScene?.screen, !end.isEmpty {
+      frame = window.convert(end, from: windowScreen.coordinateSpace)
+    } else {
+      frame = end
+    }
+    let bounds = window?.bounds ?? AppWindow.bounds
+    guard !end.isEmpty, frame.minY < bounds.maxY - 1 else { return 0 }
+    // Never more than the keyboard can be (guards against a bogus frame).
+    return min(bounds.height * 0.62, max(0, bounds.maxY - frame.minY))
   }
 
   deinit { tokens.forEach(NotificationCenter.default.removeObserver) }
 
   private func handle(_ note: Notification) {
     let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue ?? .zero
-    // The keyboard's frame is in screen coordinates: where it starts in the app's window.
-    let window = AppWindow.current
-    let frame: CGRect
-    if let window, let screen = window.windowScene?.screen, !end.isEmpty {
-      frame = window.convert(end, from: screen.coordinateSpace)
+    // (The keyboard's notifications come from the screen it's on.)
+    let screen = note.object as? UIScreen
+    let hidingNote = note.name == UIResponder.keyboardWillHideNotification || note.name == UIResponder.keyboardDidHideNotification
+    // The keyboard's frame is in screen coordinates: where it starts in the app's window there.
+    let value = hidingNote ? 0 : measured(for: end, screen: screen)
+    if hidingNote || end.isEmpty {
+      lastEnd = nil
     } else {
-      frame = end
+      lastEnd = end
+      lastScreen = screen
+      // Up (it says so), yet over none of the window: in the log, to find out why if it comes back.
+      if value == 0, note.name == UIResponder.keyboardDidShowNotification {
+        let window = Self.window(on: screen)
+        ActivityLog.shared.add(
+          "Keyboard: up but not over the window (keyboard \(Int(end.minY))–\(Int(end.maxY)), window \(Int(window?.bounds.height ?? 0)) tall, \(UIApplication.shared.connectedScenes.count) scenes)")
+      }
     }
-    let bounds = window?.bounds ?? AppWindow.bounds
-    let hiding =
-      note.name == UIResponder.keyboardWillHideNotification || note.name == UIResponder.keyboardDidHideNotification || end.isEmpty
-      || frame.minY >= bounds.maxY - 1
-    // Never more than the keyboard can be (guards against a bogus frame).
-    let value = hiding ? 0 : min(bounds.height * 0.62, max(0, bounds.maxY - frame.minY))
     if value > 40 { Self.lastHeight = value }
     let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
     guard abs(value - overlap) > 0.5 else { return }
