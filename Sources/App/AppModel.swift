@@ -135,9 +135,10 @@ final class AppSettings: ObservableObject {
   }
   // The user's own HTTP proxy (AdBlocking.customProxy).
   @Published var proxyHost: String { didSet { defaults.set(proxyHost, forKey: "proxyHost"); applyProxy() } }
-  /// Your own proxy: the media playlists through it too (off: only the token and the stream's
-  /// address go through it, the least it needs; the rest goes straight to Twitch).
-  @Published var proxyPlaylists: Bool { didSet { defaults.set(proxyPlaylists, forKey: "proxyPlaylists") } }
+  /// Your own proxy and the media playlists: never through it (only the token and the stream's
+  /// address are, the least it needs), only around ad breaks (the default), or always.
+  enum ProxyPlaylists: String, CaseIterable { case never, duringAds, always }
+  @Published var proxyPlaylists: ProxyPlaylists { didSet { defaults.set(proxyPlaylists.rawValue, forKey: "proxyPlaylistsMode") } }
   @Published var proxyPort: String { didSet { defaults.set(proxyPort, forKey: "proxyPort"); applyProxy() } }
   @Published var proxyUsername: String { didSet { defaults.set(proxyUsername, forKey: "proxyUsername"); applyProxy() } }
   @Published var proxyPassword: String {
@@ -175,7 +176,7 @@ final class AppSettings: ObservableObject {
     proxyPort = defaults.string(forKey: "proxyPort") ?? ""
     proxyUsername = defaults.string(forKey: "proxyUsername") ?? ""
     proxyPassword = SecretStore.get("proxy").flatMap { String(data: $0, encoding: .utf8) } ?? ""
-    proxyPlaylists = defaults.bool(forKey: "proxyPlaylists")
+    proxyPlaylists = ProxyPlaylists(rawValue: defaults.string(forKey: "proxyPlaylistsMode") ?? "") ?? .duringAds
     initialized = true
     applyProxy()
   }
@@ -208,9 +209,12 @@ final class AppSettings: ObservableObject {
   /// `proxyPlaylists`): straight to Twitch. nil: the same client as the rest (no proxy set, or the
   /// playlists through it by choice).
   func mediaClient() -> HTTPClient? {
-    guard playbackProxy != nil, !proxyPlaylists else { return nil }
+    guard playbackProxy != nil, proxyPlaylists != .always else { return nil }
     return Self.direct
   }
+
+  /// Kestrel's player: the media playlists through your proxy only around ad breaks.
+  var proxyPlaylistsDuringAds: Bool { playbackProxy != nil && proxyPlaylists == .duringAds }
 
   /// Straight to Twitch, never through a proxy (one for all: its connections stay open).
   private static let direct = URLSessionHTTPClient(timeout: 10)

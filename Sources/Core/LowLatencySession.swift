@@ -31,6 +31,12 @@ struct LowLatencyConfig: Sendable {
   /// start) and use the ad-free servers only for a copy of the stream during a stitched ad
   /// (asked first among the copies). Off: the stream comes through an ad-free server throughout.
   var adFreeServersForAdsOnly = false
+  /// With the media playlists going straight (`mediaHTTP`, the user's own proxy carrying only the
+  /// token and the address): through the proxy (`http`) while an ad break is announced or on, and
+  /// a little after. Where ads are put into the playlists by where they're asked for from, the
+  /// ones during a break come from the proxy's side; the rest of the time (nearly all of it)
+  /// nothing goes through it.
+  var proxyPlaylistsDuringAds = false
   /// Keeps Twitch's low latency (the segment it's still making) through ad breaks. Kestrel's own
   /// player sets it: it mutes and covers any ad video it's handed (by the ad times the playlists
   /// give, the segment being made included), so holding that segment back (as for the Amazon
@@ -79,6 +85,11 @@ actor LowLatencySession: PlaylistSource {
   private var servedURIs: [Int: Set<String>] = [:]
 
   private var inBreak = false
+  /// The media playlists go through the proxy until then (see `proxyPlaylistsDuringAds`).
+  private var proxiedUntil = Date.distantPast
+  private var proxying = false
+  /// How long after the last sign of an ad break they keep going through it.
+  static let proxiedAfterBreak: TimeInterval = 20
   /// This break's ad-free copy is already being served.
   private var replacedInBreak = false
   private var breakStart = Date.distantPast
@@ -232,7 +243,28 @@ actor LowLatencySession: PlaylistSource {
       fetched = await warm.task.value
     } else {
       warmed = nil
-      fetched = await fetch(URL(string: target.uri))
+      let proxied = config.proxyPlaylistsDuringAds && Date() < proxiedUntil
+      if !proxied, proxying {
+        proxying = false
+        log.add("Ad break on \(login) over: its playlists straight to Twitch again")
+      }
+      fetched = await fetch(URL(string: target.uri), throughProxy: proxied)
+    }
+    // An ad break showing up in a playlist that came straight: through the proxy from now on (a
+    // while), and this one asked for again through it at once.
+    if config.proxyPlaylistsDuringAds, Date() >= proxiedUntil, case .success(let direct) = fetched,
+      direct.playlist.adMarkerActive || !direct.playlist.isClean
+    {
+      proxiedUntil = Date().addingTimeInterval(Self.proxiedAfterBreak)
+      proxying = true
+      log.add("Ad break on \(login): its playlists through your proxy for now")
+      let again = await fetch(URL(string: target.uri), throughProxy: true)
+      if case .success = again { fetched = again }
+    } else if config.proxyPlaylistsDuringAds, Date() < proxiedUntil, case .success(let proxied) = fetched,
+      proxied.playlist.adMarkerActive || !proxied.playlist.isClean
+    {
+      // Still on: a while longer.
+      proxiedUntil = Date().addingTimeInterval(Self.proxiedAfterBreak)
     }
     // On Twitch's server near the viewer: if it turns the stream away or shows an ad, go back to
     // the ad-free server's for good.
@@ -532,10 +564,10 @@ actor LowLatencySession: PlaylistSource {
     case failure(Int)
   }
 
-  private nonisolated func fetch(_ url: URL?, timeout: TimeInterval = 5) async -> FetchResult {
+  private nonisolated func fetch(_ url: URL?, timeout: TimeInterval = 5, throughProxy: Bool = false) async -> FetchResult {
     guard let url else { return .failure(404) }
     do {
-      let (data, response) = try await mediaHTTP.data(for: Usher.playlistRequest(url, timeout: timeout))
+      let (data, response) = try await (throughProxy ? http : mediaHTTP).data(for: Usher.playlistRequest(url, timeout: timeout))
       guard response.statusCode == 200 else { return .failure(response.statusCode) }
       guard HLS.looksLikePlaylist(data), let text = String(data: data, encoding: .utf8) else { return .failure(502) }
       let base = response.url ?? url

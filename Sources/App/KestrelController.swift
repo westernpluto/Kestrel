@@ -56,6 +56,7 @@ final class KestrelController {
     // Low latency through ad breaks: this player hides any ad video it's handed (see apply), so
     // the newest segment isn't held back (that stalled it at every break).
     config.lowLatencyThroughAds = true
+    config.proxyPlaylistsDuringAds = AppSettings.shared.proxyPlaylistsDuringAds
     config.checkAccountFirst = TwitchAuth.shared.session != nil
     config.nearbyServers = AppSettings.shared.nearbyServers
     let session = LowLatencySession(

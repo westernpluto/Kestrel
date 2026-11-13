@@ -876,6 +876,67 @@ final class UpdateBox: @unchecked Sendable {
   }
 }
 
+/// Counts the media playlist requests that go through it (standing in for the user's proxy, or
+/// straight): tokens and stream addresses (usher) aren't counted.
+final class CountingClient: HTTPClient, @unchecked Sendable {
+  let inner: HTTPClient
+  private let lock = NSLock()
+  private var n = 0
+  init(_ inner: HTTPClient) { self.inner = inner }
+  var count: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return n
+  }
+  func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    if request.url?.host == "weaver.test" {
+      lock.lock()
+      n += 1
+      lock.unlock()
+    }
+    return try await inner.data(for: request)
+  }
+}
+
+func testProxyDuringAds() {
+  // Your own proxy carrying the media playlists only around an ad break: straight to Twitch
+  // otherwise; at the first sign of a break, asked again through the proxy at once, and through
+  // it from then on.
+  runAsync {
+    let fake = FakeTwitch()
+    fake.mainMarkers = 26..<34
+    let proxy = CountingClient(fake)
+    let direct = CountingClient(fake)
+    var config = LowLatencyConfig()
+    config.proxyPlaylistsDuringAds = true
+    config.lowLatencyThroughAds = true
+    let session = LowLatencySession(login: "streamer", config: config, http: proxy, mediaHTTP: direct, tokens: fake, log: ActivityLog())
+    _ = try! await session.start()
+    let atStart = (proxy.count, direct.count)
+    _ = await session.mediaPlaylist(0)
+    check(proxy.count == atStart.0 && direct.count == atStart.1 + 1, "no break: straight (\(proxy.count - atStart.0) through the proxy)")
+    fake.advance(4)  // the announced break reaches the live edge
+    _ = await session.mediaPlaylist(0)
+    check(direct.count >= atStart.1 + 2 && proxy.count == atStart.0 + 1, "break seen straight, asked again through the proxy (\(proxy.count - atStart.0))")
+    _ = await session.mediaPlaylist(0)
+    check(proxy.count == atStart.0 + 2, "during the break: through the proxy (\(proxy.count - atStart.0))")
+  }
+  // Off: always straight.
+  runAsync {
+    let fake = FakeTwitch()
+    fake.mainMarkers = 26..<34
+    let proxy = CountingClient(fake)
+    let direct = CountingClient(fake)
+    let session = LowLatencySession(login: "streamer", config: LowLatencyConfig(), http: proxy, mediaHTTP: direct, tokens: fake, log: ActivityLog())
+    _ = try! await session.start()
+    let before = proxy.count
+    fake.advance(4)
+    _ = await session.mediaPlaylist(0)
+    _ = await session.mediaPlaylist(0)
+    check(proxy.count == before, "off: none through the proxy")
+  }
+}
+
 func testLowLatencySession() {
   // Clean stream and client-side breaks: Twitch's playlist passes through with its low-latency
   // tags, minus ad markers.
@@ -2508,6 +2569,7 @@ func testFMP4Demux() {
 testFMP4Demux()
 testTSDemux()
 testMP4Writer()
+testProxyDuringAds()
 testTokenAddress()
 testDeviceLogin()
 testCatchUpSimulation()

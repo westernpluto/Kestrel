@@ -361,12 +361,16 @@ struct AdBlockingView: View {
           TextField("Username (optional)", text: $settings.proxyUsername)
             .textInputAutocapitalization(.never).autocorrectionDisabled()
           SecureField("Password (optional)", text: $settings.proxyPassword)
-          Toggle("Playlists through the proxy too", isOn: $settings.proxyPlaylists)
+          Picker("Playlists through it", selection: $settings.proxyPlaylists) {
+            Text("Never").tag(AppSettings.ProxyPlaylists.never)
+            Text("During ad breaks").tag(AppSettings.ProxyPlaylists.duringAds)
+            Text("Always").tag(AppSettings.ProxyPlaylists.always)
+          }
           ProxyTestRow(proxy: settings.playbackProxy)
         } header: {
           Text("Your proxy")
         } footer: {
-          Text("Only what decides about ads goes through it: the stream's token and its address, a few small requests when a stream starts. The video, the playlists (asked for every second or so), recordings and downloads go straight to Twitch. Turn on Playlists through the proxy too if ads get through anyway (more data through it). The test asks Twitch for a stream through it and without it, and shows the address Twitch saw each time.")
+          Text("The stream's token and address always go through it (a few small requests when a stream starts); the video, recordings and downloads never do. The playlists (asked for every second or so): During ad breaks sends them through it only from the moment a break shows until shortly after (a couple of hundred KB a break, with Kestrel's player); Always, the whole time (about 20 MB an hour); Never, not at all. The test asks Twitch for a stream through it and without it, and shows the address Twitch saw each time.")
         }
       }
     }
