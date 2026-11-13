@@ -149,6 +149,9 @@ final class KestrelController {
       model?.kestrelEngineReady()
       engine.start()
       ActivityLog.shared.add("Kestrel player: \(login) at \(found.indices.contains(engine.rendition) ? found[engine.rendition].label : found[start].label)")
+      if RecordingStore.shared.isRecording(login) {
+        ActivityLog.shared.add("Kestrel player: \(login) is being recorded too (that download gives way to this one)")
+      }
     } catch StreamSession.StartError.offline {
       model?.phase = .offline
     } catch {

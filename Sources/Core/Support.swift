@@ -31,9 +31,12 @@ final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
   let session: URLSession
   let proxy: HTTPProxy?
 
-  init(timeout: TimeInterval = 10, proxy: HTTPProxy? = nil) {
+  /// - Parameter givesWay: downloads that give way to others on a busy connection (iOS's
+  ///   background network class): a recording, beside the stream being watched.
+  init(timeout: TimeInterval = 10, proxy: HTTPProxy? = nil, givesWay: Bool = false) {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.timeoutIntervalForRequest = timeout
+    if givesWay { configuration.networkServiceType = .background }
     configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
     configuration.urlCache = nil
     configuration.httpMaximumConnectionsPerHost = 6

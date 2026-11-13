@@ -180,7 +180,10 @@ final class RecordingStore: ObservableObject {
     config.nearbyServers = settings.nearbyServers
     let recorder = StreamRecorder(
       info: info, directory: root.appendingPathComponent(id, isDirectory: true), maxHeight: maxHeight, config: config,
-      http: settings.playbackClient(timeout: 20), tokens: TwitchAPI.shared
+      // (Giving way to the stream being watched: recording the channel being watched, both at
+      // 1080p60 over the same Wi-Fi, the player got under three quarters of what it needed and
+      // stalled every few seconds. With the connection to itself, it gets all of it.)
+      http: settings.playbackClient(timeout: 20, givesWay: true), tokens: TwitchAPI.shared
     ) { [weak self] status in
       Task { @MainActor in self?.update(status) }
     }

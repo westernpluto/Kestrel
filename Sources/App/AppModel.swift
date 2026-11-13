@@ -196,8 +196,8 @@ final class AppSettings: ObservableObject {
   }
 
   /// HTTP client for Twitch tokens and playlists (through the user's proxy when one is set).
-  func playbackClient(timeout: TimeInterval = 8) -> HTTPClient {
-    URLSessionHTTPClient(timeout: timeout, proxy: playbackProxy)
+  func playbackClient(timeout: TimeInterval = 8, givesWay: Bool = false) -> HTTPClient {
+    URLSessionHTTPClient(timeout: timeout, proxy: playbackProxy, givesWay: givesWay)
   }
 
   private let sharedLock = NSLock()

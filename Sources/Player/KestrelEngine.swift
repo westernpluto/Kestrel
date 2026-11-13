@@ -741,6 +741,8 @@ final class KestrelEngine: NSObject {
       load.skip = load.received
     }
     let task = urlSession.dataTask(with: request)
+    // (First on the connection: before a recording downloading at the same time, say.)
+    task.priority = URLSessionTask.highPriority
     load.task = task
     load.requestedAt = Date()
     task.resume()
