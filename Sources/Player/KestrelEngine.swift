@@ -1806,7 +1806,18 @@ final class KestrelEngine: NSObject {
 
   /// A few of a picture's pixels (an 8 by 8 grid of its brightness), hashed: the same picture
   /// gives the same number.
+  ///
+  /// Only for the plain layouts whose bytes can be read as they are: the screen's pictures are
+  /// often in a compressed one (lossless "&8v0" and the like), and reading those as rows of pixels
+  /// read past the picture and crashed the app a few seconds into every stream.
+  private static let readableFormats: Set<OSType> = [
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
+    kCVPixelFormatType_32BGRA,
+  ]
+
   private static func fingerprint(_ buffer: CVPixelBuffer) -> UInt64? {
+    guard readableFormats.contains(CVPixelBufferGetPixelFormatType(buffer)) else { return nil }
     guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { return nil }
     defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
     let planar = CVPixelBufferIsPlanar(buffer)
@@ -1815,13 +1826,17 @@ final class KestrelEngine: NSObject {
     let height = planar ? CVPixelBufferGetHeightOfPlane(buffer, 0) : CVPixelBufferGetHeight(buffer)
     let row = planar ? CVPixelBufferGetBytesPerRowOfPlane(buffer, 0) : CVPixelBufferGetBytesPerRow(buffer)
     guard width > 16, height > 16, row >= width else { return nil }
+    // (Every byte read stays inside the plane.)
+    let size = row * height
     let bytes = base.assumingMemoryBound(to: UInt8.self)
     var hash: UInt64 = 0xcbf2_9ce4_8422_2325
     for gy in 1...8 {
       for gx in 1...8 {
         let x = width * gx / 9
         let y = height * gy / 9
-        hash = (hash ^ UInt64(bytes[y * row + x])) &* 0x100_0000_01b3
+        let at = min(y, height - 1) * row + min(x, width - 1)
+        guard at >= 0, at < size else { return nil }
+        hash = (hash ^ UInt64(bytes[at])) &* 0x100_0000_01b3
       }
     }
     return hash
