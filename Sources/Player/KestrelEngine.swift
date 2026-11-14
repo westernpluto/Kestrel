@@ -1742,6 +1742,11 @@ final class KestrelEngine: NSObject {
 
   /// The picture on screen, and since when it's been that one.
   private var shownPicture: CVPixelBuffer?
+  /// What the picture showing looks like (a few of its pixels), to tell a held picture by: the
+  /// renderer can hand back a new buffer each time for the same picture, and compared by identity
+  /// the hold was never seen (a picture changing only at keyframes, every two seconds, went on
+  /// until the stream was opened again).
+  private var shownFingerprint: UInt64?
   private var shownSince = Date()
   private var videoFramesAtShown = 0
   private var lastPictureRescue = Date.distantPast
@@ -1765,8 +1770,12 @@ final class KestrelEngine: NSObject {
       return
     }
     let current = displayLayer.sampleBufferRenderer.displayedPixelBuffer()
-    if current == nil || shownPicture == nil || current! !== shownPicture! {
+    let fingerprint = current.flatMap(Self.fingerprint)
+    let identical = current != nil && shownPicture != nil && current! === shownPicture!
+    let same = identical || (current != nil && fingerprint != nil && fingerprint == shownFingerprint)
+    if !same {
       shownPicture = current
+      shownFingerprint = fingerprint
       shownSince = now
       videoFramesAtShown = videoFramesQueued
       return
@@ -1775,6 +1784,9 @@ final class KestrelEngine: NSObject {
     guard now.timeIntervalSince(shownSince) > 0.75, videoFramesQueued - videoFramesAtShown >= 20,
       now.timeIntervalSince(lastPictureRescue) > 4
     else { return }
+    // (Told only by its pixels, it could be a picture that really is still, a "be right back"
+    // screen: decoding here instead is harmless, a lower quality isn't.)
+    guard identical || decodeInLayer || (mirrorLayer != nil && mirrorFed && !windowUp) else { return }
     lastPictureRescue = now
     shownPicture = nil
     pictureRescues += 1
@@ -1790,6 +1802,29 @@ final class KestrelEngine: NSObject {
     } else {
       ActivityLog.shared.add("Kestrel player: the picture still held (decoded \(framesDecoded), shown \(framesShown), \(decodeErrors) errors)")
     }
+  }
+
+  /// A few of a picture's pixels (an 8 by 8 grid of its brightness), hashed: the same picture
+  /// gives the same number.
+  private static func fingerprint(_ buffer: CVPixelBuffer) -> UInt64? {
+    guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { return nil }
+    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+    let planar = CVPixelBufferIsPlanar(buffer)
+    guard let base = planar ? CVPixelBufferGetBaseAddressOfPlane(buffer, 0) : CVPixelBufferGetBaseAddress(buffer) else { return nil }
+    let width = planar ? CVPixelBufferGetWidthOfPlane(buffer, 0) : CVPixelBufferGetWidth(buffer)
+    let height = planar ? CVPixelBufferGetHeightOfPlane(buffer, 0) : CVPixelBufferGetHeight(buffer)
+    let row = planar ? CVPixelBufferGetBytesPerRowOfPlane(buffer, 0) : CVPixelBufferGetBytesPerRow(buffer)
+    guard width > 16, height > 16, row >= width else { return nil }
+    let bytes = base.assumingMemoryBound(to: UInt8.self)
+    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+    for gy in 1...8 {
+      for gx in 1...8 {
+        let x = width * gx / 9
+        let y = height * gy / 9
+        hash = (hash ^ UInt64(bytes[y * row + x])) &* 0x100_0000_01b3
+      }
+    }
+    return hash
   }
 
   // MARK: Sample buffers
