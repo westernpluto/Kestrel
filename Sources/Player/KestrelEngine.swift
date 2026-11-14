@@ -403,6 +403,8 @@ final class KestrelEngine: NSObject {
   /// For good: the downloads' session is let go (it holds its delegate, this engine, until then).
   func shutDown() {
     stop()
+    if let transfer { VTPixelTransferSessionInvalidate(transfer) }
+    transfer = nil
     urlSession.invalidateAndCancel()
     placeMirror = nil
     onScreenLayers = nil
@@ -1770,12 +1772,12 @@ final class KestrelEngine: NSObject {
       return
     }
     let current = displayLayer.sampleBufferRenderer.displayedPixelBuffer()
-    let fingerprint = current.flatMap(Self.fingerprint)
+    let printed = current.flatMap { self.fingerprint($0) }
     let identical = current != nil && shownPicture != nil && current! === shownPicture!
-    let same = identical || (current != nil && fingerprint != nil && fingerprint == shownFingerprint)
+    let same = identical || (current != nil && printed != nil && printed == shownFingerprint)
     if !same {
       shownPicture = current
-      shownFingerprint = fingerprint
+      shownFingerprint = printed
       shownSince = now
       videoFramesAtShown = videoFramesQueued
       return
@@ -1804,43 +1806,43 @@ final class KestrelEngine: NSObject {
     }
   }
 
-  /// A few of a picture's pixels (an 8 by 8 grid of its brightness), hashed: the same picture
-  /// gives the same number.
+  /// A picture, made tiny (16 by 16) by VideoToolbox into a buffer of our own, hashed: the same
+  /// picture gives the same number.
   ///
-  /// Only for the plain layouts whose bytes can be read as they are: the screen's pictures are
-  /// often in a compressed one (lossless "&8v0" and the like), and reading those as rows of pixels
-  /// read past the picture and crashed the app a few seconds into every stream.
-  private static let readableFormats: Set<OSType> = [
-    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-    kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
-    kCVPixelFormatType_32BGRA,
-  ]
-
-  private static func fingerprint(_ buffer: CVPixelBuffer) -> UInt64? {
-    guard readableFormats.contains(CVPixelBufferGetPixelFormatType(buffer)) else { return nil }
-    guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { return nil }
-    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-    let planar = CVPixelBufferIsPlanar(buffer)
-    guard let base = planar ? CVPixelBufferGetBaseAddressOfPlane(buffer, 0) : CVPixelBufferGetBaseAddress(buffer) else { return nil }
-    let width = planar ? CVPixelBufferGetWidthOfPlane(buffer, 0) : CVPixelBufferGetWidth(buffer)
-    let height = planar ? CVPixelBufferGetHeightOfPlane(buffer, 0) : CVPixelBufferGetHeight(buffer)
-    let row = planar ? CVPixelBufferGetBytesPerRowOfPlane(buffer, 0) : CVPixelBufferGetBytesPerRow(buffer)
-    guard width > 16, height > 16, row >= width else { return nil }
-    // (Every byte read stays inside the plane.)
-    let size = row * height
+  /// Never read straight from the screen's own picture: its memory often isn't laid out as it says
+  /// (compressed layouts), and reading it as rows of pixels read past it and crashed the app a few
+  /// seconds into streams. The transfer handles every layout.
+  private func fingerprint(_ buffer: CVPixelBuffer) -> UInt64? {
+    if transfer == nil {
+      var session: VTPixelTransferSession?
+      guard VTPixelTransferSessionCreate(allocator: kCFAllocatorDefault, pixelTransferSessionOut: &session) == noErr else { return nil }
+      transfer = session
+    }
+    if tiny == nil {
+      var made: CVPixelBuffer?
+      let attributes = [kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()] as CFDictionary
+      guard CVPixelBufferCreate(kCFAllocatorDefault, 16, 16, kCVPixelFormatType_32BGRA, attributes, &made) == kCVReturnSuccess else { return nil }
+      tiny = made
+    }
+    guard let transfer, let tiny, VTPixelTransferSessionTransferImage(transfer, from: buffer, to: tiny) == noErr else { return nil }
+    guard CVPixelBufferLockBaseAddress(tiny, .readOnly) == kCVReturnSuccess else { return nil }
+    defer { CVPixelBufferUnlockBaseAddress(tiny, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddress(tiny) else { return nil }
+    let row = CVPixelBufferGetBytesPerRow(tiny)
     let bytes = base.assumingMemoryBound(to: UInt8.self)
     var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-    for gy in 1...8 {
-      for gx in 1...8 {
-        let x = width * gx / 9
-        let y = height * gy / 9
-        let at = min(y, height - 1) * row + min(x, width - 1)
-        guard at >= 0, at < size else { return nil }
-        hash = (hash ^ UInt64(bytes[at])) &* 0x100_0000_01b3
+    for y in 0..<16 {
+      for x in 0..<16 {
+        // (Green: brightness enough.)
+        hash = (hash ^ UInt64(bytes[y * row + x * 4 + 1])) &* 0x100_0000_01b3
       }
     }
     return hash
   }
+
+  /// For `fingerprint` (made once).
+  private var transfer: VTPixelTransferSession?
+  private var tiny: CVPixelBuffer?
 
   // MARK: Sample buffers
 
