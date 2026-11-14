@@ -898,6 +898,34 @@ final class CountingClient: HTTPClient, @unchecked Sendable {
   }
 }
 
+func testCopyLinedUp() {
+  // An ad-free copy from another server, numbered differently: renumbered to Twitch's own numbers
+  // for the same moments, matched by program date-time.
+  func playlist(sequence: Int, firstAt: TimeInterval, count: Int) -> (text: String, playlist: HLSMediaPlaylist) {
+    var lines = ["#EXTM3U", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:\(sequence)"]
+    for i in 0..<count {
+      lines.append("#EXT-X-PROGRAM-DATE-TIME:" + HLSDate.format(Date(timeIntervalSince1970: firstAt + Double(i) * 2)))
+      lines.append("#EXTINF:2.000,live")
+      lines.append("https://edge.test/s\(sequence + i).ts")
+    }
+    let text = lines.joined(separator: "\n")
+    return (text, HLSMediaPlaylist.parse(text, base: nil))
+  }
+  let main = playlist(sequence: 1000, firstAt: 1_000_000, count: 10)
+  // Its own numbering, and its window three segments later.
+  let copy = playlist(sequence: 5000, firstAt: 1_000_006, count: 10)
+  let offset = LowLatencySession.sequenceOffset(copy: copy.playlist, main: main.playlist)
+  check(offset == 1003 - 5000, "offset \(String(describing: offset))")
+  let renumbered = HLSMediaPlaylist.parse(LowLatencySession.renumber(copy.text, from: 5000, to: 5000 + (offset ?? 0)), base: nil)
+  check(renumbered.mediaSequence == 1003, "copy now numbered as Twitch's: \(renumbered.mediaSequence)")
+  // No moment in common: worked out from the time between the newest of each.
+  let later = playlist(sequence: 7, firstAt: 1_000_040, count: 3)
+  check(LowLatencySession.sequenceOffset(copy: later.playlist, main: main.playlist) == 1020 - 7, "no overlap: by the time between")
+  // Already numbered alike: nothing to change.
+  let same = playlist(sequence: 1003, firstAt: 1_000_006, count: 10)
+  check(LowLatencySession.sequenceOffset(copy: same.playlist, main: main.playlist) == 0, "same numbers: offset 0")
+}
+
 func testProxyDuringAds() {
   // Your own proxy carrying the media playlists only around an ad break: straight to Twitch
   // otherwise; at the first sign of a break, asked again through the proxy at once, and through
@@ -2570,6 +2598,7 @@ testFMP4Demux()
 testTSDemux()
 testMP4Writer()
 testProxyDuringAds()
+testCopyLinedUp()
 testTokenAddress()
 testDeviceLogin()
 testCatchUpSimulation()

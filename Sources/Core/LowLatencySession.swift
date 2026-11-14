@@ -333,7 +333,8 @@ actor LowLatencySession: PlaylistSource {
           ads.closeOpenBreak()
           replacedInBreak = true
           publish(.replaced("\(backup.type) · \(match.label)"))
-          return serve(index, LowLatencyPlaylist.filter(copy.text, base: copy.url, dropPrefetch: false))
+          let lined = lineUp(copy, with: main.playlist, copyType: backup.type)
+          return serve(index, LowLatencyPlaylist.filter(lined, base: copy.url, dropPrefetch: false))
         case .success:
           log.add("Ad-free copy (\(backup.type)) started showing ads, looking for another")
           contaminated.insert(backup.type)
@@ -354,6 +355,54 @@ actor LowLatencySession: PlaylistSource {
     return serve(index, LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: !config.lowLatencyThroughAds))
   }
 
+  /// How far the ad-free copy's segment numbers are from Twitch's own stream's, by copy.
+  private var copyOffsets: [String: Int] = [:]
+
+  /// The ad-free copy's playlist with its segments numbered as Twitch's own stream numbers the
+  /// same moments (matched by their program date-time). The player picks the segments to fetch by
+  /// their numbers: a copy from another server numbered differently looked like a jump, and the
+  /// player fetched the copy's whole window at once, fell over 15 s behind and started over, at
+  /// every ad. Worked out once per copy, when it first takes over.
+  private func lineUp(_ copy: (text: String, url: URL, playlist: HLSMediaPlaylist), with main: HLSMediaPlaylist, copyType: String) -> String {
+    let offset: Int
+    if let known = copyOffsets[copyType] {
+      offset = known
+    } else if let found = Self.sequenceOffset(copy: copy.playlist, main: main) {
+      offset = found
+      copyOffsets[copyType] = found
+      if found != 0 { log.add("Ad-free copy's segments numbered \(found) apart from Twitch's; lined up") }
+    } else {
+      return copy.text
+    }
+    guard offset != 0 else { return copy.text }
+    return Self.renumber(copy.text, from: copy.playlist.mediaSequence, to: copy.playlist.mediaSequence + offset)
+  }
+
+  /// Twitch's number minus the copy's for the same moment: a segment in both, matched by its
+  /// program date-time (within half a segment); failing that, the newest of each, the time between
+  /// them counted in segments.
+  static func sequenceOffset(copy: HLSMediaPlaylist, main: HLSMediaPlaylist) -> Int? {
+    let copySegments = copy.regularSegments
+    let mainSegments = main.regularSegments
+    for (ci, segment) in copySegments.enumerated().reversed() {
+      guard let at = segment.pdt else { continue }
+      let tolerance = max(0.4, segment.duration / 2)
+      if let mi = mainSegments.firstIndex(where: { $0.pdt.map { abs($0.timeIntervalSince(at)) < tolerance } ?? false }) {
+        return (main.mediaSequence + mi) - (copy.mediaSequence + ci)
+      }
+    }
+    guard let copyLast = copySegments.last, let copyAt = copyLast.pdt, let mainLast = mainSegments.last, let mainAt = mainLast.pdt
+    else { return nil }
+    let length = max(0.5, mainLast.duration)
+    let apart = Int((copyAt.timeIntervalSince(mainAt) / length).rounded())
+    return (main.mediaSequence + mainSegments.count - 1) - (copy.mediaSequence + copySegments.count - 1) + apart
+  }
+
+  /// The playlist with its first segment numbered `to` instead of `from`.
+  static func renumber(_ text: String, from: Int, to: Int) -> String {
+    text.replacingOccurrences(of: "#EXT-X-MEDIA-SEQUENCE:\(from)", with: "#EXT-X-MEDIA-SEQUENCE:\(to)")
+  }
+
   private func serve(_ index: Int, _ body: String) -> (status: Int, body: String) {
     lastServed[index] = body
     servedURIs[index] = Set(HLSMediaPlaylist.parse(body, base: nil).segments.map(\.uri))
@@ -365,6 +414,7 @@ actor LowLatencySession: PlaylistSource {
   private func beginBreak() {
     inBreak = true
     replacedInBreak = false
+    copyOffsets = [:]
     breakID += 1
     breakStart = Date()
     contaminated = []
