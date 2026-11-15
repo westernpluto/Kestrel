@@ -763,9 +763,8 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
     MainActor.assumeIsolated {
       ignorePausesUntil = Date().addingTimeInterval(1.5)
       guard let engine = controller?.engine else { return }
-      engine.screenInPictureInPicture = false
       engine.screenNote("window gone: picture back in the app")
-      engine.dropHandbackCoverWhenDrawing()
+      engine.pictureInPictureEnded()
     }
   }
 

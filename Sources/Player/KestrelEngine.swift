@@ -43,6 +43,22 @@ final class KestrelEngine: NSObject {
   /// The screen's layer is in the Picture in Picture window (the kind with controls: iOS takes the
   /// layer itself, no copy). It goes on being fed in the background, and caught up in place.
   var screenInPictureInPicture = false
+  /// When the Picture in Picture window last went (see `holdScreenLayer`).
+  private var pictureInPictureEndedAt = Date.distantPast
+  /// The screen's layer is kept, not replaced, when it needs catching up: while it's in the window,
+  /// under the still on the way back, and for 3 s after. Swapped for a fresh layer just after the
+  /// window came back, the old one went black for a frame and an old still showed until the new
+  /// one drew (and the window's controller was made again on top of that).
+  private var holdScreenLayer: Bool {
+    screenInPictureInPicture || handbackCover != nil || Date().timeIntervalSince(pictureInPictureEndedAt) < 3
+  }
+
+  /// The window's gone and the picture is back in the app.
+  func pictureInPictureEnded() {
+    screenInPictureInPicture = false
+    pictureInPictureEndedAt = Date()
+    dropHandbackCoverWhenDrawing()
+  }
   /// Told when the screen's layer is replaced by a fresh one (see `catchUpScreen`): the Picture in
   /// Picture controller is made again on the new one.
   var onScreenLayerReplaced: (() -> Void)?
@@ -1110,7 +1126,7 @@ final class KestrelEngine: NSObject {
       displayLayer.flush()
       return false
     }
-    if onScreenLayers != nil, !screenInPictureInPicture {
+    if onScreenLayers != nil, !holdScreenLayer {
       // A fresh layer on top: empty, it's see-through, so whatever picture is up stays until the
       // new one has the frame playing now. A layer on screen is never flushed (that went black
       // for a moment): the one showing a picture stays underneath, an empty one is let go.
@@ -1132,11 +1148,17 @@ final class KestrelEngine: NSObject {
         coverLayer = makeCover(of: current)
       }
       onScreenLayers?()
-      onScreenLayerReplaced?()
       screenNote("caught up on a fresh layer")
     } else {
-      // (In the Picture in Picture window, the layer iOS holds is caught up where it is.)
+      // Around Picture in Picture the layer is caught up where it is, under a still of what it
+      // showed (in the window the window's own, short blank is all there is).
+      if onScreenLayers != nil, !screenInPictureInPicture, handbackCover == nil, let still = makeCover(of: displayLayer) {
+        handbackCover = still
+        onScreenLayers?()
+        dropHandbackCoverWhenDrawing()
+      }
       displayLayer.flush()
+      screenNote("caught up in place")
     }
     caughtUpAt = Date()
     drawingSince = nil
@@ -1181,6 +1203,9 @@ final class KestrelEngine: NSObject {
     coverLayer = nil
     old.flushAndRemoveImage()
     onScreenLayers?()
+    // Picture in Picture moves to the new layer once the old one is gone (made again sooner, while
+    // the old one still showed, could clear it).
+    onScreenLayerReplaced?()
   }
 
   /// The app is back and active (decoding allowed again): the screen catches up at once, onto a
@@ -1220,7 +1245,7 @@ final class KestrelEngine: NSObject {
   }
 
   /// The window's gone: the still comes off once the picture has been drawing a moment (at most
-  /// 1.5 s).
+  /// 2 s).
   func dropHandbackCoverWhenDrawing() {
     guard handbackCover != nil else { return }
     let started = Date()
@@ -1229,10 +1254,10 @@ final class KestrelEngine: NSObject {
       guard let cover = handbackCover else { return }
       let waited = Date().timeIntervalSince(started)
       if screenDrawing, !screenInPictureInPicture { drawingSince = drawingSince ?? Date() } else { drawingSince = nil }
-      if waited > 1.5 || (drawingSince.map { Date().timeIntervalSince($0) > 0.25 } ?? false) {
+      if waited > 2 || (drawingSince.map { Date().timeIntervalSince($0) > 0.25 } ?? false) {
         if handbackCover === cover { handbackCover = nil }
         onScreenLayers?()
-        screenNote(waited > 1.5 ? "still taken off (picture not back in time)" : "still taken off")
+        screenNote(waited > 2 ? "still taken off (picture not back in time)" : "still taken off")
       } else {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30) { MainActor.assumeIsolated { check() } }
       }
