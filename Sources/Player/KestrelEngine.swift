@@ -58,6 +58,7 @@ final class KestrelEngine: NSObject {
     screenInPictureInPicture = false
     pictureInPictureEndedAt = Date()
     refitScreen?()
+    watchHandback()
     // (And again in a moment: the layer's size can still be settling.)
     for delay in [0.05, 0.2, 0.5, 1.0] {
       DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -1257,8 +1258,9 @@ final class KestrelEngine: NSObject {
     screenNote("still up for the way back")
   }
 
-  /// The window's gone: the still comes off once the picture has been drawing a moment (at most
-  /// 2 s).
+  /// The window's gone: the still comes off once the picture has been drawing a while, and not
+  /// before 0.9 s (at most 2.5 s). Taken off 0.3 s after, iOS still blanked the layer for a frame
+  /// about 0.3 s later (seen in a recording: one black frame 0.6 s after the window landed).
   func dropHandbackCoverWhenDrawing() {
     guard handbackCover != nil else { return }
     let started = Date()
@@ -1268,16 +1270,41 @@ final class KestrelEngine: NSObject {
       let waited = Date().timeIntervalSince(started)
       if screenDrawing, !screenInPictureInPicture { drawingSince = drawingSince ?? Date() } else { drawingSince = nil }
       refitScreen?()
-      if waited > 2 || (drawingSince.map { Date().timeIntervalSince($0) > 0.25 } ?? false) {
+      let settled = waited >= 0.9 && (drawingSince.map { Date().timeIntervalSince($0) > 0.3 } ?? false)
+      if waited > 2.5 || settled {
         if handbackCover === cover { handbackCover = nil }
         onScreenLayers?()
         refitScreen?()
-        screenNote(waited > 2 ? "still taken off (picture not back in time)" : "still taken off")
+        screenNote(waited > 2.5 ? "still taken off (picture not back in time)" : "still taken off")
       } else {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30) { MainActor.assumeIsolated { check() } }
       }
     }
     check()
+  }
+
+  /// For 2.5 s after the window goes: each change in the screen's layer (a frame or none, its
+  /// state, its size) in the Activity log, timed from then, to see when iOS blanks it.
+  func watchHandback() {
+    let started = Date()
+    var last = ""
+    @MainActor func look() {
+      let ms = Int(Date().timeIntervalSince(started) * 1000)
+      var picture = "?"
+      if #available(iOS 17.4, tvOS 17.4, *) { picture = displayLayer.sampleBufferRenderer.displayedPixelBuffer() == nil ? "empty" : "frame" }
+      let size = displayLayer.bounds.size
+      let state = "\(picture), \(displayLayer.status == .rendering ? "rendering" : displayLayer.status == .failed ? "failed" : "unknown")"
+        + "\(displayLayer.requiresFlushToResumeDecoding ? ", needs flush" : "")\(displayLayer.isReadyForMoreMediaData ? "" : ", full")"
+        + ", \(Int(size.width))x\(Int(size.height))\(displayLayer.superlayer == nil ? ", not in a view" : "")\(handbackCover == nil ? "" : ", still up")"
+      if state != last {
+        last = state
+        ActivityLog.shared.add("PiP hand-back +\(ms) ms: \(state)")
+      }
+      if ms < 2500 {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 120) { MainActor.assumeIsolated { look() } }
+      }
+    }
+    look()
   }
 
   // MARK: Decoding (VideoToolbox)
