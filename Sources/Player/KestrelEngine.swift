@@ -396,6 +396,10 @@ final class KestrelEngine: NSObject {
   /// For good: the downloads' session is let go (it holds its delegate, this engine, until then).
   func shutDown() {
     stop()
+    if handbackCover != nil {
+      handbackCover = nil
+      onScreenLayers?()
+    }
     if let transfer { VTPixelTransferSessionInvalidate(transfer) }
     transfer = nil
     urlSession.invalidateAndCancel()
@@ -1259,8 +1263,8 @@ final class KestrelEngine: NSObject {
   }
 
   /// The window's gone: the still comes off once the picture has been drawing a while, and not
-  /// before 0.9 s (at most 2.5 s). Taken off 0.3 s after, iOS still blanked the layer for a frame
-  /// about 0.3 s later (seen in a recording: one black frame 0.6 s after the window landed).
+  /// before 0.5 s (at most 2.5 s). iOS blanks the picture's part of the app for a few frames right
+  /// as the window goes (the still is over the whole window now, out of reach of that).
   func dropHandbackCoverWhenDrawing() {
     guard handbackCover != nil else { return }
     let started = Date()
@@ -1270,7 +1274,7 @@ final class KestrelEngine: NSObject {
       let waited = Date().timeIntervalSince(started)
       if screenDrawing, !screenInPictureInPicture { drawingSince = drawingSince ?? Date() } else { drawingSince = nil }
       refitScreen?()
-      let settled = waited >= 0.9 && (drawingSince.map { Date().timeIntervalSince($0) > 0.3 } ?? false)
+      let settled = waited >= 0.5 && (drawingSince.map { Date().timeIntervalSince($0) > 0.3 } ?? false)
       if waited > 2.5 || settled {
         if handbackCover === cover { handbackCover = nil }
         onScreenLayers?()

@@ -662,7 +662,8 @@ struct KestrelVideoView: UIViewRepresentable {
     func show(_ video: AVSampleBufferDisplayLayer, retiring: AVSampleBufferDisplayLayer?, cover: CALayer? = nil, over: CALayer? = nil) {
       CATransaction.begin()
       CATransaction.setDisableActions(true)
-      let wanted: [CALayer] = [retiring, cover, video, over].compactMap { $0 }
+      placeStill(over)
+      let wanted: [CALayer] = [retiring, cover, video].compactMap { $0 }
       if wanted.map(ObjectIdentifier.init) != shown.map(ObjectIdentifier.init) {
         for layer in shown where !wanted.contains(where: { $0 === layer }) { layer.removeFromSuperlayer() }
         // Only new ones are put in, each above the one before it.
@@ -683,8 +684,52 @@ struct KestrelVideoView: UIViewRepresentable {
       CATransaction.commit()
     }
 
+    /// The still on the way back from Picture in Picture, in a view of its own on top of the whole
+    /// window, over this view's spot. In this view, it went black with the picture: as the window
+    /// goes, iOS blanks the part of the app holding the picture's layer for a few frames (chat
+    /// beside it stayed), still and all.
+    private let stillView: UIView = {
+      let view = UIView()
+      view.isUserInteractionEnabled = false
+      view.backgroundColor = .black
+      view.clipsToBounds = true
+      return view
+    }()
+    private weak var still: CALayer?
+
+    override func didMoveToWindow() {
+      super.didMoveToWindow()
+      // (The player closed with the still up: it goes with it.)
+      if window == nil, still != nil { placeStill(nil) }
+    }
+
+    private func placeStill(_ layer: CALayer?) {
+      guard let layer, let window else {
+        still?.removeFromSuperlayer()
+        still = nil
+        stillView.removeFromSuperview()
+        return
+      }
+      if stillView.superview !== window { window.addSubview(stillView) }
+      window.bringSubviewToFront(stillView)
+      stillView.frame = convert(bounds, to: window)
+      if layer !== still {
+        still?.removeFromSuperlayer()
+        stillView.layer.addSublayer(layer)
+        still = layer
+      }
+      layer.frame = stillView.bounds
+    }
+
     /// The screen's layers at this view's size now (see `KestrelEngine.refitScreen`).
     func refit() {
+      if let still, let window, stillView.superview === window {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        stillView.frame = convert(bounds, to: window)
+        still.frame = stillView.bounds
+        CATransaction.commit()
+      }
       guard !screenLent else { return }
       CATransaction.begin()
       CATransaction.setDisableActions(true)
