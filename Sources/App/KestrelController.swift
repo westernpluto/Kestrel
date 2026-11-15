@@ -650,6 +650,10 @@ struct KestrelVideoView: UIViewRepresentable {
         host.isUserInteractionEnabled = false
         host.backgroundColor = .clear
       }
+      // The picture's view is opaque: the Picture in Picture copy right behind it (a second picture,
+      // often a few seconds old: it's only fed when the window may open) never shows through, as it
+      // did around the picture while it zoomed in or out, and whenever the picture was empty a moment.
+      screenHost.backgroundColor = .black
       addSubview(mirrorHost)
       addSubview(screenHost)
     }

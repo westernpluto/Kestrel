@@ -1771,6 +1771,9 @@ final class KestrelEngine: NSObject {
       shownPicture = nil
       return
     }
+    // (Twice a second is enough to see a hold of most of a second; each look copies the picture.)
+    guard now.timeIntervalSince(lastPictureLook) >= 0.5 else { return }
+    lastPictureLook = now
     let current = displayLayer.sampleBufferRenderer.displayedPixelBuffer()
     let printed = current.flatMap { self.fingerprint($0) }
     let identical = current != nil && shownPicture != nil && current! === shownPicture!
@@ -1839,6 +1842,8 @@ final class KestrelEngine: NSObject {
     }
     return hash
   }
+
+  private var lastPictureLook = Date.distantPast
 
   /// For `fingerprint` (made once).
   private var transfer: VTPixelTransferSession?
