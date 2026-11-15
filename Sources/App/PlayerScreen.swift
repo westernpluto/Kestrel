@@ -360,6 +360,36 @@ final class KeyboardObserver: ObservableObject {
     return AppWindow.current
   }
 
+  /// What the player screen last laid itself out with (see `checkSoon`).
+  private(set) static var laidOutKeyboard: CGFloat = 0
+  private(set) static var laidOutHeight: CGFloat = 0
+  static func laidOut(keyboard: CGFloat, height: CGFloat) {
+    laidOutKeyboard = keyboard
+    laidOutHeight = height
+  }
+
+  /// Chat's message box just got the keyboard: a second on, the keyboard should be measured and
+  /// the screen laid out around it. If not, measured again, and said in the Activity log either
+  /// way (the message box stayed under the keyboard now and then, on iPhone Duo's inner display,
+  /// until the stream was opened again; which part failed wasn't known).
+  func checkSoon() {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+      guard let self else { return }
+      let before = self.overlap
+      if before == 0 { self.measureAgain() }
+      let after = self.overlap
+      let screen = Self.laidOutKeyboard
+      guard before == 0 || screen == 0 else { return }
+      let window = Self.window(on: self.lastScreen)
+      let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        .map { "\($0.activationState == .foregroundActive ? "active" : "inactive") \(Int($0.screen.bounds.width))×\(Int($0.screen.bounds.height))" }
+        .joined(separator: ", ")
+      ActivityLog.shared.add(
+        "Keyboard: typing, measured \(Int(before)) then \(Int(after)); screen laid out for \(Int(screen)) at \(Int(Self.laidOutHeight)) tall; "
+          + "keyboard frame \(self.lastEnd.map { "\(Int($0.minY))–\(Int($0.maxY))" } ?? "never reported"), window \(Int(window?.bounds.height ?? 0)) tall; scenes: \(scenes)")
+    }
+  }
+
   private func measureAgain() {
     guard let lastEnd else { return }
     let value = measured(for: lastEnd, screen: lastScreen)
@@ -1178,6 +1208,7 @@ struct PlayerScreen: View {
       let layoutSafe = CGSize(
         width: screenWidth - layoutInsets.leading - layoutInsets.trailing,
         height: screenHeight - layoutInsets.top - layoutInsets.bottom)
+      let _ = KeyboardObserver.laidOut(keyboard: keyboard.overlap, height: screenHeight)
       let layout = PlayerLayout(
         safe: layoutSafe, insets: layoutInsets, keyboard: keyboard.overlap, chatOpen: chatOpen,
         chatWidth: resizedWidth ?? screenWidth * chatShare,

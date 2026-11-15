@@ -1540,6 +1540,7 @@ struct ChatPanel: View {
     .onChange(of: account.session?.login) { _ in chat.reconnect() }
     .onChange(of: focused) { isFocused in
       if isFocused, pickerOpen { closePickerUnderKeyboard() }
+      if isFocused { KeyboardObserver.shared.checkSoon() }
     }
     .onChange(of: active) { isActive in
       guard !isActive else { return }
