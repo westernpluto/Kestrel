@@ -439,12 +439,25 @@ final class KestrelEngine: NSObject {
   private var capPosition: Int?
 
   func setCap(_ rendition: Int?) {
-    capPosition = rendition.flatMap { renditions.firstIndex(of: $0) }
+    let newCap = rendition.flatMap { renditions.firstIndex(of: $0) }
+    // What Auto had learned before the first cap comes back when the cap goes (the mini player
+    // opened full size again). Left at the cap's step, with no try at better for good, Auto stayed
+    // at 480p after the mini player for the rest of the stream on a good connection.
+    if capPosition == nil, newCap != nil { fitBeforeCap = fit }
+    capPosition = newCap
     // Auto's steps count from the cap (a step down from above it would change nothing; a cap
     // raised for a bigger picture is taken at once).
-    if let capPosition { fit.start(at: capPosition, tryAfter: 1e9) }
+    if let capPosition {
+      fit.start(at: capPosition, tryAfter: 1e9)
+    } else if let saved = fitBeforeCap {
+      fit = saved
+      fitBeforeCap = nil
+    }
     if autoQuality { applyFit() }
   }
+
+  /// Auto as it was before the cap (see `setCap`).
+  private var fitBeforeCap: ConnectionFit?
 
   /// Plays what Auto has settled on, within the cap.
   private func applyFit() {
@@ -521,6 +534,7 @@ final class KestrelEngine: NSObject {
   func setAuto() {
     autoQuality = true
     fit = ConnectionFit(count: renditions.count)
+    if capPosition != nil { fitBeforeCap = fit }
     if let capPosition { fit.start(at: capPosition, tryAfter: 1e9) }
     applyFit()
   }
@@ -1722,7 +1736,7 @@ final class KestrelEngine: NSObject {
     let now = Date()
     guard clockRunning, speed > 0, stalledSince == nil, !settling, !inBackground,
       UIApplication.shared.applicationState == .active, !screenInPictureInPicture, !displayLayer.isHidden,
-      retiringLayer == nil, now.timeIntervalSince(caughtUpAt) > 2,
+      retiringLayer == nil, now.timeIntervalSince(caughtUpAt) > 2, now.timeIntervalSince(lastScreenChange) > 3,
       let since = playingSince, now.timeIntervalSince(since) > 4
     else {
       shownPicture = nil
