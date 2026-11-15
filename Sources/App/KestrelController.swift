@@ -683,6 +683,16 @@ struct KestrelVideoView: UIViewRepresentable {
       CATransaction.commit()
     }
 
+    /// The screen's layers at this view's size now (see `KestrelEngine.refitScreen`).
+    func refit() {
+      guard !screenLent else { return }
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      screenHost.frame = bounds
+      for layer in shown where layer.frame != screenHost.bounds { layer.frame = screenHost.bounds }
+      CATransaction.commit()
+    }
+
     override func layoutSubviews() {
       super.layoutSubviews()
       guard !screenLent else { return }
@@ -705,6 +715,7 @@ struct KestrelVideoView: UIViewRepresentable {
     let engine = self.engine
     view.show(engine.displayLayer, retiring: engine.retiringLayer, cover: engine.coverLayer, over: engine.handbackCover)
     engine.describeScreen = { [weak view] in view?.screenDescription ?? "no video view" }
+    engine.refitScreen = { [weak view] in view?.refit() }
     engine.screenView = view
     engine.onScreenLayers = { [weak view, weak engine] in
       guard let view, let engine else { return }

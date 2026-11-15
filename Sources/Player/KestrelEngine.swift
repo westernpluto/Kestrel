@@ -57,6 +57,13 @@ final class KestrelEngine: NSObject {
   func pictureInPictureEnded() {
     screenInPictureInPicture = false
     pictureInPictureEndedAt = Date()
+    refitScreen?()
+    // (And again in a moment: the layer's size can still be settling.)
+    for delay in [0.05, 0.2, 0.5, 1.0] {
+      DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+        MainActor.assumeIsolated { self?.refitScreen?() }
+      }
+    }
     dropHandbackCoverWhenDrawing()
   }
   /// Told when the screen's layer is replaced by a fresh one (see `catchUpScreen`): the Picture in
@@ -96,6 +103,10 @@ final class KestrelEngine: NSObject {
 
   /// Where the picture is, for the log (set by the view).
   var describeScreen: (() -> String)?
+  /// Puts the screen's layers back to the view's size, at once (set by the view): iOS hands the
+  /// layer back from Picture in Picture at the size it had in the window (the whole screen), and it
+  /// showed over chat that big for half a second, then shrank into place.
+  var refitScreen: (() -> Void)?
   /// The sound, decoded here and played through AVAudioEngine; it's also the clock (see `syncClock`).
   let audio = AudioOutput()
   /// The picture's clock: on the host clock, kept on the sound's (every screen layer runs on it).
@@ -388,6 +399,7 @@ final class KestrelEngine: NSObject {
     transfer = nil
     urlSession.invalidateAndCancel()
     describeScreen = nil
+    refitScreen = nil
     onScreenLayers = nil
     onScreenLayerReplaced = nil
   }
@@ -1241,6 +1253,7 @@ final class KestrelEngine: NSObject {
     }
     handbackCover = cover
     onScreenLayers?()
+    refitScreen?()
     screenNote("still up for the way back")
   }
 
@@ -1254,9 +1267,11 @@ final class KestrelEngine: NSObject {
       guard let cover = handbackCover else { return }
       let waited = Date().timeIntervalSince(started)
       if screenDrawing, !screenInPictureInPicture { drawingSince = drawingSince ?? Date() } else { drawingSince = nil }
+      refitScreen?()
       if waited > 2 || (drawingSince.map { Date().timeIntervalSince($0) > 0.25 } ?? false) {
         if handbackCover === cover { handbackCover = nil }
         onScreenLayers?()
+        refitScreen?()
         screenNote(waited > 2 ? "still taken off (picture not back in time)" : "still taken off")
       } else {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30) { MainActor.assumeIsolated { check() } }
