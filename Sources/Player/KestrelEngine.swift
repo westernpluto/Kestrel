@@ -35,41 +35,20 @@ final class KestrelEngine: NSObject {
   private(set) var displayLayer = AVSampleBufferDisplayLayer()
   /// The one it replaced, left showing underneath until the new one has a picture.
   private(set) var retiringLayer: AVSampleBufferDisplayLayer?
-  /// Back from the background: the old layer's last frame, held over it until the new one draws.
+  /// Back from Picture in Picture: the frame the window was showing, held over the old layer
+  /// until the new one draws (the old one's picture is often gone after the background: black).
   private(set) var coverLayer: CALayer?
-  /// Coming back from Picture in Picture: a still of the frame the window showed, over the picture
-  /// until it's drawing again in the app (iOS hands the layer back with a few black frames).
-  private(set) var handbackCover: CALayer?
-  /// The screen's layer is in the Picture in Picture window (the kind with controls: iOS takes the
-  /// layer itself, no copy). It goes on being fed in the background, and caught up in place.
-  var screenInPictureInPicture = false
-  /// When the Picture in Picture window last went (see `holdScreenLayer`).
-  private var pictureInPictureEndedAt = Date.distantPast
-  /// The screen's layer is kept, not replaced, when it needs catching up: while it's in the window,
-  /// under the still on the way back, and for 3 s after. Swapped for a fresh layer just after the
-  /// window came back, the old one went black for a frame and an old still showed until the new
-  /// one drew (and the window's controller was made again on top of that).
-  private var holdScreenLayer: Bool {
-    screenInPictureInPicture || handbackCover != nil || Date().timeIntervalSince(pictureInPictureEndedAt) < 3
-  }
-
-  /// The window's gone and the picture is back in the app.
-  func pictureInPictureEnded() {
-    screenInPictureInPicture = false
-    pictureInPictureEndedAt = Date()
-    refitScreen?()
-    watchHandback()
-    // (And again in a moment: the layer's size can still be settling.)
-    for delay in [0.05, 0.2, 0.5, 1.0] {
-      DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-        MainActor.assumeIsolated { self?.refitScreen?() }
-      }
+  /// The screen's picture hidden while Picture in Picture's window is up (the window shows the
+  /// copy; the system's "playing in Picture in Picture" shows in the app).
+  var screenHiddenForPictureInPicture = false {
+    didSet {
+      if oldValue != screenHiddenForPictureInPicture { screenNote(screenHiddenForPictureInPicture ? "window opening: screen hidden" : "window heading back: screen shown") }
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      for layer in [displayLayer, retiringLayer, coverLayer].compactMap({ $0 }) { layer.isHidden = screenHiddenForPictureInPicture }
+      CATransaction.commit()
     }
-    dropHandbackCoverWhenDrawing()
   }
-  /// Told when the screen's layer is replaced by a fresh one (see `catchUpScreen`): the Picture in
-  /// Picture controller is made again on the new one.
-  var onScreenLayerReplaced: (() -> Void)?
   private var retiringSince = Date.distantPast
   private var caughtUpAt = Date.distantPast
   /// Since when the new screen layer has had a frame on screen (see `retireOldLayer`).
@@ -95,6 +74,31 @@ final class KestrelEngine: NSObject {
     if #available(iOS 17.4, tvOS 17.4, *) { return displayLayer.sampleBufferRenderer.displayedPixelBuffer() != nil }
     return true
   }
+  /// The Picture in Picture copy gets frames (only while it may be needed: see KestrelController).
+  private(set) var mirrorFed = false
+
+  /// Starts or stops feeding the copy. Starting brings it straight up to the frame playing now
+  /// from the frames since the last keyframe (decoded out of sight), so a window opening right
+  /// away has the picture.
+  func feedMirror(_ on: Bool) {
+    guard let mirrorLayer, on != mirrorFed else { return }
+    mirrorFed = on
+    // Stopped, it keeps the frame it shows: iOS only offers Picture in Picture (swiping home)
+    // for a copy with a picture, and an empty one made the first swipe after opening a stream
+    // just leave the app.
+    guard on else { return }
+    mirrorLayer.flush()
+    guard decodeInLayer, group.first?.keyframe == true else {
+      mirrorWaiting = true
+      return
+    }
+    mirrorWaiting = false
+    let showing = now
+    for earlier in group {
+      if let sample = earlier.sample(hidden: earlier.pts < showing - frameLength) { mirrorLayer.enqueue(sample) }
+    }
+  }
+
   /// The picture's shape (width to height), once known.
   var videoAspect: CGSize? {
     guard let videoFormat else { return nil }
@@ -102,12 +106,10 @@ final class KestrelEngine: NSObject {
     return size.width > 0 && size.height > 0 ? size : nil
   }
 
-  /// Where the picture is, for the log (set by the view).
-  var describeScreen: (() -> String)?
-  /// Puts the screen's layers back to the view's size, at once (set by the view): iOS hands the
-  /// layer back from Picture in Picture at the size it had in the window (the whole screen), and it
-  /// showed over chat that big for half a second, then shrank into place.
-  var refitScreen: (() -> Void)?
+  /// Puts the Picture in Picture copy's view over the picture's spot again (set by the view).
+  var placeMirror: (() -> Void)?
+  /// Where the copy is, for the log (set by the view).
+  var describeMirror: (() -> String)?
   /// The sound, decoded here and played through AVAudioEngine; it's also the clock (see `syncClock`).
   let audio = AudioOutput()
   /// The picture's clock: on the host clock, kept on the sound's (every screen layer runs on it).
@@ -195,6 +197,9 @@ final class KestrelEngine: NSObject {
   private(set) var audioOverlaps = 0
   private var inAudioOverlap = false
   private var lastAudioJumpNote = Date.distantPast
+  /// The Picture in Picture copy (see `makeMirror`).
+  private(set) var mirrorLayer: AVSampleBufferDisplayLayer?
+  private var mirrorWaiting = true
   private var firstVideoTime: Int64?
   private var lastVideoTime: Int64?
   /// The newest sound in hand (nil while the stream has shown none).
@@ -381,8 +386,10 @@ final class KestrelEngine: NSObject {
     setSpeed(0)
     if keepPicture {
       displayLayer.flush()
+      mirrorLayer?.flush()
     } else {
       displayLayer.flushAndRemoveImage()
+      mirrorLayer?.flushAndRemoveImage()
     }
     retireOldLayer(force: true)
     group = []
@@ -396,17 +403,11 @@ final class KestrelEngine: NSObject {
   /// For good: the downloads' session is let go (it holds its delegate, this engine, until then).
   func shutDown() {
     stop()
-    if handbackCover != nil {
-      handbackCover = nil
-      onScreenLayers?()
-    }
     if let transfer { VTPixelTransferSessionInvalidate(transfer) }
     transfer = nil
     urlSession.invalidateAndCancel()
-    describeScreen = nil
-    refitScreen = nil
+    placeMirror = nil
     onScreenLayers = nil
-    onScreenLayerReplaced = nil
   }
 
   /// Starts over at the live edge (after a pause, a long dropout, a failure).
@@ -1039,18 +1040,18 @@ final class KestrelEngine: NSObject {
     if decodeInLayer {
       // The picture on screen (left alone in the background: it can't decode there, and is
       // brought back up to the frame showing when the app returns).
-      let inWindow = screenInWindow || screenInPictureInPicture
-      if (inBackground && !inWindow)
-        || (UIApplication.shared.applicationState != .active && displayLayer.requiresFlushToResumeDecoding && !inWindow)
+      if (inBackground && !screenInWindow)
+        || (UIApplication.shared.applicationState != .active && displayLayer.requiresFlushToResumeDecoding && !screenInWindow)
       {
-        // Not while the app is still coming back and can't decode yet either: catching up then
-        // reset the screen with every frame; it catches up once the app is active (see
-        // `enteringForeground`).
+        // (Past the keyframe check above: the copy goes on from here.) Not while the app is still
+        // coming back and can't decode yet either: catching up then reset the screen with every
+        // frame; it catches up once the app is active (see `enteringForeground`).
         waitingForKeyframe = false
         screenBehind = true
       } else if !feedScreen(entry, hidden: hidden) {
         return
       }
+      if let mirrorLayer, mirrorFed { feedMirror(mirrorLayer, entry, hidden: hidden) }
     } else {
       guard let session = decoderSession(for: format), let sample = entry.sample(hidden: false) else {
         waitingForKeyframe = true
@@ -1143,7 +1144,7 @@ final class KestrelEngine: NSObject {
       displayLayer.flush()
       return false
     }
-    if onScreenLayers != nil, !holdScreenLayer {
+    if onScreenLayers != nil {
       // A fresh layer on top: empty, it's see-through, so whatever picture is up stays until the
       // new one has the frame playing now. A layer on screen is never flushed (that went black
       // for a moment): the one showing a picture stays underneath, an empty one is let go.
@@ -1160,22 +1161,16 @@ final class KestrelEngine: NSObject {
       let fresh = AVSampleBufferDisplayLayer()
       fresh.videoGravity = current.videoGravity
       fresh.controlTimebase = videoClock
+      fresh.isHidden = screenHiddenForPictureInPicture
       displayLayer = fresh
-      if coverLayer == nil, currentShows {
-        coverLayer = makeCover(of: current)
+      if coverLayer == nil {
+        coverLayer = makeCover(gravity: current.videoGravity)
+        coverLayer?.isHidden = screenHiddenForPictureInPicture
       }
       onScreenLayers?()
       screenNote("caught up on a fresh layer")
     } else {
-      // Around Picture in Picture the layer is caught up where it is, under a still of what it
-      // showed (in the window the window's own, short blank is all there is).
-      if onScreenLayers != nil, !screenInPictureInPicture, handbackCover == nil, let still = makeCover(of: displayLayer) {
-        handbackCover = still
-        onScreenLayers?()
-        dropHandbackCoverWhenDrawing()
-      }
       displayLayer.flush()
-      screenNote("caught up in place")
     }
     caughtUpAt = Date()
     drawingSince = nil
@@ -1187,10 +1182,9 @@ final class KestrelEngine: NSObject {
     return true
   }
 
-  /// A still of the frame a layer is showing.
-  private func makeCover(of layer: AVSampleBufferDisplayLayer) -> CALayer? {
-    let gravity = layer.videoGravity
-    guard #available(iOS 17.4, tvOS 17.4, *), let buffer = layer.sampleBufferRenderer.displayedPixelBuffer()
+  /// A still of the frame the Picture in Picture copy is showing (it played on in the window).
+  private func makeCover(gravity: AVLayerVideoGravity) -> CALayer? {
+    guard #available(iOS 17.4, tvOS 17.4, *), let mirrorLayer, let buffer = mirrorLayer.sampleBufferRenderer.displayedPixelBuffer()
     else { return nil }
     var image: CGImage?
     VTCreateCGImageFromCVPixelBuffer(buffer, options: nil, imageOut: &image)
@@ -1220,9 +1214,6 @@ final class KestrelEngine: NSObject {
     coverLayer = nil
     old.flushAndRemoveImage()
     onScreenLayers?()
-    // Picture in Picture moves to the new layer once the old one is gone (made again sooner, while
-    // the old one still showed, could clear it).
-    onScreenLayerReplaced?()
   }
 
   /// The app is back and active (decoding allowed again): the screen catches up at once, onto a
@@ -1250,65 +1241,42 @@ final class KestrelEngine: NSObject {
     if !catchUpScreen() { waitingForKeyframe = true }
   }
 
-  /// The window is heading back into the app: a still of the frame it shows goes over the picture.
-  func coverForHandback() {
-    guard handbackCover == nil, let cover = makeCover(of: displayLayer) else {
-      screenNote(handbackCover == nil ? "no still for the way back" : "still already up")
-      return
+  /// The Picture in Picture copy: when it can't decode (the app's in the background without
+  /// Picture in Picture), it starts again from the next keyframe.
+  private func feedMirror(_ layer: AVSampleBufferDisplayLayer, _ entry: GroupFrame, hidden: Bool) {
+    if layer.status == .failed || layer.requiresFlushToResumeDecoding {
+      layer.flush()
+      mirrorWaiting = true
     }
-    handbackCover = cover
-    onScreenLayers?()
-    refitScreen?()
-    screenNote("still up for the way back")
+    if mirrorWaiting {
+      guard entry.keyframe else { return }
+      mirrorWaiting = false
+    }
+    if let sample = entry.sample(hidden: hidden) { layer.enqueue(sample) }
   }
 
-  /// The window's gone: the still comes off once the picture has been drawing a while, and not
-  /// before 0.5 s (at most 2.5 s). iOS blanks the picture's part of the app for a few frames right
-  /// as the window goes (the still is over the whole window now, out of reach of that).
-  func dropHandbackCoverWhenDrawing() {
-    guard handbackCover != nil else { return }
-    let started = Date()
-    var drawingSince: Date?
-    @MainActor func check() {
-      guard let cover = handbackCover else { return }
-      let waited = Date().timeIntervalSince(started)
-      if screenDrawing, !screenInPictureInPicture { drawingSince = drawingSince ?? Date() } else { drawingSince = nil }
-      refitScreen?()
-      let settled = waited >= 0.5 && (drawingSince.map { Date().timeIntervalSince($0) > 0.3 } ?? false)
-      if waited > 2.5 || settled {
-        if handbackCover === cover { handbackCover = nil }
-        onScreenLayers?()
-        refitScreen?()
-        screenNote(waited > 2.5 ? "still taken off (picture not back in time)" : "still taken off")
-      } else {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30) { MainActor.assumeIsolated { check() } }
-      }
+  /// A second picture of the same video for Picture in Picture, kept behind the one on screen:
+  /// the system puts its "playing in Picture in Picture" placeholder on the layer it takes, and on
+  /// the screen's own layer that showed for a moment each time the window came back.
+  func makeMirror() -> AVSampleBufferDisplayLayer {
+    if let mirrorLayer { return mirrorLayer }
+    let layer = AVSampleBufferDisplayLayer()
+    layer.videoGravity = displayLayer.videoGravity
+    // A clock of its own that follows the picture's: the system works the Picture in Picture
+    // layer's clock while it takes the layer into the window and hands it back, and on the shared
+    // clock that moved the screen's picture too (a few black frames after the window landed).
+    var follower: CMTimebase?
+    CMTimebaseCreateWithSourceTimebase(allocator: kCFAllocatorDefault, sourceTimebase: videoClock, timebaseOut: &follower)
+    if let follower {
+      CMTimebaseSetTime(follower, time: CMTimebaseGetTime(videoClock))
+      CMTimebaseSetRate(follower, rate: 1)
+      layer.controlTimebase = follower
+    } else {
+      layer.controlTimebase = videoClock
     }
-    check()
-  }
-
-  /// For 2.5 s after the window goes: each change in the screen's layer (a frame or none, its
-  /// state, its size) in the Activity log, timed from then, to see when iOS blanks it.
-  func watchHandback() {
-    let started = Date()
-    var last = ""
-    @MainActor func look() {
-      let ms = Int(Date().timeIntervalSince(started) * 1000)
-      var picture = "?"
-      if #available(iOS 17.4, tvOS 17.4, *) { picture = displayLayer.sampleBufferRenderer.displayedPixelBuffer() == nil ? "empty" : "frame" }
-      let size = displayLayer.bounds.size
-      let state = "\(picture), \(displayLayer.status == .rendering ? "rendering" : displayLayer.status == .failed ? "failed" : "unknown")"
-        + "\(displayLayer.requiresFlushToResumeDecoding ? ", needs flush" : "")\(displayLayer.isReadyForMoreMediaData ? "" : ", full")"
-        + ", \(Int(size.width))x\(Int(size.height))\(displayLayer.superlayer == nil ? ", not in a view" : "")\(handbackCover == nil ? "" : ", still up")"
-      if state != last {
-        last = state
-        ActivityLog.shared.add("PiP hand-back +\(ms) ms: \(state)")
-      }
-      if ms < 2500 {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 120) { MainActor.assumeIsolated { look() } }
-      }
-    }
-    look()
+    mirrorLayer = layer
+    mirrorWaiting = true
+    return layer
   }
 
   // MARK: Decoding (VideoToolbox)
@@ -1379,9 +1347,13 @@ final class KestrelEngine: NSObject {
     guard let sample else { return }
     onPicture?(image, pts)
     // (A picture layer that stopped in the background just needs flushing.)
-    if !inBackground || screenInPictureInPicture || screenInWindow {
+    if !inBackground {
       if displayLayer.status == .failed || displayLayer.requiresFlushToResumeDecoding { displayLayer.flush() }
       displayLayer.enqueue(sample)
+    }
+    if let mirrorLayer, mirrorFed {
+      if mirrorLayer.status == .failed || mirrorLayer.requiresFlushToResumeDecoding { mirrorLayer.flush() }
+      mirrorLayer.enqueue(sample)
     }
     framesShown += 1
   }
@@ -1806,7 +1778,7 @@ final class KestrelEngine: NSObject {
     guard #available(iOS 17.4, tvOS 17.4, *) else { return }
     let now = Date()
     guard clockRunning, speed > 0, stalledSince == nil, !settling, !inBackground,
-      UIApplication.shared.applicationState == .active, !screenInPictureInPicture, !displayLayer.isHidden,
+      UIApplication.shared.applicationState == .active, !screenHiddenForPictureInPicture, !displayLayer.isHidden,
       retiringLayer == nil, now.timeIntervalSince(caughtUpAt) > 2, now.timeIntervalSince(lastScreenChange) > 3,
       let since = playingSince, now.timeIntervalSince(since) > 4
     else {
@@ -1833,11 +1805,14 @@ final class KestrelEngine: NSObject {
     else { return }
     // (Told only by its pixels, it could be a picture that really is still, a "be right back"
     // screen: decoding here instead is harmless, a lower quality isn't.)
-    guard identical || decodeInLayer else { return }
+    guard identical || decodeInLayer || (mirrorLayer != nil && mirrorFed && !windowUp) else { return }
     lastPictureRescue = now
     shownPicture = nil
     pictureRescues += 1
-    if decodeInLayer {
+    if mirrorLayer != nil, mirrorFed, !windowUp {
+      feedMirror(false)
+      ActivityLog.shared.add("Kestrel player: the picture held while frames came in; stopped decoding the Picture in Picture copy")
+    } else if decodeInLayer {
       setDecodeHere(true)
       ActivityLog.shared.add("Kestrel player: the picture held while frames came in (keyframes only); decoding with VideoToolbox from the next keyframe")
     } else if autoQuality, fit.tooSlow(), fit.step < renditions.count {
