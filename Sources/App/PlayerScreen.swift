@@ -553,7 +553,7 @@ struct PlayerLayout: Equatable {
   ///   - chatOverVideo: phone landscape: chat over the video (which then gets the whole screen).
   init(
     safe: CGSize, insets: EdgeInsets, keyboard: CGFloat, chatOpen: Bool, chatWidth: CGFloat, cameraOnLeft: Bool?,
-    large: Bool = false, theater: Bool = false, chatOverVideo: Bool = false
+    large: Bool = false, theater: Bool = false, chatOverVideo: Bool = false, picker: CGFloat = 0
   ) {
     landscape = safe.width > safe.height
     self.large = large
@@ -645,11 +645,11 @@ struct PlayerLayout: Equatable {
       let videoTop: CGFloat = large ? windowTop : 0
       var videoHeight = fullHeight
       var showInfo = true
-      if keyboard > 0 {
-        // Typing: the message box and some chat have to fit above the keyboard. The info bar goes
-        // first, then the video shrinks (iPhone Duo's inner display has a tall keyboard, and on
-        // its own it left no room at all).
-        let room = windowBottom - bottomPad - videoTop
+      if keyboard > 0 || picker > 0 {
+        // Typing: the message box and some chat have to fit above the keyboard (or the emote
+        // picker in its place). The info bar goes first, then the video shrinks (iPhone Duo's
+        // inner display has a tall keyboard, and on its own it left no room at all).
+        let room = windowBottom - max(bottomPad, picker + 14) - videoTop
         let minChat: CGFloat = large ? 200 : 150
         if room - fullHeight - Self.infoHeight < minChat {
           showInfo = false
@@ -1161,6 +1161,7 @@ struct PlayerScreen: View {
   private var chat: ChatController { session.chat }
   private var raids: RaidWatcher { session.raids }
   @ObservedObject private var keyboard = KeyboardObserver.shared
+  @ObservedObject private var pickerSpace = ChatPickerSpace.shared
   @StateObject private var orientation = InterfaceOrientationObserver()
   @EnvironmentObject private var app: AppModel
   @AppStorage("landscapeChat") private var landscapeChat = true
@@ -1231,7 +1232,8 @@ struct PlayerScreen: View {
         safe: layoutSafe, insets: layoutInsets, keyboard: keyboard.overlap, chatOpen: chatOpen,
         chatWidth: resizedWidth ?? screenWidth * chatShare,
         cameraOnLeft: landscape && !large ? (InterfaceOrientationObserver.cameraOnLeftNow ?? orientation.cameraOnLeft) : nil,
-        large: large, theater: theater && !folded, chatOverVideo: chatOverVideo && !folded
+        large: large, theater: theater && !folded, chatOverVideo: chatOverVideo && !folded,
+        picker: pickerSpace.height
       )
       .aroundFold(
         crease(geometry, large: large)?.offsetBy(dx: insets.leading - layoutInsets.leading, dy: insets.top - layoutInsets.top),

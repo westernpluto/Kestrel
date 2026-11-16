@@ -1444,6 +1444,14 @@ struct ChatMessagesView: UIViewControllerRepresentable {
   }
 }
 
+/// The room the open emote picker takes at the bottom of the window (0 when it's closed): the
+/// player makes room for chat above it as it does for the keyboard (on iPhone Duo's outer screen
+/// the picture stayed full size and the picker covered chat).
+final class ChatPickerSpace: ObservableObject {
+  static let shared = ChatPickerSpace()
+  @Published var height: CGFloat = 0
+}
+
 /// Messages plus the box to write in (or a prompt to sign in), with emote picker and
 /// autocomplete (":" for emotes, "@" for people in chat).
 struct ChatPanel: View {
@@ -1542,6 +1550,12 @@ struct ChatPanel: View {
       if isFocused, pickerOpen { closePickerUnderKeyboard() }
       if isFocused { KeyboardObserver.shared.checkSoon() }
     }
+    .onChange(of: pickerOpen) { open in
+      let space = open ? pickerHeight + pickerPad : 0
+      guard ChatPickerSpace.shared.height != space else { return }
+      withAnimation(Self.spring) { ChatPickerSpace.shared.height = space }
+    }
+    .onDisappear { if pickerOpen { ChatPickerSpace.shared.height = 0 } }
     .onChange(of: active) { isActive in
       guard !isActive else { return }
       focused = false
