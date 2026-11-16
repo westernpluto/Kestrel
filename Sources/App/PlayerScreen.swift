@@ -460,12 +460,27 @@ final class LayoutHold {
   private var insets = EdgeInsets()
   private var logged: String?
 
-  func take(_ measured: (size: CGSize, insets: EdgeInsets), active: Bool) -> (size: CGSize, insets: EdgeInsets) {
+  /// The size iOS gave the window while away, and when the app was last back in front.
+  private var awaySize: CGSize?
+  private var backAt = Date.distantPast
+  private var wasActive = true
+
+  func take(_ measured: (size: CGSize, insets: EdgeInsets), active: Bool, pass: Int = 0, now: Date = Date()) -> (size: CGSize, insets: EdgeInsets) {
+    if active, !wasActive { backAt = now }
+    wasActive = active
+    // Just back in front, iOS can still report the size it gave the window while away for a frame
+    // or two: laid out for it, the player jumped small into a corner (back from Picture in
+    // Picture), then moved into place. That size is ignored for a second after coming back.
+    if active, let size, let awaySize, measured.size == awaySize, measured.size != size, now.timeIntervalSince(backAt) < 1 {
+      return (size, insets)
+    }
     if active || size == nil {
+      if active { awaySize = nil }
       size = measured.size
       insets = measured.insets
       return measured
     }
+    if size != measured.size { awaySize = measured.size }
     if let size, size != measured.size {
       let note = "\(Int(measured.size.width))x\(Int(measured.size.height))"
       if note != logged {
@@ -1176,6 +1191,9 @@ struct PlayerScreen: View {
   static let spring = Animation.spring(response: 0.38, dampingFraction: 0.86)
   @Environment(\.scenePhase) private var scenePhase
   @State private var hold = LayoutHold()
+  /// Lays the screen out again a second after the app is back (the size ignored just after coming
+  /// back may have been the real one, see `LayoutHold`).
+  @State private var relayout = 0
 
   init(target: PlaybackTarget, key: String) {
     self.target = target
@@ -1192,7 +1210,7 @@ struct PlayerScreen: View {
       // coming back from Picture in Picture, iOS hands the app passing sizes, and the video
       // jumped to full screen and bounced back beside chat.
       let measured = (size: geometry.size, insets: Self.insets(geometry))
-      let held = hold.take(measured, active: scenePhase == .active)
+      let held = hold.take(measured, active: scenePhase == .active, pass: relayout)
       let insets = held.insets
       let landscape = held.size.width > held.size.height
       let screenWidth = held.size.width + insets.leading + insets.trailing
@@ -1478,6 +1496,10 @@ struct PlayerScreen: View {
     // part-way to the mini player. Back to where it was.
     .onChange(of: backdropDragging) { dragging in
       if !dragging { settleCancelledDrag() }
+    }
+    .onChange(of: scenePhase) { phase in
+      guard phase == .active else { return }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { relayout += 1 }
     }
     .task {
       orientation.start()
