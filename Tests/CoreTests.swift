@@ -249,6 +249,11 @@ func testDates() {
 }
 
 func testMasterParsing() {
+  // When the broadcast began, from the master's SERVER-TIME less STREAM-TIME.
+  let info = "#EXTM3U\n#EXT-X-TWITCH-INFO:NODE=\"x\",SERVER-TIME=\"1794921832.46\",STREAM-TIME=\"358.459476\",FUTURE=\"true\"\n"
+  let began = LowLatencyPlaylist.broadcastStart(info)
+  check(began.map { abs($0.timeIntervalSince1970 - (1794921832.46 - 358.459476)) < 0.01 } ?? false, "broadcast start \(String(describing: began))")
+  check(LowLatencyPlaylist.broadcastStart("#EXTM3U\n") == nil, "no broadcast start without TWITCH-INFO")
   // A channel streaming vertical video only (wrivy): one upright rendition, and it's the stream.
   let upright = """
     #EXTM3U

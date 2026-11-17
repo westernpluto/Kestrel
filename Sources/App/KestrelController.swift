@@ -70,6 +70,7 @@ final class KestrelController {
       guard !stopped else { return }
       self.session = session
       variants = found
+      model?.broadcastStart = await session.broadcastStarted
       // Best first; one per name (the same size in two codecs: the better one).
       var named = Set<String>()
       videoIndices = found.indices.filter { !found[$0].isAudioOnly }.sorted {

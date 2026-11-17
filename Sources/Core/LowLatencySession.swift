@@ -51,6 +51,8 @@ struct LowLatencyUpdate: Sendable {
 }
 
 actor LowLatencySession: PlaylistSource {
+  /// When this stream's broadcast began (see `LowLatencyPlaylist.broadcastStart(_:)`).
+  private(set) var broadcastStarted: Date?
   nonisolated let id: String
   nonisolated let login: String
   /// Whether the stream is still coming in (the player asks; see StreamArrival).
@@ -132,6 +134,7 @@ actor LowLatencySession: PlaylistSource {
     route = fetched.route
     let text = fetched.text
     let base = fetched.url
+    broadcastStarted = LowLatencyPlaylist.broadcastStart(text)
     var lines: [String] = []
     var pending: HLSVariant?
     var pendingLine = ""
@@ -683,6 +686,16 @@ enum LowLatencyPlaylist {
   /// idea of "now", and so the latency it reports, from them. Served later than it was fetched,
   /// they're moved on by the time since: served unchanged minutes later (to start over at the
   /// live edge), the player thought it was ahead of live and reported no latency at all.
+  /// When the broadcast began, by Twitch's master playlist (`SERVER-TIME` less `STREAM-TIME`):
+  /// known from a stream's first second, while Twitch's API can take a minute or two to list it.
+  static func broadcastStart(_ master: String) -> Date? {
+    guard let line = HLS.lines(master).first(where: { $0.hasPrefix("#EXT-X-TWITCH-INFO") }) else { return nil }
+    let a = HLS.attributes(line)
+    guard let server = a["SERVER-TIME"].flatMap(Double.init), let into = a["STREAM-TIME"].flatMap(Double.init), into >= 0
+    else { return nil }
+    return Date(timeIntervalSince1970: server - into)
+  }
+
   static func advancingClock(_ master: String, by seconds: TimeInterval) -> String {
     guard seconds > 0.01, master.contains("#EXT-X-TWITCH-INFO") else { return master }
     var lines = master.components(separatedBy: "\n")

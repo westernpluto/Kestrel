@@ -701,7 +701,7 @@ struct PlayerControls: View {
             Label(Format.viewers(viewers), systemImage: "person.fill")
               .accessibilityLabel("\(Format.viewers(viewers)) watching")
           }
-          if level < 2, let started = model.stream?.startedAt {
+          if level < 2, let started = model.startedAt {
             Label { UptimeText(since: started, ticking: visible) } icon: { Image(systemName: "clock") }
               .accessibilityLabel("Live for \(Format.uptime(since: started) ?? "")")
           }
@@ -1141,7 +1141,7 @@ struct StreamInfoBar: View {
             if let category = model.stream?.category?.name {
               Text("· \(category)").font(.footnote).foregroundColor(.accentTeal)
             }
-            if let started = model.stream?.startedAt {
+            if let started = model.startedAt {
               HStack(spacing: 0) {
                 Text("· ")
                 UptimeText(since: started)
@@ -1202,7 +1202,7 @@ struct StreamDetailsPanel: View {
       if let viewers = model.stream?.viewers {
         Label("\(Format.viewers(viewers)) watching", systemImage: "person.fill").foregroundColor(.white.opacity(0.85))
       }
-      if let started = model.stream?.startedAt {
+      if let started = model.startedAt {
         Label {
           HStack(spacing: 0) {
             Text("Live for ")

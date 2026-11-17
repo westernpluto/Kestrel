@@ -55,6 +55,11 @@ final class PlayerModel: ObservableObject {
   /// While an ad is covered: the stream's last frame before it (blurred under the cover), and
   /// when the break is due to end on the playing clock (for its countdown), if known.
   @Published var adStill: UIImage?
+  /// When the broadcast began, by Twitch's playlist (the uptime's fallback while Twitch's API
+  /// doesn't list the stream yet: joined in its first minute or two, no uptime showed at all).
+  @Published var broadcastStart: Date?
+  /// When the stream began: Twitch's API, else the playlist.
+  var startedAt: Date? { stream?.startedAt ?? broadcastStart }
   @Published var adBreak: ClosedRange<Date>?
   @Published private(set) var latency: Double?
   @Published private(set) var stream: LiveStream?
@@ -868,6 +873,7 @@ final class PlayerModel: ObservableObject {
     coveringAd = false
     adStill = nil
     adBreak = nil
+    broadcastStart = nil
     if mutedForAd {
       player.isMuted = userMuted
       mutedForAd = false
@@ -986,7 +992,8 @@ final class PlayerModel: ObservableObject {
     let now = Date()
     NowPlaying.shared.update(self)
     ScreenAwake.set(awakeKey, phase == .playing && !isPaused)
-    if isLive, now.timeIntervalSince(lastInfoRefresh) > 60 {
+    // Every minute; every 15 s while Twitch's API doesn't list the stream yet (just started).
+    if isLive, now.timeIntervalSince(lastInfoRefresh) > (stream?.startedAt == nil && phase == .playing ? 15 : 60) {
       lastInfoRefresh = now
       Task { await refreshInfo() }
     }
