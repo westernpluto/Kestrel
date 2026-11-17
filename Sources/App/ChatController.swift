@@ -86,6 +86,8 @@ final class ChatController: ObservableObject {
   private(set) var badges: [String: Badge] = [:]
   /// Emotes you can use here, for the picker (Recent first).
   @Published private(set) var emoteSections: [EmoteSection] = []
+  /// The emote lists have been asked for (whatever came): the picker stops saying it's loading.
+  @Published private(set) var emotesLoaded = false
   /// Every emote you can type here, by name (autocomplete).
   private(set) var usableEmotes: [NamedEmote] = []
   private var emoteURLs: [String: URL] = [:]
@@ -367,6 +369,7 @@ final class ChatController: ObservableObject {
     let recent = RecentEmotes.names.compactMap { byName[$0] }
     if !recent.isEmpty { sections.insert(EmoteSection(id: "recent", title: "Recent", icon: nil, emotes: recent), at: 0) }
     emoteSections = sections
+    emotesLoaded = true
   }
 
   /// Emotes for `query` (typed after ":"): prefix matches first, then the rest containing it.
@@ -1530,7 +1533,7 @@ struct ChatPanel: View {
                 withAnimation(Self.spring) { pickerOpen = false }
               }
             } else {
-              EmotePicker(sections: chat.emoteSections) { insert($0.name) }
+              EmotePicker(sections: chat.emoteSections, loaded: chat.emotesLoaded) { insert($0.name) }
             }
           }
           .frame(height: pickerHeight)
@@ -1810,13 +1813,24 @@ struct ChatPanel: View {
 /// Twitch-style emote picker: every emote you can use here, by channel, with a strip to jump.
 struct EmotePicker: View {
   let sections: [EmoteSection]
+  /// Nothing more is coming: with no sections, there are none to show (not still loading).
+  var loaded = false
   var onPick: (NamedEmote) -> Void
   private let columns = [GridItem(.adaptive(minimum: 42, maximum: 56), spacing: 4)]
 
   var body: some View {
     ScrollViewReader { proxy in
       VStack(spacing: 0) {
-        if sections.isEmpty {
+        if sections.isEmpty, loaded {
+          // (It said "Loading emotes…" forever: signed out, on a channel with no 7TV, BTTV or FFZ
+          // emotes, there are none to load.)
+          VStack(spacing: 6) {
+            Image(systemName: "face.smiling").font(.title2).foregroundColor(.secondary)
+            Text(TwitchAccount.shared.session == nil ? "Sign in to use your Twitch emotes" : "No emotes here yet")
+              .font(.footnote).foregroundColor(.secondary)
+          }
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if sections.isEmpty {
           VStack(spacing: 6) {
             ProgressView()
             Text("Loading emotes…").font(.footnote).foregroundColor(.secondary)
