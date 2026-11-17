@@ -1487,6 +1487,13 @@ struct PlayerScreen: View {
         )
         .frame(width: video.width, height: video.height)
         .clipShape(RoundedRectangle(cornerRadius: 12 * progress, style: .continuous))
+        // The mini player's edge: a hairline, so it reads as floating over the list (its shadow
+        // barely shows on the black behind it).
+        .overlay(
+          RoundedRectangle(cornerRadius: 12 * progress, style: .continuous)
+            .strokeBorder(Color.white.opacity(0.16 * Double(progress)), lineWidth: 1)
+            .allowsHitTesting(false)
+        )
         .offset(x: video.minX, y: video.minY)
         // Folded away while offline (it still shows as the mini player).
         .opacity(folded ? Double(progress) : 1)
