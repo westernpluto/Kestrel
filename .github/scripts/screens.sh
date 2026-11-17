@@ -30,8 +30,11 @@ xcrun simctl status_bar "$UDID" override --time 9:41 --batteryLevel 100 --cellul
 xcrun simctl install "$UDID" build-sim/Kestrel.app
 # Unfolding iPhone Duo is a Simulator app menu item (simctl has no posture control): the app is
 # opened on this device and the item clicked through System Events.
-open -a Simulator --args -CurrentDeviceUDID "$UDID"
-sleep 20
+SIMAPP="$(xcode-select -p)/Applications/Simulator.app"
+echo "==> Opening $SIMAPP"
+open -a "$SIMAPP" --args -CurrentDeviceUDID "$UDID" || echo "couldn't open the Simulator app"
+sleep 25
+pgrep -lf Simulator.app | head -3
 echo "==> Simulator menus"
 osascript <<'APPLESCRIPT' 2>&1 | tr ',' '\n' | head -120
 tell application "System Events"
