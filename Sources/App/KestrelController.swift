@@ -256,8 +256,24 @@ final class KestrelController {
     // (Ad times are on the stream's own clock: uncorrected.)
     let latency = engine.rawLatency
     // Only when no ad-free copy was found does the player get ad video: hidden and muted then.
-    let inAd = latency.map { adTimeline.covers(Date().addingTimeInterval(-$0)) } ?? adTimeline.isActive
-    if inAd != model.coveringAd { model.coveringAd = inAd }
+    let playing = latency.map { Date().addingTimeInterval(-$0) }
+    let inAd = playing.map { adTimeline.covers($0) } ?? adTimeline.isActive
+    if !inAd { engine.noteCleanPicture() }
+    if inAd != model.coveringAd {
+      // The cover goes up over the stream's last frame, and says how long the break has left.
+      if inAd { model.adStill = engine.cleanStill() }
+      withAnimation(.easeInOut(duration: 0.35)) { model.coveringAd = inAd }
+      if !inAd { model.adBreak = nil }
+      // Into or out of a covered ad: the switch between the stream and the ad (and back) isn't
+      // the connection's, so a hiccup there doesn't lower the quality or raise the margin (the
+      // stream came back with a stall and a restart after ads).
+      engine.sourceChanged()
+    }
+    if inAd, let at = playing, let end = adTimeline.plannedEnd(for: at), let start = adTimeline.plannedStart(for: at) {
+      // (On the playing clock: the countdown runs with what's shown.)
+      let shown = start.addingTimeInterval(latency ?? 0)...end.addingTimeInterval(latency ?? 0)
+      if model.adBreak.map({ abs($0.upperBound.timeIntervalSince(shown.upperBound)) > 0.5 }) ?? true { model.adBreak = shown }
+    }
     engine.setMuted(inAd || userMuted)
     // Auto says what it's playing now ("Auto · 720p60"), in the menu and on its button.
     if engine.autoQuality, variants.indices.contains(engine.rendition), let last = model.qualities.last, last.id == nil {

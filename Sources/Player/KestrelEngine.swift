@@ -538,6 +538,32 @@ final class KestrelEngine: NSObject {
 
   /// The video now comes from elsewhere (an ad-free copy standing in during an ad, or back from
   /// it): for a few seconds, a stall isn't the connection's (no lower quality, no bigger margin).
+  /// The newest frame shown outside an ad (for the cover's still).
+  private var cleanPicture: CVPixelBuffer?
+
+  /// Notes the frame on screen as clean (called while no ad is covered).
+  func noteCleanPicture() {
+    guard #available(iOS 17.4, tvOS 17.4, *), let buffer = displayLayer.sampleBufferRenderer.displayedPixelBuffer() else { return }
+    cleanPicture = buffer
+  }
+
+  /// A small copy of the last clean frame (blurred under the ad cover, so a small one is plenty).
+  func cleanStill(width: CGFloat = 240) -> UIImage? {
+    guard let buffer = cleanPicture else { return nil }
+    var image: CGImage?
+    VTCreateCGImageFromCVPixelBuffer(buffer, options: nil, imageOut: &image)
+    guard let image, image.width > 0 else { return nil }
+    let size = CGSize(width: width, height: (width * CGFloat(image.height) / CGFloat(image.width)).rounded())
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    return UIGraphicsImageRenderer(size: size, format: format).image { context in
+      // (CGImage's origin is bottom-left: flipped into UIKit's.)
+      context.cgContext.translateBy(x: 0, y: size.height)
+      context.cgContext.scaleBy(x: 1, y: -1)
+      context.cgContext.draw(image, in: CGRect(origin: .zero, size: size))
+    }
+  }
+
   func sourceChanged() {
     sourceChangedAt = Date()
     catchUp.quiet(for: Self.sourceChangeGrace)

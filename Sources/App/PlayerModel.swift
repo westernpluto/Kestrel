@@ -52,6 +52,10 @@ final class PlayerModel: ObservableObject {
   @Published var selectedQuality: Int?
   @Published var adState: AdState = .none
   @Published var coveringAd = false
+  /// While an ad is covered: the stream's last frame before it (blurred under the cover), and
+  /// when the break is due to end on the playing clock (for its countdown), if known.
+  @Published var adStill: UIImage?
+  @Published var adBreak: ClosedRange<Date>?
   @Published private(set) var latency: Double?
   @Published private(set) var stream: LiveStream?
   @Published private(set) var channel: Channel?
@@ -862,6 +866,8 @@ final class PlayerModel: ObservableObject {
     adState = .none
     adRanges = []
     coveringAd = false
+    adStill = nil
+    adBreak = nil
     if mutedForAd {
       player.isMuted = userMuted
       mutedForAd = false

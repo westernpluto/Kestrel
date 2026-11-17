@@ -223,9 +223,18 @@ struct AdTimeline {
   /// Twitch marked an ad break (usually delivered client-side, so nothing to hide).
   private(set) var markerActive = false
   private var lastAdEnd: Date?
+  /// Each stitched break as Twitch planned it (its start, and start plus its length): for how long
+  /// a covered break has to go.
+  private(set) var planned: [ClosedRange<Date>] = []
 
   mutating func update(with playlist: HLSMediaPlaylist, now: Date = Date()) {
     markerActive = playlist.adMarkerActive
+    for range in playlist.adDateRanges {
+      guard let start = range.start, let length = range.duration, length > 0 else { continue }
+      let span = start...start.addingTimeInterval(length)
+      if !planned.contains(span) { planned.append(span) }
+    }
+    planned.removeAll { $0.upperBound < now.addingTimeInterval(-180) }
     // (Prefetch ones too: the player is fetching those already.)
     for segment in playlist.segments where segment.isAd {
       guard let start = segment.pdt, let end = segment.end else { continue }
@@ -253,6 +262,21 @@ struct AdTimeline {
   }
 
   var isActive: Bool { openStart != nil }
+
+  /// When the planned break holding the frame stamped `date` ends (nil: not known). Back-to-back
+  /// breaks count as one.
+  func plannedEnd(for date: Date) -> Date? {
+    guard var end = planned.filter({ $0.contains(date) }).map(\.upperBound).max() else { return nil }
+    while let next = planned.filter({ $0.lowerBound <= end.addingTimeInterval(1) && $0.upperBound > end }).map(\.upperBound).max() {
+      end = next
+    }
+    return end
+  }
+
+  /// When the planned break holding the frame stamped `date` began.
+  func plannedStart(for date: Date) -> Date? {
+    planned.filter { $0.contains(date) }.map(\.lowerBound).min()
+  }
 
   /// Hides these ad segments (the ones the player got before it switched to an ad-free copy).
   mutating func cover(_ segments: [HLSSegment]) {

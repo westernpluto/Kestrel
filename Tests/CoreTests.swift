@@ -460,6 +460,23 @@ func testAdTimeline() {
   // Client-side break: marker only.
   ads.update(with: HLSMediaPlaylist.parse(fake.mediaPlaylist(tag: "t", ads: 35..<45, markersOnly: true), base: nil), now: fake.pdt(37))
   check(ads.markerActive && !ads.isActive && !ads.covers(fake.pdt(36)), "client-side break: nothing to hide")
+  // The covered break's planned end (Twitch's DATERANGE: start plus length), for its countdown.
+  var planned = AdTimeline()
+  let start = Date(timeIntervalSince1970: 1_800_000_000)
+  let stamp = HLSDate.format(start)
+  let text = """
+    #EXTM3U
+    #EXT-X-MEDIA-SEQUENCE:10
+    #EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad",START-DATE="\(stamp)",DURATION=30.235
+    #EXT-X-PROGRAM-DATE-TIME:\(stamp)
+    #EXTINF:2.000,Amazon|1
+    https://ad.test/1.ts
+    """
+  planned.update(with: HLSMediaPlaylist.parse(text, base: nil), now: start.addingTimeInterval(1))
+  let end = planned.plannedEnd(for: start.addingTimeInterval(5))
+  check(end.map { abs($0.timeIntervalSince(start) - 30.235) < 0.01 } ?? false, "planned break end \(String(describing: end))")
+  check(planned.plannedStart(for: start.addingTimeInterval(5)) == start, "planned break start")
+  check(planned.plannedEnd(for: start.addingTimeInterval(40)) == nil, "no planned break after it")
 }
 
 func testTimelineAndRender() {

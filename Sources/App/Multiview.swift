@@ -1286,11 +1286,9 @@ struct MultiviewTileFace: View {
         .allowsHitTesting(false)
       status
       if player.coveringAd {
-        ZStack {
-          Color.black.opacity(0.92)
-          Label("Skipping an ad…", systemImage: "shield.lefthalf.filled").font(.caption.weight(.semibold))
-        }
-        .foregroundColor(.white)
+        AdCover(still: player.adStill, span: player.adBreak)
+          .allowsHitTesting(false)
+          .transition(.opacity)
       }
     }
     .overlay(alignment: .topLeading) {
