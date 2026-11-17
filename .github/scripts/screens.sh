@@ -28,55 +28,10 @@ xcrun simctl boot "$UDID"
 xcrun simctl bootstatus "$UDID" -b
 xcrun simctl status_bar "$UDID" override --time 9:41 --batteryLevel 100 --cellularBars 4 --wifiBars 3 || true
 xcrun simctl install "$UDID" build-sim/Kestrel.app
-# Unfolding iPhone Duo is a Simulator app menu item (simctl has no posture control): the app is
-# opened on this device and the item clicked through System Events.
-SIMAPP="$(xcode-select -p)/Applications/Simulator.app"
-echo "==> Opening $SIMAPP"
-open -a "$SIMAPP" --args -CurrentDeviceUDID "$UDID" || echo "couldn't open the Simulator app"
-sleep 25
-pgrep -lf Simulator.app | head -3
-echo "==> Simulator menus"
-osascript <<'APPLESCRIPT' 2>&1 | tr ',' '\n' | head -120
-tell application "System Events"
-  tell process "Simulator"
-    set out to {}
-    repeat with m in menu bar items of menu bar 1
-      set end of out to ("## " & (name of m))
-      try
-        repeat with i in menu items of menu 1 of m
-          set end of out to ("   " & (name of i))
-        end repeat
-      end try
-    end repeat
-    return out
-  end tell
-end tell
-APPLESCRIPT
-if [ "${POSTURE:-open}" = open ]; then
-  echo "==> Unfolding"
-  osascript <<'APPLESCRIPT' 2>&1
-tell application "System Events"
-  tell process "Simulator"
-    repeat with m in menu bar items of menu bar 1
-      try
-        repeat with i in menu items of menu 1 of m
-          set n to (name of i) as text
-          if n contains "Unfold" or n contains "Open Device" or n is "Open" or n contains "Flat" then
-            click i
-            return "clicked " & n
-          end if
-        end repeat
-      end try
-    end repeat
-    return "no unfold item"
-  end tell
-end tell
-APPLESCRIPT
-  sleep 8
-fi
-# iPhone Duo's two: 1 the outer display, 3 the inner one. POSTURE=open: the inner display on and
-# the outer off (unfolded); folded: the other way round.
-DISPLAYS="${DISPLAYS:-1 3}"
+# (The simulator starts iPhone Duo folded, and there's no unfolding it from here: simctl has no
+# posture control, and the Simulator app can't be opened on the runner. The outer display shows
+# the app; the inner one stays dark.)
+DISPLAYS="${DISPLAYS:-1}"
 echo "==> Displays: $DISPLAYS"
 SCREENS="${SCREENS:-following browse search settings channel player emotes mini player-landscape}"
 for screen in $SCREENS; do
