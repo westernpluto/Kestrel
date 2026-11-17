@@ -25,15 +25,19 @@ xcrun simctl boot "$UDID"
 xcrun simctl bootstatus "$UDID" -b
 xcrun simctl status_bar "$UDID" override --time 9:41 --batteryLevel 100 --cellularBars 4 --wifiBars 3 || true
 xcrun simctl install "$UDID" build-sim/Kestrel.app
+echo "==> Screens"; xcrun simctl io "$UDID" enumerate 2>&1 | grep -i -E "display|screen|name|id" | head -20
+DISPLAYS="$(xcrun simctl io "$UDID" enumerate 2>/dev/null | grep -oE "Screen ID: *[0-9]+" | grep -oE "[0-9]+" | sort -u | tr '\n' ' ')"
+[ -n "$DISPLAYS" ] || DISPLAYS="1 3"
+echo "==> Displays: $DISPLAYS"
 SCREENS="${SCREENS:-following browse search settings channel player emotes mini player-landscape}"
 for screen in $SCREENS; do
   echo "==> $screen"
   xcrun simctl launch --terminate-running-process "$UDID" "$BUNDLE_ID" -KestrelShow "$screen" >/dev/null
   case "$screen" in player*|mini|emotes) sleep 22 ;; *) sleep 9 ;; esac
-  xcrun simctl io "$UDID" screenshot --type=png "shots/$screen.png" || echo "screenshot failed"
-  for display in external internal; do
-    xcrun simctl io "$UDID" screenshot --type=png --display="$display" "shots/$screen-$display.png" >/dev/null 2>&1 || true
+  # iPhone Duo: display 3 is the inner one, 1 the outer one (whichever the device shows now).
+  for display in $DISPLAYS; do
+    xcrun simctl io "$UDID" screenshot --type=png --display="$display" "shots/$screen-d$display.png" >/dev/null 2>&1 \
+      || xcrun simctl io "$UDID" screenshot --type=png "shots/$screen.png" >/dev/null 2>&1 || true
   done
 done
-xcrun simctl spawn "$UDID" log show --last 5m --predicate "process == \"Kestrel\"" --style compact 2>/dev/null | tail -80 > shots/log.txt || true
 ls -la shots
