@@ -464,14 +464,28 @@ final class LayoutHold {
   private var awaySize: CGSize?
   private var backAt = Date.distantPast
   private var wasActive = true
+  /// Away in the background this time (Picture in Picture, the Home Screen), not just inactive a
+  /// moment (iPhone Duo unfolding, Control Center).
+  private var sawBackground = false
+  private var backFromBackground = false
 
-  func take(_ measured: (size: CGSize, insets: EdgeInsets), active: Bool, pass: Int = 0, now: Date = Date()) -> (size: CGSize, insets: EdgeInsets) {
-    if active, !wasActive { backAt = now }
+  func take(_ measured: (size: CGSize, insets: EdgeInsets), phase: ScenePhase, pass: Int = 0, now: Date = Date()) -> (size: CGSize, insets: EdgeInsets) {
+    let active = phase == .active
+    if phase == .background { sawBackground = true }
+    if active, !wasActive {
+      backAt = now
+      backFromBackground = sawBackground
+      sawBackground = false
+    }
     wasActive = active
-    // Just back in front, iOS can still report the size it gave the window while away for a frame
-    // or two: laid out for it, the player jumped small into a corner (back from Picture in
-    // Picture), then moved into place. That size is ignored for a second after coming back.
-    if active, let size, let awaySize, measured.size == awaySize, measured.size != size, now.timeIntervalSince(backAt) < 1 {
+    // Just back from the background, iOS can still report the size it gave the window while away
+    // for a frame or two: laid out for it, the player jumped small into a corner (back from
+    // Picture in Picture), then moved into place. That size is ignored for a second after coming
+    // back. (Not after unfolding iPhone Duo: the new size is the real one, and the player stayed
+    // laid out for the outer screen on the inner display.)
+    if active, backFromBackground, let size, let awaySize, measured.size == awaySize, measured.size != size,
+      now.timeIntervalSince(backAt) < 1
+    {
       return (size, insets)
     }
     if active || size == nil {
@@ -1211,7 +1225,7 @@ struct PlayerScreen: View {
       // coming back from Picture in Picture, iOS hands the app passing sizes, and the video
       // jumped to full screen and bounced back beside chat.
       let measured = (size: geometry.size, insets: Self.insets(geometry))
-      let held = hold.take(measured, active: scenePhase == .active, pass: relayout)
+      let held = hold.take(measured, phase: scenePhase, pass: relayout)
       let insets = held.insets
       let landscape = held.size.width > held.size.height
       let screenWidth = held.size.width + insets.leading + insets.trailing
