@@ -701,16 +701,16 @@ struct Avatar: View {
   }
 }
 
-/// An emote in the picker: its first frame, fetched only while its cell is on screen; the moving
-/// picture where chat has already decoded it.
+/// An emote in the picker: its first frame, fetched only while its cell is on screen, then the
+/// moving picture once it's stayed in view a moment (or straight away where chat already has it).
 struct PickerEmoteImage: View {
   let url: URL
   @State private var still: UIImage?
+  /// The whole animation is in the cache (decoded once this emote had been on screen a moment).
+  @State private var animated = false
 
   var body: some View {
-    if let full = ImagePipeline.shared.cached(url, maxPixels: 112), !ImagePipeline.shared.isUpgrading(url, maxPixels: 112),
-      (full.images?.count ?? 0) > 1
-    {
+    if animated || isAnimatedInCache {
       CachedImage(url: url, maxPixels: 112, contentMode: .scaleAspectFit, placeholder: nil)
     } else {
       Group {
@@ -722,7 +722,21 @@ struct PickerEmoteImage: View {
       }
       .task(id: url) {
         if still == nil { still = await ImagePipeline.shared.stillImage(url, maxPixels: 112) }
+        // Animated emotes play in the menu too: the animation's decoded once the emote has stayed
+        // in view a moment (not for every one flicked past; the grid lets go of those out of view,
+        // and the cache drops the oldest within its budget). Before, only ones already playing in
+        // chat moved, so Twitch's own animated emotes sat still.
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        guard !Task.isCancelled else { return }
+        ImagePipeline.shared.load(url, maxPixels: 112) { image in
+          if (image?.images?.count ?? 0) > 1 { animated = true }
+        }
       }
     }
+  }
+
+  private var isAnimatedInCache: Bool {
+    guard let full = ImagePipeline.shared.cached(url, maxPixels: 112), !ImagePipeline.shared.isUpgrading(url, maxPixels: 112) else { return false }
+    return (full.images?.count ?? 0) > 1
   }
 }
