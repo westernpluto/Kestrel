@@ -28,22 +28,52 @@ xcrun simctl boot "$UDID"
 xcrun simctl bootstatus "$UDID" -b
 xcrun simctl status_bar "$UDID" override --time 9:41 --batteryLevel 100 --cellularBars 4 --wifiBars 3 || true
 xcrun simctl install "$UDID" build-sim/Kestrel.app
-echo "==> Screens"; xcrun simctl io "$UDID" enumerate 2>&1 | head -150
-echo "==> ui help"; xcrun simctl help ui 2>&1 | head -60
-echo "==> ui options"; xcrun simctl ui "$UDID" 2>&1 | head -40
-for option in appearance increase_contrast content_size posture hinge fold; do echo "-- ui $option"; xcrun simctl ui "$UDID" "$option" 2>&1 | head -5; done
+# Unfolding iPhone Duo is a Simulator app menu item (simctl has no posture control): the app is
+# opened on this device and the item clicked through System Events.
+open -a Simulator --args -CurrentDeviceUDID "$UDID"
+sleep 20
+echo "==> Simulator menus"
+osascript <<'APPLESCRIPT' 2>&1 | tr ',' '\n' | head -120
+tell application "System Events"
+  tell process "Simulator"
+    set out to {}
+    repeat with m in menu bar items of menu bar 1
+      set end of out to ("## " & (name of m))
+      try
+        repeat with i in menu items of menu 1 of m
+          set end of out to ("   " & (name of i))
+        end repeat
+      end try
+    end repeat
+    return out
+  end tell
+end tell
+APPLESCRIPT
+if [ "${POSTURE:-open}" = open ]; then
+  echo "==> Unfolding"
+  osascript <<'APPLESCRIPT' 2>&1
+tell application "System Events"
+  tell process "Simulator"
+    repeat with m in menu bar items of menu bar 1
+      try
+        repeat with i in menu items of menu 1 of m
+          set n to (name of i) as text
+          if n contains "Unfold" or n contains "Open Device" or n is "Open" or n contains "Flat" then
+            click i
+            return "clicked " & n
+          end if
+        end repeat
+      end try
+    end repeat
+    return "no unfold item"
+  end tell
+end tell
+APPLESCRIPT
+  sleep 8
+fi
 # iPhone Duo's two: 1 the outer display, 3 the inner one. POSTURE=open: the inner display on and
 # the outer off (unfolded); folded: the other way round.
-if [ "${POSTURE:-open}" = open ]; then
-  xcrun simctl io "$UDID" screenConfig --display=3 power on || true
-  xcrun simctl io "$UDID" screenConfig --display=1 power off || true
-  DISPLAYS="${DISPLAYS:-3}"
-else
-  xcrun simctl io "$UDID" screenConfig --display=1 power on || true
-  xcrun simctl io "$UDID" screenConfig --display=3 power off || true
-  DISPLAYS="${DISPLAYS:-1}"
-fi
-sleep 5
+DISPLAYS="${DISPLAYS:-1 3}"
 echo "==> Displays: $DISPLAYS"
 SCREENS="${SCREENS:-following browse search settings channel player emotes mini player-landscape}"
 for screen in $SCREENS; do
