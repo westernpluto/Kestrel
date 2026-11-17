@@ -262,7 +262,7 @@ final class KestrelController {
     if !inAd { engine.noteCleanPicture() }
     if inAd != model.coveringAd {
       // The cover goes up over the stream's last frame, and says how long the break has left.
-      if inAd { model.adStill = engine.cleanStill() }
+      if inAd { model.adStill = engine.cleanStill }
       withAnimation(.easeInOut(duration: 0.35)) { model.coveringAd = inAd }
       if !inAd { model.adBreak = nil }
       // Into or out of a covered ad: the switch between the stream and the ad (and back) isn't

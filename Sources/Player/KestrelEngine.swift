@@ -533,18 +533,24 @@ final class KestrelEngine: NSObject {
 
   /// The video now comes from elsewhere (an ad-free copy standing in during an ad, or back from
   /// it): for a few seconds, a stall isn't the connection's (no lower quality, no bigger margin).
-  /// The newest frame shown outside an ad (for the cover's still).
-  private var cleanPicture: CVPixelBuffer?
+  /// A small copy of a recent frame shown outside an ad (for the ad cover's still). A copy, every
+  /// 2 s: holding on to the frame itself kept one of the screen's picture buffers from going back
+  /// to be reused.
+  private(set) var cleanStill: UIImage?
+  private var cleanStillAt = Date.distantPast
 
   /// Notes the frame on screen as clean (called while no ad is covered).
   func noteCleanPicture() {
-    guard #available(iOS 17.4, tvOS 17.4, *), let buffer = displayLayer.sampleBufferRenderer.displayedPixelBuffer() else { return }
-    cleanPicture = buffer
+    let now = Date()
+    guard now.timeIntervalSince(cleanStillAt) >= 2, !inBackground,
+      #available(iOS 17.4, tvOS 17.4, *), let buffer = displayLayer.sampleBufferRenderer.displayedPixelBuffer()
+    else { return }
+    cleanStillAt = now
+    if let still = Self.smallStill(of: buffer) { cleanStill = still }
   }
 
-  /// A small copy of the last clean frame (blurred under the ad cover, so a small one is plenty).
-  func cleanStill(width: CGFloat = 240) -> UIImage? {
-    guard let buffer = cleanPicture else { return nil }
+  /// A small copy of a frame (blurred under the ad cover, so a small one is plenty).
+  private static func smallStill(of buffer: CVPixelBuffer, width: CGFloat = 240) -> UIImage? {
     var image: CGImage?
     VTCreateCGImageFromCVPixelBuffer(buffer, options: nil, imageOut: &image)
     guard let image, image.width > 0 else { return nil }
