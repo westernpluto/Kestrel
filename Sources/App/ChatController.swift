@@ -1791,6 +1791,7 @@ struct ChatPanel: View {
   private func send() {
     let text = draft
     guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+    Haptics.tap()
     chat.send(text)
     draft = ""
   }
@@ -1819,6 +1820,7 @@ struct EmotePicker: View {
                   LazyVGrid(columns: columns, spacing: 4) {
                     ForEach(section.emotes, id: \.self) { emote in
                       Button {
+                        Haptics.tap()
                         onPick(emote)
                       } label: {
                         PickerEmoteImage(url: emote.url)
