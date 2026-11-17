@@ -19,7 +19,7 @@ jobs:
   screens:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[screens]')
     runs-on: xcode-27
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Pick Xcode 27

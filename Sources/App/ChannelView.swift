@@ -134,7 +134,7 @@ struct VideoRow: View {
       AppModel.shared.playing = .video(video)
     } label: {
       HStack(alignment: .top, spacing: 12) {
-        RemoteImage(url: TwitchAPI.image(video.previewURL, width: 320, height: 180))
+        thumbnail
           .frame(width: 156, height: 88)
           .overlay(alignment: .bottomTrailing) {
             Text(Format.duration(video.lengthSeconds)).font(.caption2.monospacedDigit())
@@ -158,6 +158,26 @@ struct VideoRow: View {
       .contentShape(Rectangle())
     }
     .buttonStyle(PressableStyle(scale: 0.98))
+  }
+
+  /// Twitch's picture for a broadcast it hasn't made one for yet (still live, or just ended) is
+  /// a grey square with a question mark: a picture of our own instead.
+  private var isProcessing: Bool { video.previewURL?.contains("404_processing") ?? false || video.previewURL == nil }
+
+  @ViewBuilder
+  private var thumbnail: some View {
+    if isProcessing {
+      ZStack {
+        LinearGradient(colors: [Color(white: 0.16), Color(white: 0.09)], startPoint: .topLeading, endPoint: .bottomTrailing)
+        VStack(spacing: 4) {
+          Image(systemName: "film.stack").font(.system(size: 20, weight: .semibold))
+          Text("Still being made").font(.caption2.weight(.semibold))
+        }
+        .foregroundColor(.white.opacity(0.55))
+      }
+    } else {
+      RemoteImage(url: TwitchAPI.image(video.previewURL, width: 320, height: 180))
+    }
   }
 
   @ViewBuilder
