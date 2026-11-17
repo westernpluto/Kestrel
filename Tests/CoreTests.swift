@@ -249,6 +249,18 @@ func testDates() {
 }
 
 func testMasterParsing() {
+  // Damaged input (found by fuzzing): reads past the data give zeros, odd lengths are kept sane.
+  check(MP4.u32(Data([1, 2]), 0) == 0 && MP4.type(Data([1]), 0) == "" && MP4.byte(Data(), 5) == 0, "MP4 reads past the end")
+  let damaged = HLSMediaPlaylist.parse(
+    "#EXTM3U\n#EXT-X-TARGETDURATION:-1\n#EXT-X-PROGRAM-DATE-TIME:2026-11-17T13:23:25.144Z\n#EXTINF:-2.000,Amazon|1\nhttps://x.test/a.ts\n#EXTINF:nan,live\nhttps://x.test/b.ts\n",
+    base: nil)
+  check(damaged.segments.map(\.duration) == [2, 2] && damaged.targetDuration == 6, "damaged lengths \(damaged.segments.map(\.duration))")
+  var damagedAds = AdTimeline()
+  damagedAds.update(with: damaged)
+  check(damagedAds.ranges.count <= 1, "damaged ad segment kept sane")
+  // The local server's request parsing: a bare "=" in the query is skipped (it crashed).
+  let odd = LocalHTTPServer.parse(Data("GET /live/x/index.m3u8?a=1&=&b HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8))
+  check(odd?.query["a"] == "1" && odd?.query["b"] == "", "odd query parsed \(String(describing: odd?.query))")
   // When the broadcast began, from the master's SERVER-TIME less STREAM-TIME.
   let info = "#EXTM3U\n#EXT-X-TWITCH-INFO:NODE=\"x\",SERVER-TIME=\"1794921832.46\",STREAM-TIME=\"358.459476\",FUTURE=\"true\"\n"
   let began = LowLatencyPlaylist.broadcastStart(info)

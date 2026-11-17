@@ -60,12 +60,12 @@ struct FMP4Init: Equatable, Sendable {
     var kind: Kind = .other
     for box in MP4.boxes(d, trak.body, trak.end) {
       if box.type == "tkhd" {
-        let version = d[box.body]
+        let version = MP4.byte(d, box.body)
         id = MP4.u32(d, box.body + (version == 1 ? 20 : 12))
       } else if box.type == "mdia" {
         for inner in MP4.boxes(d, box.body, box.end) {
           if inner.type == "mdhd" {
-            let version = d[inner.body]
+            let version = MP4.byte(d, inner.body)
             timescale = MP4.u32(d, inner.body + (version == 1 ? 20 : 12))
           } else if inner.type == "minf", let stbl = MP4.boxes(d, inner.body, inner.end).first(where: { $0.type == "stbl" }),
             let stsd = MP4.boxes(d, stbl.body, stbl.end).first(where: { $0.type == "stsd" })
@@ -94,8 +94,8 @@ struct FMP4Init: Equatable, Sendable {
       guard let av1C = MP4.boxes(d, entry.body + 78, entry.end).first(where: { $0.type == "av1C" }), av1C.end > av1C.body
       else { return .other }
       // The visual sample entry's width and height (16 bits each, 24 bytes in).
-      let width = Int(d[entry.body + 24]) << 8 | Int(d[entry.body + 25])
-      let height = Int(d[entry.body + 26]) << 8 | Int(d[entry.body + 27])
+      let width = Int(MP4.u16(d, entry.body + 24))
+      let height = Int(MP4.u16(d, entry.body + 26))
       return .av1(AV1Config(record: d.subdata(in: av1C.body..<av1C.end), width: width, height: height))
     case "mp4a":
       // An audio sample entry's fields take 28 bytes before its boxes.
@@ -110,11 +110,11 @@ struct FMP4Init: Equatable, Sendable {
 
   static func parseAVCC(_ d: Data, _ start: Int, _ end: Int) -> Kind {
     guard end - start >= 7 else { return .other }
-    let lengthSize = Int(d[start + 4] & 0x03) + 1
+    let lengthSize = Int(MP4.byte(d, start + 4) & 0x03) + 1
     var i = start + 5
     var sps: [Data] = []
     var pps: [Data] = []
-    let spsCount = Int(d[i] & 0x1F)
+    let spsCount = Int(MP4.byte(d, i) & 0x1F)
     i += 1
     for _ in 0..<spsCount where i + 2 <= end {
       let n = Int(MP4.u16(d, i))
@@ -124,7 +124,7 @@ struct FMP4Init: Equatable, Sendable {
       i += n
     }
     if i < end {
-      let ppsCount = Int(d[i])
+      let ppsCount = Int(MP4.byte(d, i))
       i += 1
       for _ in 0..<ppsCount where i + 2 <= end {
         let n = Int(MP4.u16(d, i))
@@ -139,10 +139,10 @@ struct FMP4Init: Equatable, Sendable {
 
   static func parseHVCC(_ d: Data, _ start: Int, _ end: Int) -> Kind {
     guard end - start >= 23 else { return .other }
-    let lengthSize = Int(d[start + 21] & 0x03) + 1
+    let lengthSize = Int(MP4.byte(d, start + 21) & 0x03) + 1
     var i = start + 23
     var sets: [Data] = []
-    let arrays = Int(d[start + 22])
+    let arrays = Int(MP4.byte(d, start + 22))
     for _ in 0..<arrays where i + 3 <= end {
       let count = Int(MP4.u16(d, i + 1))
       i += 3
@@ -256,14 +256,17 @@ struct FMP4Demuxer {
           }
           if flags & 0x20 != 0 { defaultFlags = MP4.u32(box, i) }
         case "tfdt":
-          let version = box[inner.body]
+          let version = MP4.byte(box, inner.body)
           decode = version == 1 ? Int64(bitPattern: MP4.u64(box, inner.body + 4)) : Int64(MP4.u32(box, inner.body + 4))
         case "trun":
           guard let track else { continue }
-          let version = box[inner.body]
+          let version = MP4.byte(box, inner.body)
           let flags = MP4.u32(box, inner.body) & 0xFFFFFF
-          let count = Int(MP4.u32(box, inner.body + 4))
+          var count = Int(MP4.u32(box, inner.body + 4))
           var i = inner.body + 8
+          // No more samples than the box has room for (a damaged count ran to billions).
+          let entry = 4 * [0x100, 0x200, 0x400, 0x800].filter { flags & UInt32($0) != 0 }.count
+          count = min(count, entry > 0 ? max(0, (inner.end - i) / entry) : 10_000)
           var dataOffset = 0
           if flags & 0x01 != 0 {
             dataOffset = Int(Int32(bitPattern: MP4.u32(box, i)))
@@ -315,7 +318,10 @@ struct FMP4Demuxer {
   static func to90k(_ value: Int64, _ timescale: UInt32) -> Int64 {
     let scale = Int64(max(1, timescale))
     if scale == 90_000 { return value }
-    return value / scale * 90_000 + value % scale * 90_000 / scale
+    // (Overflow-checked: a damaged timestamp can be anything, and overflowing crashed.)
+    let (whole, over) = (value / scale).multipliedReportingOverflow(by: 90_000)
+    guard !over else { return value }
+    return whole &+ value % scale * 90_000 / scale
   }
 
   private func frames(fromMdat box: Data, streamStart: Int, header: Int) -> [DemuxedFrame] {
@@ -366,12 +372,23 @@ enum MP4 {
     var end: Int
   }
 
-  static func u16(_ d: Data, _ i: Int) -> UInt16 { UInt16(d[i]) << 8 | UInt16(d[i + 1]) }
+  // Reads past the data (a damaged or cut-off segment) give zeros, not a crash: a corrupt
+  // fragment's sample table read beyond its box and crashed the app.
+  static func has(_ d: Data, _ i: Int, _ n: Int) -> Bool { i >= d.startIndex && n <= d.endIndex - i }
+  static func byte(_ d: Data, _ i: Int) -> UInt8 { has(d, i, 1) ? d[i] : 0 }
+  static func u16(_ d: Data, _ i: Int) -> UInt16 {
+    guard has(d, i, 2) else { return 0 }
+    return UInt16(d[i]) << 8 | UInt16(d[i + 1])
+  }
   static func u32(_ d: Data, _ i: Int) -> UInt32 {
-    UInt32(d[i]) << 24 | UInt32(d[i + 1]) << 16 | UInt32(d[i + 2]) << 8 | UInt32(d[i + 3])
+    guard has(d, i, 4) else { return 0 }
+    return UInt32(d[i]) << 24 | UInt32(d[i + 1]) << 16 | UInt32(d[i + 2]) << 8 | UInt32(d[i + 3])
   }
   static func u64(_ d: Data, _ i: Int) -> UInt64 { UInt64(u32(d, i)) << 32 | UInt64(u32(d, i + 4)) }
-  static func type(_ d: Data, _ i: Int) -> String { String(decoding: d[i..<(i + 4)], as: UTF8.self) }
+  static func type(_ d: Data, _ i: Int) -> String {
+    guard has(d, i, 4) else { return "" }
+    return String(decoding: d[i..<(i + 4)], as: UTF8.self)
+  }
 
   /// The boxes between `start` and `end` (indexes into `d`).
   static func boxes(_ d: Data, _ start: Int, _ end: Int) -> [Box] {
@@ -381,12 +398,12 @@ enum MP4 {
       var size = Int(u32(d, i))
       var header = 8
       if size == 1, i + 16 <= end {
-        size = Int(u64(d, i + 8))
+        size = Int(clamping: u64(d, i + 8))
         header = 16
       } else if size == 0 {
         size = end - i
       }
-      guard size >= header, i + size <= end else { break }
+      guard size >= header, size <= end - i else { break }
       out.append(Box(type: type(d, i + 4), start: i, body: i + header, end: i + size))
       i += size
     }
@@ -416,7 +433,7 @@ enum MP4 {
     func length(_ i: inout Int) -> Int {
       var n = 0
       for _ in 0..<4 where i < end {
-        let b = d[i]
+        let b = MP4.byte(d, i)
         i += 1
         n = n << 7 | Int(b & 0x7F)
         if b & 0x80 == 0 { break }
@@ -424,7 +441,7 @@ enum MP4 {
       return n
     }
     while i < end {
-      let tag = d[i]
+      let tag = MP4.byte(d, i)
       i += 1
       let n = length(&i)
       switch tag {
@@ -432,7 +449,7 @@ enum MP4 {
       case 0x04: i += 13  // object type, stream type, buffer, bitrates
       case 0x05:
         guard n >= 2, i + 2 <= end else { return nil }
-        let value = Int(d[i]) << 8 | Int(d[i + 1])
+        let value = Int(MP4.u16(d, i))
         return ADTS.Config(objectType: value >> 11, sampleRateIndex: value >> 7 & 0x0F, channels: value >> 3 & 0x0F)
       default: i += n
       }

@@ -237,7 +237,7 @@ struct AdTimeline {
     planned.removeAll { $0.upperBound < now.addingTimeInterval(-180) }
     // (Prefetch ones too: the player is fetching those already.)
     for segment in playlist.segments where segment.isAd {
-      guard let start = segment.pdt, let end = segment.end else { continue }
+      guard let start = segment.pdt, let end = segment.end, end >= start else { continue }
       insert(start...end)
       lastAdEnd = max(lastAdEnd ?? end, end)
     }
@@ -281,7 +281,7 @@ struct AdTimeline {
   /// Hides these ad segments (the ones the player got before it switched to an ad-free copy).
   mutating func cover(_ segments: [HLSSegment]) {
     for segment in segments {
-      guard let start = segment.pdt, let end = segment.end else { continue }
+      guard let start = segment.pdt, let end = segment.end, end >= start else { continue }
       insert(start...end)
     }
   }
@@ -294,6 +294,7 @@ struct AdTimeline {
   }
 
   private mutating func insert(_ range: ClosedRange<Date>) {
+    // (Ranges are only built from start...end with end after start: see `HLS.sane`.)
     var merged = range
     ranges.removeAll { other in
       let touches = other.lowerBound <= merged.upperBound.addingTimeInterval(0.5)

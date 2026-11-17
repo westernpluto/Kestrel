@@ -194,8 +194,10 @@ final class LocalHTTPServer: @unchecked Sendable {
     if let mark = target.firstIndex(of: "?") {
       path = String(target[..<mark])
       for pair in target[target.index(after: mark)...].split(separator: "&") {
+        // (A bare "=" splits into nothing: skipped, not read past the end.)
         let parts = pair.split(separator: "=", maxSplits: 1)
-        let key = String(parts[0]).removingPercentEncoding ?? String(parts[0])
+        guard let first = parts.first else { continue }
+        let key = String(first).removingPercentEncoding ?? String(first)
         let value = parts.count > 1 ? (String(parts[1]).removingPercentEncoding ?? String(parts[1])) : ""
         query[key] = value
       }

@@ -113,6 +113,13 @@ enum HLSDate {
 // MARK: - Helpers
 
 enum HLS {
+  /// A length from a playlist, kept to something usable (0 to an hour); `fallback` when it's
+  /// missing, negative, infinite or not a number.
+  static func sane(_ value: Double?, or fallback: Double) -> Double {
+    guard let value, value.isFinite, value >= 0 else { return fallback }
+    return min(value, 3600)
+  }
+
   static func lines(_ text: String) -> [Substring] {
     text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r\n" || $0 == "\r" })
   }
@@ -401,7 +408,9 @@ struct HLSMediaPlaylist {
         if line.hasPrefix("#EXTINF:") {
           let value = line.dropFirst("#EXTINF:".count)
           let parts = value.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
-          pendingDuration = Double(parts.first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? "") ?? 2
+          // (Negative, infinite or not a number: a damaged playlist. Its times built impossible
+          // ranges downstream and crashed.)
+          pendingDuration = HLS.sane(Double(parts.first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""), or: 2)
           pendingTitle = parts.count > 1 ? String(parts[1]) : ""
           if pendingTitle.hasPrefix("live") { anyLiveTitle = true }
         } else if line.hasPrefix("#EXT-X-PROGRAM-DATE-TIME:") {
@@ -411,7 +420,7 @@ struct HLSMediaPlaylist {
         } else if line.hasPrefix("#EXT-X-DISCONTINUITY") {
           pendingDiscontinuity = true
         } else if line.hasPrefix("#EXT-X-TARGETDURATION:") {
-          playlist.targetDuration = Double(line.dropFirst("#EXT-X-TARGETDURATION:".count)) ?? 6
+          playlist.targetDuration = HLS.sane(Double(line.dropFirst("#EXT-X-TARGETDURATION:".count)), or: 6)
         } else if line.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") {
           playlist.mediaSequence = Int(line.dropFirst("#EXT-X-MEDIA-SEQUENCE:".count)) ?? 0
         } else if line.hasPrefix("#EXT-X-MAP:") {
@@ -420,7 +429,7 @@ struct HLSMediaPlaylist {
           let a = HLS.attributes(Substring(line))
           let range = HLSDateRange(
             id: a["ID"] ?? "", cls: a["CLASS"] ?? "", start: a["START-DATE"].flatMap(HLSDate.parse),
-            duration: a["DURATION"].flatMap(Double.init) ?? a["PLANNED-DURATION"].flatMap(Double.init))
+            duration: (a["DURATION"].flatMap(Double.init) ?? a["PLANNED-DURATION"].flatMap(Double.init)).map { HLS.sane($0, or: 0) })
           playlist.dateRanges.append(range)
         } else if line.hasPrefix("#EXT-X-TWITCH-PREFETCH:") {
           let uri = HLS.resolve(line.dropFirst("#EXT-X-TWITCH-PREFETCH:".count), base: base)
