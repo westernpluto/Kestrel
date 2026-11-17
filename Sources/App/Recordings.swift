@@ -92,7 +92,7 @@ final class RecordingStore: ObservableObject {
     active[id] = .starting
     downloadProgress[id] = 0
     keepAwake()
-    Task {
+    Task { [self] in
       do {
         let variant = try await Self.vodRendition(videoID: video.id, label: label)
         guard let url = URL(string: variant.uri) else { throw PlayerModel.VODError(errorDescription: "No address for \(label).") }

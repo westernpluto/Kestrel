@@ -5,7 +5,7 @@ struct BrowseView: View {
   enum Mode: String, CaseIterable, Hashable { case live = "Live", categories = "Categories" }
   @State private var mode: Mode = .live
   @StateObject private var streams = Paginator<LiveStream> { cursor in
-    let filter = await StreamFilter.shared.snapshot
+    let filter = StreamFilter.shared.snapshot
     return try await TwitchAPI.shared.topStreams(after: cursor, sort: filter.sort, languages: filter.languages)
   }
   @ObservedObject private var filter = StreamFilter.shared
@@ -116,7 +116,7 @@ struct CategoryView: View {
     let id = category.id
     _streams = StateObject(
       wrappedValue: Paginator { cursor in
-        let filter = await StreamFilter.shared.snapshot
+        let filter = StreamFilter.shared.snapshot
         return try await TwitchAPI.shared.categoryStreams(
           id: id, after: cursor, sort: filter.categorySort, languages: filter.languages)
       })
