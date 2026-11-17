@@ -11,8 +11,33 @@
 import AVFoundation
 import CoreVideo
 import Metal
-import MetalFX
 import MetalKit
+#if canImport(MetalFX)
+  import MetalFX
+#else
+  // The iOS Simulator has no MetalFX (the screenshot job builds for it): stand-ins that never
+  // make a scaler, so upscaling just stays off there.
+  final class MTLFXSpatialScaler {
+    var colorTexture: MTLTexture?
+    var outputTexture: MTLTexture?
+    var inputContentWidth = 0
+    var inputContentHeight = 0
+    var outputWidth = 0
+    var outputHeight = 0
+    func encode(commandBuffer: MTLCommandBuffer) {}
+  }
+  enum MTLFXSpatialScalerColorProcessingMode { case perceptual }
+  final class MTLFXSpatialScalerDescriptor {
+    var inputWidth = 0
+    var inputHeight = 0
+    var outputWidth = 0
+    var outputHeight = 0
+    var colorTextureFormat: MTLPixelFormat = .invalid
+    var outputTextureFormat: MTLPixelFormat = .invalid
+    var colorProcessingMode: MTLFXSpatialScalerColorProcessingMode = .perceptual
+    func makeSpatialScaler(device: MTLDevice) -> MTLFXSpatialScaler? { nil }
+  }
+#endif
 import SwiftUI
 import UIKit
 import simd
