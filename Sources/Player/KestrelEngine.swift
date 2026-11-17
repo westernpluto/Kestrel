@@ -42,7 +42,9 @@ final class KestrelEngine: NSObject {
   private(set) var handbackCover: CALayer?
   /// The screen's layer is in the Picture in Picture window (the kind with controls: iOS takes the
   /// layer itself, no copy). It goes on being fed in the background, and caught up in place.
-  var screenInPictureInPicture = false
+  var screenInPictureInPicture = false {
+    didSet { if screenInPictureInPicture { leaveRescueDecoding("Picture in Picture opening") } }
+  }
   /// When the Picture in Picture window last went (see `holdScreenLayer`).
   private var pictureInPictureEndedAt = Date.distantPast
   /// The screen's layer is kept, not replaced, when it needs catching up: while it's in the window,
@@ -58,7 +60,6 @@ final class KestrelEngine: NSObject {
     screenInPictureInPicture = false
     pictureInPictureEndedAt = Date()
     refitScreen?()
-    watchHandback()
     // (And again in a moment: the layer's size can still be settling.)
     for delay in [0.05, 0.2, 0.5, 1.0] {
       DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -247,6 +248,23 @@ final class KestrelEngine: NSObject {
   private(set) var decodeInLayer = true
   /// Decoding here by request (see `setDecodeHere`), not because the layer kept failing.
   private var decodingHereByRequest = false
+  /// Decoding here because the picture held (see `watchPicture`): only until the app leaves.
+  private var decodingHereForRescue = false
+
+  /// Back to the layer's own decoding, caught up to the frame playing now: our decoding session
+  /// is shut down in the background, and the Picture in Picture window shows the screen's layer
+  /// (left decoding here, the window's picture froze).
+  private func leaveRescueDecoding(_ why: String) {
+    guard decodingHereForRescue, decodingHereByRequest else { return }
+    decodingHereForRescue = false
+    decodingHereByRequest = false
+    decodeInLayer = true
+    // (Its pictures still on their way would land on the layer between the layer's own.)
+    closeDecoder()
+    waitingForKeyframe = false
+    screenBehind = true
+    ActivityLog.shared.add("Kestrel player: back to the layer's decoding (\(why))")
+  }
   /// Every decoded picture and when it's shown, while decoding here (multi-view's Picture in
   /// Picture with controls draws all the streams into one picture from these).
   var onPicture: ((CVImageBuffer, CMTime) -> Void)?
@@ -260,6 +278,7 @@ final class KestrelEngine: NSObject {
       waitingForKeyframe = true
     } else if !on, decodingHereByRequest {
       decodingHereByRequest = false
+      decodingHereForRescue = false
       decodeInLayer = true
       displayLayer.flush()
       waitingForKeyframe = true
@@ -333,6 +352,7 @@ final class KestrelEngine: NSObject {
       center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
         MainActor.assumeIsolated {
           self?.inBackground = true
+          self?.leaveRescueDecoding("app in the background")
           self?.lastScreenChange = Date()
           self?.lifecycleChangedAt = Date()
         }
@@ -1250,18 +1270,6 @@ final class KestrelEngine: NSObject {
     if !catchUpScreen() { waitingForKeyframe = true }
   }
 
-  /// The window is heading back into the app: a still of the frame it shows goes over the picture.
-  func coverForHandback() {
-    guard handbackCover == nil, let cover = makeCover(of: displayLayer) else {
-      screenNote(handbackCover == nil ? "no still for the way back" : "still already up")
-      return
-    }
-    handbackCover = cover
-    onScreenLayers?()
-    refitScreen?()
-    screenNote("still up for the way back")
-  }
-
   /// The window's gone: the still comes off once the picture has been drawing a while, and not
   /// before 0.5 s (at most 2.5 s). iOS blanks the picture's part of the app for a few frames right
   /// as the window goes (the still is over the whole window now, out of reach of that).
@@ -1285,30 +1293,6 @@ final class KestrelEngine: NSObject {
       }
     }
     check()
-  }
-
-  /// For 2.5 s after the window goes: each change in the screen's layer (a frame or none, its
-  /// state, its size) in the Activity log, timed from then, to see when iOS blanks it.
-  func watchHandback() {
-    let started = Date()
-    var last = ""
-    @MainActor func look() {
-      let ms = Int(Date().timeIntervalSince(started) * 1000)
-      var picture = "?"
-      if #available(iOS 17.4, tvOS 17.4, *) { picture = displayLayer.sampleBufferRenderer.displayedPixelBuffer() == nil ? "empty" : "frame" }
-      let size = displayLayer.bounds.size
-      let state = "\(picture), \(displayLayer.status == .rendering ? "rendering" : displayLayer.status == .failed ? "failed" : "unknown")"
-        + "\(displayLayer.requiresFlushToResumeDecoding ? ", needs flush" : "")\(displayLayer.isReadyForMoreMediaData ? "" : ", full")"
-        + ", \(Int(size.width))x\(Int(size.height))\(displayLayer.superlayer == nil ? ", not in a view" : "")\(handbackCover == nil ? "" : ", still up")"
-      if state != last {
-        last = state
-        ActivityLog.shared.add("PiP hand-back +\(ms) ms: \(state)")
-      }
-      if ms < 2500 {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 120) { MainActor.assumeIsolated { look() } }
-      }
-    }
-    look()
   }
 
   // MARK: Decoding (VideoToolbox)
@@ -1361,7 +1345,8 @@ final class KestrelEngine: NSObject {
   }
 
   private func decoded(_ status: OSStatus, _ image: CVImageBuffer?, pts: CMTime, duration: CMTime) {
-    guard running else { return }
+    // (Not once decoding is back in the layer: pictures still on their way are dropped.)
+    guard running, !decodeInLayer else { return }
     guard status == noErr, let image else {
       if status != noErr { decodeFailed(status) }
       return
@@ -1839,6 +1824,7 @@ final class KestrelEngine: NSObject {
     pictureRescues += 1
     if decodeInLayer {
       setDecodeHere(true)
+      decodingHereForRescue = decodingHereByRequest
       ActivityLog.shared.add("Kestrel player: the picture held while frames came in (keyframes only); decoding with VideoToolbox from the next keyframe")
     } else if autoQuality, fit.tooSlow(), fit.step < renditions.count {
       applyFit()

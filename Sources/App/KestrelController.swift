@@ -369,8 +369,8 @@ final class KestrelController {
 
   /// The window with controls: iOS takes the screen's own layer into it (one picture, decoded
   /// once). It used to get a copy of the picture behind the screen's, decoded a second time while
-  /// the window could open, because iOS hands its layer back with a few black frames; a still of
-  /// the last frame now covers that moment instead (see `KestrelEngine.coverForHandback`).
+  /// the window could open. iOS blacks out the picture's spot for 3 frames as the window goes
+  /// either way (the copy didn't prevent it), so it's gone.
   private func setUpPictureInPicture(_ engine: KestrelEngine) {
     guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
     let delegate = KestrelPictureInPicture(controller: self)
@@ -859,9 +859,9 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
     }
   }
 
-  // On the way back into the app: a still of the window's last frame goes over the picture first,
-  // covering the few black frames while iOS hands the layer back; it comes off once the picture
-  // is drawing in the app again (see `pictureInPictureControllerDidStopPictureInPicture`).
+  // On the way back into the app: the picture as it is. (A still of the window's last frame over
+  // it didn't help: iOS blacks out the picture's spot for 3 frames as the window goes, over
+  // anything the app shows there, and the still only froze the picture for half a second.)
   func pictureInPictureController(
     _ pictureInPictureController: AVPictureInPictureController,
     restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
@@ -870,7 +870,6 @@ final class KestrelPictureInPicture: NSObject, AVPictureInPictureSampleBufferPla
       ignorePausesUntil = Date().addingTimeInterval(3)
       if let engine = controller?.engine {
         engine.screenNote("window asks for the picture")
-        engine.coverForHandback()
         engine.screenNote("lands on: \(engine.describeScreen?() ?? "?")\(AppModel.shared.playerMinimized ? " (mini player)" : "")")
       }
       completionHandler(true)

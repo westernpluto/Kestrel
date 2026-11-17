@@ -663,7 +663,7 @@ struct PlayerLayout: Equatable {
         // Typing: the message box and some chat have to fit above the keyboard (or the emote
         // picker in its place). The info bar goes first, then the video shrinks (iPhone Duo's
         // inner display has a tall keyboard, and on its own it left no room at all).
-        let room = windowBottom - max(bottomPad, picker + 14) - videoTop
+        let room = windowBottom - max(bottomPad, picker) - videoTop
         let minChat: CGFloat = large ? 200 : 150
         if room - fullHeight - Self.infoHeight < minChat {
           showInfo = false
