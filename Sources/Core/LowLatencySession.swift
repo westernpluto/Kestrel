@@ -136,15 +136,22 @@ actor LowLatencySession: PlaylistSource {
     var pending: HLSVariant?
     var pendingLine = ""
     var found: [HLSVariant] = []
+    // A channel streaming vertical video only: its upright renditions are the stream.
+    let portraitOnly = HLSMaster.parse(text, base: base).portraitOnly
     for raw in HLS.lines(text) {
       let line = String(raw).trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
       if line.hasPrefix("#EXT-X-STREAM-INF") {
         // Parse this one rendition with the regular parser (it knows the portrait/audio rules).
-        let single = HLSMaster.parse(line + "\nplaceholder.m3u8", base: nil).variants.first
+        let parsed = HLSMaster.parse(line + "\nplaceholder.m3u8", base: nil)
+        var single = parsed.variants.first
+        // (On its own, an upright rendition reads as a vertical-only master: whether it's the
+        // stream is the whole master's to say, `portraitOnly` above.)
+        if parsed.portraitOnly { single?.isPortrait = true }
         pending = single
         pendingLine = line
       } else if !line.hasPrefix("#"), !line.trimmingCharacters(in: .whitespaces).isEmpty, var variant = pending {
         pending = nil
+        if portraitOnly { variant.isPortrait = false }
         guard !variant.isPortrait else { continue }
         variant.uri = HLS.resolve(Substring(line), base: base)
         lines.append(pendingLine)

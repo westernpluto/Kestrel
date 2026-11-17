@@ -249,6 +249,17 @@ func testDates() {
 }
 
 func testMasterParsing() {
+  // A channel streaming vertical video only (wrivy): one upright rendition, and it's the stream.
+  let upright = """
+    #EXTM3U
+    #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="chunked",NAME="1280p (source)",AUTOSELECT=YES,DEFAULT=YES
+    #EXT-X-STREAM-INF:BANDWIDTH=341693,RESOLUTION=720x1280,CODECS="avc1.4D001F,mp4a.40.2",VIDEO="chunked",FRAME-RATE=30.000
+    https://use21.playlist.ttvnw.net/v1/playlist/source.m3u8
+    """
+  let uprightMaster = HLSMaster.parse(upright, base: nil)
+  check(uprightMaster.portraitOnly && uprightMaster.videoVariants.count == 1, "upright only kept \(uprightMaster.videoVariants.count)")
+  check(uprightMaster.videoVariants.first?.label == "720p", "upright label \(uprightMaster.videoVariants.first?.label ?? "-")")
+  check(HLSMaster.localCopy(of: upright, base: nil).contains("source.m3u8"), "upright only in the local copy")
   let path = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ""
   if let text = try? String(contentsOfFile: path) {
     let master = HLSMaster.parse(text, base: URL(string: "https://usher.ttvnw.net/api/v2/channel/hls/x.m3u8"))

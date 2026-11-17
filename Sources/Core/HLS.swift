@@ -213,6 +213,10 @@ struct HLSVariant: Equatable {
 
 struct HLSMaster {
   var variants: [HLSVariant]
+  /// Every video rendition is upright (a channel streaming vertical video only): they're the
+  /// stream itself then, not the extra upright copy some channels send beside the usual one, and
+  /// none is left out (all left out, wrivy's stream never played).
+  var portraitOnly = false
 
   static func parse(_ text: String, base: URL?) -> HLSMaster {
     let lines = HLS.lines(text)
@@ -254,7 +258,10 @@ struct HLSMaster {
       }
       i += 1
     }
-    return HLSMaster(variants: variants)
+    let video = variants.filter { !$0.isAudioOnly }
+    let portraitOnly = !video.isEmpty && video.allSatisfy(\.isPortrait)
+    if portraitOnly { for i in variants.indices { variants[i].isPortrait = false } }
+    return HLSMaster(variants: variants, portraitOnly: portraitOnly)
   }
 
   /// Landscape video variants, best first.
@@ -267,6 +274,8 @@ struct HLSMaster {
   /// The upstream master as another player should load it from the local server: portrait
   /// variants removed and every URI made absolute (Twitch's v2 masters use relative ones).
   static func localCopy(of text: String, base: URL?) -> String {
+    // (Upright renditions stay when they're all there is.)
+    let keepPortrait = parse(text, base: base).portraitOnly
     var output: [String] = []
     var skipNextURI = false
     for line in HLS.lines(text) {
@@ -278,7 +287,9 @@ struct HLSMaster {
           if parts.count == 2 { width = Int(parts[0]) ?? 0; height = Int(parts[1]) ?? 0 }
         }
         let stable = a["STABLE-VARIANT-ID"]?.lowercased() ?? ""
-        skipNextURI = (a["IVS-GROUPS"]?.lowercased() == "portrait") || stable.hasSuffix("portrait") || (height > width && width > 0)
+        skipNextURI =
+          !keepPortrait
+          && ((a["IVS-GROUPS"]?.lowercased() == "portrait") || stable.hasSuffix("portrait") || (height > width && width > 0))
         if !skipNextURI { output.append(String(line)) }
       } else if line.hasPrefix("#") || line.trimmingCharacters(in: .whitespaces).isEmpty {
         output.append(String(line))
