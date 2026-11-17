@@ -46,12 +46,12 @@ enum MP4Writer {
     var durations: [UInt32] = []
     for i in ordered.indices {
       if i + 1 < ordered.count {
-        durations.append(UInt32(clamping: max(1, ordered[i + 1].dts - ordered[i].dts)))
+        durations.append(UInt32(clamping: max(1, ordered[i + 1].dts &- ordered[i].dts)))
       } else {
         durations.append(durations.last ?? 3000)
       }
     }
-    let offsets = ordered.map { UInt32(clamping: max(0, $0.pts - $0.dts)) }
+    let offsets = ordered.map { UInt32(clamping: max(0, $0.pts &- $0.dts)) }
     let keyframes = ordered.indices.filter { ordered[$0].isKeyframe }.map { UInt32($0 + 1) }
 
     let audio = segment.audio
@@ -76,24 +76,27 @@ enum MP4Writer {
     let base = audioStart ?? videoStart
     let audioMediaDuration = UInt64(audioSamples.count) * 1024  // in the audio track's own clock (its rate)
     let audioShown = UInt32(clamping: UInt64(audio.count) * 1024 * UInt64(movieTimescale) / UInt64(audioRate))
-    let audioDelay = UInt32(clamping: (audioStart ?? base) - base)
-    let videoDelay = UInt32(clamping: max(0, videoStart - base))
-    var videoEnd = (ordered.map(\.pts).max() ?? videoStart) + Int64(durations.last ?? 3000)
+    // (Wrapping arithmetic on the stream's times, clamped after: damaged times can be anything,
+    // and overflowing crashed.)
+    let audioDelay = UInt32(clamping: (audioStart ?? base) &- base)
+    let videoDelay = UInt32(clamping: max(0, videoStart &- base))
+    var videoEnd = (ordered.map(\.pts).max() ?? videoStart) &+ Int64(durations.last ?? 3000)
     // The last picture held until the sound ends: a file is as long as its longest track to the
     // player, and with the picture shorter, the file ended before its last moment of sound.
     if !audio.isEmpty, !durations.isEmpty {
-      let soundEnd = base + Int64(audioDelay) + Int64(audioShown)
+      let soundEnd = base &+ Int64(audioDelay) &+ Int64(audioShown)
       if soundEnd > videoEnd {
-        durations[durations.count - 1] += UInt32(clamping: soundEnd - videoEnd)
+        durations[durations.count - 1] = UInt32(clamping: UInt64(durations[durations.count - 1]) + UInt64(clamping: soundEnd &- videoEnd))
         videoEnd = soundEnd
       }
     }
     let videoMediaDuration = durations.reduce(0) { $0 + UInt64($1) }
-    let videoShown = UInt32(clamping: max(0, videoEnd - max(videoStart, base)))
+    let videoShown = UInt32(clamping: max(0, videoEnd &- max(videoStart, base)))
     // Where the shown picture starts in the track's own timeline (decode times from the first
     // frame's, plus its composition offset).
-    let videoMediaStart = UInt32(clamping: max(videoStart, base) - (ordered.first?.dts ?? videoStart))
-    let movieDuration = max(videoDelay + videoShown, audio.isEmpty ? 0 : audioDelay + audioShown)
+    let videoMediaStart = UInt32(clamping: max(videoStart, base) &- (ordered.first?.dts ?? videoStart))
+    let movieDuration = UInt32(
+      clamping: max(UInt64(videoDelay) + UInt64(videoShown), audio.isEmpty ? 0 : UInt64(audioDelay) + UInt64(audioShown)))
 
     let videoBytes = videoSamples.reduce(0) { $0 + $1.count }
     func moov(mdatStart: UInt32) -> Data {
