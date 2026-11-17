@@ -28,7 +28,10 @@ xcrun simctl boot "$UDID"
 xcrun simctl bootstatus "$UDID" -b
 xcrun simctl status_bar "$UDID" override --time 9:41 --batteryLevel 100 --cellularBars 4 --wifiBars 3 || true
 xcrun simctl install "$UDID" build-sim/Kestrel.app
-echo "==> Screens"; xcrun simctl io "$UDID" enumerate 2>&1 | grep -i -E "display|screen|name|id" | head -20
+echo "==> Screens"; xcrun simctl io "$UDID" enumerate 2>&1 | head -150
+echo "==> ui help"; xcrun simctl help ui 2>&1 | head -60
+echo "==> ui options"; xcrun simctl ui "$UDID" 2>&1 | head -40
+for option in appearance increase_contrast content_size posture hinge fold; do echo "-- ui $option"; xcrun simctl ui "$UDID" "$option" 2>&1 | head -5; done
 # iPhone Duo's two: 1 the outer display, 3 the inner one. POSTURE=open: the inner display on and
 # the outer off (unfolded); folded: the other way round.
 if [ "${POSTURE:-open}" = open ]; then
