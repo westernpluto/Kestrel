@@ -414,7 +414,7 @@ final class ImagePipeline: @unchecked Sendable {
       for skipped in index..<min(index + step, limit) { delay += frameDelay(source, skipped) }
       total += delay
       let still = UIImage(cgImage: image, scale: 2, orientation: .up)
-      for _ in 0..<max(1, Int((delay / 0.02).rounded())) { frames.append(still) }
+      for _ in 0..<min(max(1, Int((delay / 0.02).rounded())), max(1, 1501 - frames.count)) { frames.append(still) }
       if frames.count > 1500 { break }
     }
     guard !frames.isEmpty else { return UIImage(data: data) }
@@ -447,7 +447,9 @@ final class ImagePipeline: @unchecked Sendable {
     for (dictionaryKey, unclamped, clamped) in dictionaries {
       guard let dictionary = properties[dictionaryKey] as? [CFString: Any] else { continue }
       let value = (dictionary[unclamped] as? NSNumber)?.doubleValue ?? (dictionary[clamped] as? NSNumber)?.doubleValue ?? 0.1
-      return value < 0.02 ? 0.1 : value  // browsers treat tiny delays as 100 ms
+      // Browsers treat tiny delays as 100 ms; a long one is kept to 5 s (each 20 ms of it is a
+      // frame here: an emote asking for minutes built millions of them and froze chat).
+      return value < 0.02 || !value.isFinite ? 0.1 : min(value, 5)
     }
     return 0.1
   }

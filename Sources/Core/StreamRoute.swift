@@ -268,13 +268,15 @@ struct Storyboard: Equatable {
     func double(_ value: Any?) -> Double? { (value as? NSNumber)?.doubleValue ?? (value as? String).flatMap { Double($0) } }
     let boards: [Storyboard] = list.compactMap { entry in
       guard let names = entry["images"] as? [String], !names.isEmpty, let columns = int(entry["cols"]), columns > 0,
-        let rows = int(entry["rows"]), rows > 0, let count = int(entry["count"]), count > 0
+        let rows = int(entry["rows"]), rows > 0, let count = int(entry["count"]), count > 0,
+        columns <= 1000, rows <= 1000
       else { return nil }
       let images = names.compactMap { URL(string: $0, relativeTo: base)?.absoluteURL }
       guard images.count == names.count else { return nil }
       var interval = double(entry["interval"]) ?? 0
       if interval <= 0, let duration, duration > 0 { interval = duration / Double(count) }
-      guard interval > 0 else { return nil }
+      // (At least a tenth of a second: a tiny one overflowed working out which frame to show.)
+      guard interval.isFinite, interval >= 0.1 else { return nil }
       return Storyboard(
         images: images, columns: columns, rows: rows, count: count, width: int(entry["width"]) ?? 0,
         height: int(entry["height"]) ?? 0, interval: interval)
@@ -284,11 +286,16 @@ struct Storyboard: Equatable {
 
   func frame(at seconds: Double) -> Frame? {
     guard seconds.isFinite, interval > 0 else { return nil }
-    let index = min(count - 1, max(0, Int(seconds / interval)))
+    let index = min(count - 1, max(0, Int(clamping: Int64((seconds / interval).clamped(to: -1e15...1e15)))))
     let perImage = columns * rows
     let sheet = index / perImage
     guard sheet < images.count else { return nil }
     let cell = index % perImage
     return Frame(image: images[sheet], column: cell % columns, row: cell / columns)
   }
+}
+
+extension Comparable {
+  /// The value kept within `range`.
+  func clamped(to range: ClosedRange<Self>) -> Self { min(max(self, range.lowerBound), range.upperBound) }
 }

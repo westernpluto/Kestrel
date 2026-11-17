@@ -258,7 +258,7 @@ struct HLSMaster {
           variants.append(
             HLSVariant(
               uri: HLS.resolve(lines[j], base: base), bandwidth: Int(a["BANDWIDTH"] ?? "") ?? 0,
-              width: width, height: height, frameRate: Double(a["FRAME-RATE"] ?? "") ?? 0,
+              width: width, height: height, frameRate: min(HLS.sane(Double(a["FRAME-RATE"] ?? ""), or: 0), 1000),
               codecs: codecs, name: name, isAudioOnly: audioOnly, isPortrait: portrait))
           i = j
         }
