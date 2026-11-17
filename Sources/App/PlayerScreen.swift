@@ -460,14 +460,14 @@ final class LayoutHold {
   private var insets = EdgeInsets()
   private var logged: String?
 
-  /// The size iOS gave the window while away, and when the app was last back in front.
-  private var awaySize: CGSize?
+  /// When the app was last back in front.
   private var backAt = Date.distantPast
   private var wasActive = true
   /// Away in the background this time (Picture in Picture, the Home Screen), not just inactive a
   /// moment (iPhone Duo unfolding, Control Center).
   private var sawBackground = false
   private var backFromBackground = false
+  private var ignoredNote: String?
 
   func take(_ measured: (size: CGSize, insets: EdgeInsets), phase: ScenePhase, pass: Int = 0, now: Date = Date()) -> (size: CGSize, insets: EdgeInsets) {
     let active = phase == .active
@@ -483,18 +483,23 @@ final class LayoutHold {
     // Picture in Picture), then moved into place. That size is ignored for a second after coming
     // back. (Not after unfolding iPhone Duo: the new size is the real one, and the player stayed
     // laid out for the outer screen on the inner display.)
-    if active, backFromBackground, let size, let awaySize, measured.size == awaySize, measured.size != size,
-      now.timeIntervalSince(backAt) < 1
-    {
+    // (Any size then, not just the one seen while away: on iPhone Duo's inner display, held
+    // sideways, iOS also reported a passing phone-sized window, and the player showed the phone's
+    // full-width picture without chat for a moment, then slid chat back in.)
+    if active, backFromBackground, let size, measured.size != size, now.timeIntervalSince(backAt) < 1 {
+      let note = "\(Int(measured.size.width))x\(Int(measured.size.height))"
+      if note != ignoredNote {
+        ignoredNote = note
+        ActivityLog.shared.add("Player: window \(note) just back (kept \(Int(size.width))x\(Int(size.height)))")
+      }
       return (size, insets)
     }
+    ignoredNote = nil
     if active || size == nil {
-      if active { awaySize = nil }
       size = measured.size
       insets = measured.insets
       return measured
     }
-    if size != measured.size { awaySize = measured.size }
     if let size, size != measured.size {
       let note = "\(Int(measured.size.width))x\(Int(measured.size.height))"
       if note != logged {
