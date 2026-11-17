@@ -316,6 +316,8 @@ final class KestrelEngine: NSObject {
     holdUps.filter { Date().timeIntervalSince($0.at) < 60 }.map(\.length).max() ?? 0
   }
   private var lastTick = Date()
+  /// When the app was last not active (Control Center, a notification pulled down, an alert).
+  private var lastInactive = Date.distantPast
   /// When the app last went to or came back from the background (Picture in Picture included).
   private var lifecycleChangedAt = Date.distantPast
 
@@ -355,6 +357,15 @@ final class KestrelEngine: NSObject {
     lifecycleTokens.append(
       center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
         MainActor.assumeIsolated { self?.enteringForeground() }
+      })
+    lifecycleTokens.append(
+      center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.lastInactive = Date() }
+      })
+    lifecycleTokens.append(
+      center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        // (Back from Control Center or the like: the timer's gap meanwhile isn't a hold-up.)
+        MainActor.assumeIsolated { self?.lastInactive = Date() }
       })
     lifecycleTokens.append(
       center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -411,6 +422,8 @@ final class KestrelEngine: NSObject {
   /// For good: the downloads' session is let go (it holds its delegate, this engine, until then).
   func shutDown() {
     stop()
+    lifecycleTokens.forEach(NotificationCenter.default.removeObserver)
+    lifecycleTokens = []
     if handbackCover != nil {
       handbackCover = nil
       onScreenLayers?()
@@ -1671,9 +1684,14 @@ final class KestrelEngine: NSObject {
   private func tick() {
     guard running else { return }
     let tickedAt = Date()
+    if UIApplication.shared.applicationState != .active { lastInactive = tickedAt }
     let late = tickedAt.timeIntervalSince(lastTick) - 0.25
     lastTick = tickedAt
-    if late > 0.3 {
+    // (Only in front and settled: iOS slows or stops the timer in the background, in Picture in
+    // Picture and under Control Center, and the gap read as the main thread held up for seconds.)
+    if late > 0.3, !inBackground, UIApplication.shared.applicationState == .active,
+      tickedAt.timeIntervalSince(lifecycleChangedAt) > 2, tickedAt.timeIntervalSince(lastInactive) > 2
+    {
       holdUps.append((tickedAt, late))
       if holdUps.count > 200 { holdUps.removeFirst(100) }
     }
