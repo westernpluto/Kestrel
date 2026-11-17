@@ -263,8 +263,50 @@ struct EmoteTextField: UIViewRepresentable {
       return true
     }
 
+    /// What's typed next is in the box's style. iOS takes it from the character before the cursor,
+    /// and with nothing there (the box emptied) or an emote's picture there, that was its default:
+    /// black text.
+    private func keepTypingStyle(_ textView: UITextView) {
+      guard textView.markedTextRange == nil else { return }
+      let wanted = Self.attributes
+      let current = textView.typingAttributes
+      if (current[.foregroundColor] as? UIColor) != (wanted[.foregroundColor] as? UIColor)
+        || (current[.font] as? UIFont) != (wanted[.font] as? UIFont) || current[.attachment] != nil
+      {
+        textView.typingAttributes = wanted
+      }
+    }
+
+    /// Text that went in another style anyway (typed while iOS had its default) back to the box's
+    /// (only where it differs: restyling everything on every key upset autocorrect).
+    private func restyleStrayText(_ textView: UITextView) {
+      guard textView.markedTextRange == nil else { return }
+      let storage = textView.textStorage
+      let wanted = Self.attributes
+      let color = wanted[.foregroundColor] as? UIColor
+      let font = wanted[.font] as? UIFont
+      var stray: [NSRange] = []
+      storage.enumerateAttributes(in: NSRange(location: 0, length: storage.length)) { attributes, range, _ in
+        guard attributes[.attachment] == nil else { return }
+        if (attributes[.foregroundColor] as? UIColor) != color || (attributes[.font] as? UIFont) != font { stray.append(range) }
+      }
+      guard !stray.isEmpty else { return }
+      let selection = textView.selectedRange
+      storage.beginEditing()
+      for range in stray { storage.addAttributes(wanted, range: range) }
+      storage.endEditing()
+      textView.selectedRange = selection
+    }
+
+    func textViewDidChangeSelection(_ textView: UITextView) {
+      guard !updating else { return }
+      keepTypingStyle(textView)
+    }
+
     func textViewDidChange(_ textView: UITextView) {
       guard !updating, let view = textView as? EmoteTextView else { return }
+      defer { keepTypingStyle(view) }
+      restyleStrayText(view)
       let current = plain(of: view)
       // Only redraw when a picture appears or goes (redrawing on every key stopped autocorrect and
       // the suggestions working); never mid-composition.
