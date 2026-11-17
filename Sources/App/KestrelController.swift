@@ -662,41 +662,15 @@ struct KestrelVideoView: UIViewRepresentable {
       screenHost.setNeedsLayout()
     }
 
-    /// The picture goes straight into its place, unanimated: it came back at the size it had in
-    /// the window (in the top corner), and its move into place was animated along with iOS's
-    /// closing of the window (it grew into place over a fifth of a second).
     func takeScreenBack() {
-      UIView.performWithoutAnimation {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        screenHost.removeFromSuperview()
-        screenHost.translatesAutoresizingMaskIntoConstraints = true
-        addSubview(screenHost)
-        screenHost.frame = bounds
-        for layer in shown { layer.frame = bounds }
-        settleScreen()
-        CATransaction.commit()
-      }
-      // (Again once the window's closing has finished laying things out.)
-      DispatchQueue.main.async { [weak self] in
-        MainActor.assumeIsolated {
-          guard let self, !self.screenLent else { return }
-          UIView.performWithoutAnimation {
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            self.screenHost.frame = self.bounds
-            for layer in self.shown { layer.frame = self.bounds }
-            self.settleScreen()
-            CATransaction.commit()
-          }
-        }
-      }
-    }
-
-    /// No animation left on the picture's view or its layers.
-    private func settleScreen() {
-      screenHost.layer.removeAllAnimations()
-      for layer in shown { layer.removeAllAnimations() }
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      screenHost.removeFromSuperview()
+      screenHost.translatesAutoresizingMaskIntoConstraints = true
+      addSubview(screenHost)
+      screenHost.frame = bounds
+      for layer in shown { layer.frame = bounds }
+      CATransaction.commit()
     }
 
     /// The screen's layers are out in the window.

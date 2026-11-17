@@ -59,13 +59,8 @@ final class KestrelEngine: NSObject {
   func pictureInPictureEnded() {
     screenInPictureInPicture = false
     pictureInPictureEndedAt = Date()
-    refitScreen?()
-    // (And again in a moment: the layer's size can still be settling.)
-    for delay in [0.05, 0.2, 0.5, 1.0] {
-      DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-        MainActor.assumeIsolated { self?.refitScreen?() }
-      }
-    }
+    // (The picture isn't forced to the player's size here: iOS animates it back into place, and
+    // snapping it there over the next second cut that animation short.)
     dropHandbackCoverWhenDrawing()
   }
   /// Told when the screen's layer is replaced by a fresh one (see `catchUpScreen`): the Picture in
