@@ -1496,6 +1496,13 @@ struct ChatPanel: View {
           draft = "@\(login) " + draft
           focused = true
         }, active: active)
+        // The oldest line in view fades out at the top instead of being cut off by a hard edge.
+        .mask(
+          VStack(spacing: 0) {
+            LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 14)
+            Color.black
+          }
+        )
         statusPill
       }
       Divider().overlay(Color.white.opacity(0.08))

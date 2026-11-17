@@ -160,9 +160,11 @@ struct SettingsRow: View {
         .foregroundColor(.white)
         .frame(width: 29, height: 29)
         .background(color, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-      Text(title).foregroundColor(.primary)
+      // The title keeps its one line; a long value gives way ("Picture in Picture" wrapped onto
+      // two lines beside "With controls" on iPhone Duo's outer screen).
+      Text(title).foregroundColor(.primary).lineLimit(1).layoutPriority(1)
       Spacer(minLength: 8)
-      if let value { Text(value).foregroundColor(.secondary).lineLimit(1) }
+      if let value { Text(value).foregroundColor(.secondary).lineLimit(1).minimumScaleFactor(0.85) }
     }
   }
 }
