@@ -24,6 +24,8 @@ import MetalKit
     var inputContentHeight = 0
     var outputWidth = 0
     var outputHeight = 0
+    var colorTextureUsage: MTLTextureUsage = []
+    var outputTextureUsage: MTLTextureUsage = []
     func encode(commandBuffer: MTLCommandBuffer) {}
   }
   enum MTLFXSpatialScalerColorProcessingMode { case perceptual }
