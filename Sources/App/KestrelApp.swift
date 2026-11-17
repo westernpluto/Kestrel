@@ -20,6 +20,7 @@ struct KestrelApp: App {
   var body: some Scene {
     WindowGroup {
       RootView()
+        .task { await ScreenTour.run() }
         .environmentObject(app)
         .environmentObject(favorites)
         .environmentObject(settings)

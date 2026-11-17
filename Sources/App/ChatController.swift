@@ -1540,6 +1540,9 @@ struct ChatPanel: View {
         }
       )
       .onDisappear { if pickerOpen { EmotePickerArea.frame = nil } }
+      .onReceive(NotificationCenter.default.publisher(for: ScreenTour.openEmotes)) { _ in
+        if !pickerOpen { openPicker() }
+      }
       .onReceive(NotificationCenter.default.publisher(for: EmotePickerArea.closeNotification)) { _ in
         guard pickerOpen else { return }
         withAnimation(Self.spring) { pickerOpen = false }

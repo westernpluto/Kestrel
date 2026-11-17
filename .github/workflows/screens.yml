@@ -1,0 +1,44 @@
+name: Simulator screenshots
+
+# Kestrel's main screens on an iPhone Duo simulator, as images to look at. Runs on demand, or on
+# a push whose commit message says [screens].
+on:
+  workflow_dispatch:
+    inputs:
+      screens:
+        description: Screens to capture (space separated; empty for all)
+        type: string
+        default: ""
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+jobs:
+  screens:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[screens]')
+    runs-on: xcode-27
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pick Xcode 27
+        run: |
+          XCODE=/Applications/Xcode_27.1.app
+          [ -d "$XCODE" ] || XCODE="$(ls -d /Applications/Xcode_27.*.app 2>/dev/null | grep -viE 'beta|release_candidate|_rc' | sort -V | tail -1)"
+          [ -n "$XCODE" ] || XCODE=/Applications/Xcode.app
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+      - name: Build for the simulator
+        run: ./build-sim.sh
+      - name: Screenshots
+        env:
+          SCREENS: ${{ inputs.screens }}
+        run: |
+          [ -n "$SCREENS" ] || unset SCREENS
+          .github/scripts/screens.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screens
+          path: shots/
