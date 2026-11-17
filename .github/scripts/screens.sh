@@ -14,11 +14,14 @@ duo=[t for t in types if "duo" in t["name"].lower()]
 phones=[t for t in types if t["name"].startswith("iPhone")]
 pick=(duo or phones)[-1]
 print(pick["identifier"])')"
-RUNTIME="$(xcrun simctl list runtimes -j | python3 -c '
-import json,sys
+# The newest iOS that can run that device (iPhone Duo comes with a runtime of its own).
+RUNTIME="$(xcrun simctl list runtimes -j | TYPE="$TYPE" python3 -c '
+import json,os,sys
 rs=[r for r in json.load(sys.stdin)["runtimes"] if r["platform"]=="iOS" and r.get("isAvailable")]
-rs.sort(key=lambda r:[int(x) for x in r["version"].split(".")])
-print(rs[-1]["identifier"])')"
+ok=[r for r in rs if any(t.get("identifier")==os.environ["TYPE"] for t in r.get("supportedDeviceTypes",[]))]
+pool=ok or rs
+pool.sort(key=lambda r:[int(x) for x in r["version"].split(".")])
+print(pool[-1]["identifier"])')"
 echo "==> Using $TYPE on $RUNTIME"
 UDID="$(xcrun simctl create shots "$TYPE" "$RUNTIME")"
 xcrun simctl boot "$UDID"
@@ -26,10 +29,18 @@ xcrun simctl bootstatus "$UDID" -b
 xcrun simctl status_bar "$UDID" override --time 9:41 --batteryLevel 100 --cellularBars 4 --wifiBars 3 || true
 xcrun simctl install "$UDID" build-sim/Kestrel.app
 echo "==> Screens"; xcrun simctl io "$UDID" enumerate 2>&1 | grep -i -E "display|screen|name|id" | head -20
-# iPhone Duo's two: 1 the outer display, 3 the inner one.
-DISPLAYS="${DISPLAYS:-1 3}"
-echo "==> screenConfig"; xcrun simctl io "$UDID" screenConfig 2>&1 | head -40
-xcrun simctl io "$UDID" screenConfig --display=3 2>&1 | head -20
+# iPhone Duo's two: 1 the outer display, 3 the inner one. POSTURE=open: the inner display on and
+# the outer off (unfolded); folded: the other way round.
+if [ "${POSTURE:-open}" = open ]; then
+  xcrun simctl io "$UDID" screenConfig --display=3 power on || true
+  xcrun simctl io "$UDID" screenConfig --display=1 power off || true
+  DISPLAYS="${DISPLAYS:-3}"
+else
+  xcrun simctl io "$UDID" screenConfig --display=1 power on || true
+  xcrun simctl io "$UDID" screenConfig --display=3 power off || true
+  DISPLAYS="${DISPLAYS:-1}"
+fi
+sleep 5
 echo "==> Displays: $DISPLAYS"
 SCREENS="${SCREENS:-following browse search settings channel player emotes mini player-landscape}"
 for screen in $SCREENS; do

@@ -9,6 +9,10 @@ on:
         description: Screens to capture (space separated; empty for all)
         type: string
         default: ""
+      posture:
+        description: iPhone Duo open (inner display) or folded (outer display)
+        type: string
+        default: open
   push:
     branches: ["**"]
 
@@ -34,6 +38,7 @@ jobs:
       - name: Screenshots
         env:
           SCREENS: ${{ inputs.screens }}
+          POSTURE: ${{ inputs.posture || 'open' }}
         run: |
           [ -n "$SCREENS" ] || unset SCREENS
           .github/scripts/screens.sh
