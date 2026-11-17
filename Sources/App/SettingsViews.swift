@@ -417,6 +417,8 @@ final class ActivityLogModel: ObservableObject {
 
 struct ActivityLogView: View {
   @StateObject private var model = ActivityLogModel()
+  /// Just copied: the button shows a checkmark a moment.
+  @State private var copied = false
   private static let formatter: DateFormatter = {
     let f = DateFormatter()
     f.dateFormat = "HH:mm:ss"
@@ -442,10 +444,16 @@ struct ActivityLogView: View {
         Button {
           UIPasteboard.general.string = model.entries.reversed()
             .map { "\(Self.formatter.string(from: $0.date))  \($0.message)" }.joined(separator: "\n")
+          UINotificationFeedbackGenerator().notificationOccurred(.success)
+          withAnimation(.easeInOut(duration: 0.2)) { copied = true }
+          DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { withAnimation(.easeInOut(duration: 0.2)) { copied = false } }
         } label: {
-          Image(systemName: "doc.on.doc")
+          Image(systemName: copied ? "checkmark" : "doc.on.doc")
         }
+        .disabled(model.entries.isEmpty)
+        .accessibilityLabel(copied ? "Copied" : "Copy log")
         Button("Clear") { ActivityLog.shared.clear() }
+          .disabled(model.entries.isEmpty)
       }
     }
   }

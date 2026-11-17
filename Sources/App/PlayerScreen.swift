@@ -1842,7 +1842,7 @@ struct OfflineBanner: View {
       Image(systemName: systemImage)
         .font(.system(size: 16, weight: .semibold))
         .frame(width: 36, height: 36)
-        .contentShape(Rectangle())
+        .contentShape(Rectangle().inset(by: -4))
     }
     .buttonStyle(PressableStyle(scale: 0.9))
     .accessibilityLabel(label)

@@ -1745,7 +1745,8 @@ struct ChatPanel: View {
                 .font(.system(size: 18, weight: .medium))
                 .foregroundColor(pickerOpen ? .accentTeal : .white.opacity(0.75))
                 .frame(width: 32, height: 32)
-                .contentShape(Rectangle())
+                // (A finger's worth to tap: 44 pt, the look unchanged.)
+                .contentShape(Rectangle().inset(by: -6))
             }
             .padding(.trailing, 4)
             .padding(.bottom, 2)
@@ -1755,6 +1756,7 @@ struct ChatPanel: View {
             Image(systemName: "paperplane.fill").font(.system(size: 16, weight: .semibold))
               .frame(width: 36, height: 36)
               .background(draftIsEmpty ? Color.white.opacity(0.08) : Color.accentTeal, in: Circle())
+              .contentShape(Rectangle().inset(by: -4))
               .foregroundColor(.white)
               .animation(.easeInOut(duration: 0.15), value: draftIsEmpty)
           }

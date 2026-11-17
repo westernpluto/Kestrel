@@ -87,7 +87,7 @@ struct StatsOverlay: View {
             .font(.system(size: 11, weight: .bold))
             .foregroundColor(.white.opacity(0.85))
             .frame(width: 32, height: 32)
-            .contentShape(Rectangle())
+            .contentShape(Rectangle().inset(by: -6))
         }
         .accessibilityLabel("Hide video stats")
       }
