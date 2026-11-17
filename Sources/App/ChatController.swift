@@ -1240,6 +1240,11 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
 
   private func startGlide() {
     guard glide == nil else { return }
+    // Reduce Motion: new messages appear in place, without the list sliding up to them.
+    if UIAccessibility.isReduceMotionEnabled {
+      tableView.contentOffset.y = bottomOffset
+      return
+    }
     let link = CADisplayLink(target: GlideTarget(self), selector: #selector(GlideTarget.step(_:)))
     // 60 a second is smooth for text sliding up; asking for ProMotion's 120 kept the screen at its
     // most power-hungry rate the whole time a busy chat moved.
@@ -1884,9 +1889,20 @@ struct PressableStyle: ButtonStyle {
   var scale: CGFloat = 0.92
 
   func makeBody(configuration: Configuration) -> some View {
-    configuration.label
-      .scaleEffect(configuration.isPressed ? scale : 1)
-      .opacity(configuration.isPressed ? 0.85 : 1)
-      .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+    Pressed(configuration: configuration, scale: scale)
+  }
+
+  /// With Reduce Motion on, a press only dims (no shrinking).
+  private struct Pressed: View {
+    let configuration: ButtonStyleConfiguration
+    let scale: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+      configuration.label
+        .scaleEffect(configuration.isPressed && !reduceMotion ? scale : 1)
+        .opacity(configuration.isPressed ? (reduceMotion ? 0.6 : 0.85) : 1)
+        .animation(reduceMotion ? .easeOut(duration: 0.1) : .spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+    }
   }
 }
