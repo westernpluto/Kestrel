@@ -402,13 +402,13 @@ struct AdBlockingView: View {
   }
 }
 
+@MainActor
 final class ActivityLogModel: ObservableObject {
   @Published var entries: [ActivityLog.Entry] = ActivityLog.shared.all.reversed()
 
   init() {
     ActivityLog.shared.onChange = { [weak self] in
-      guard let model = self else { return }
-      DispatchQueue.main.async { model.entries = ActivityLog.shared.all.reversed() }
+      Task { @MainActor in self?.entries = ActivityLog.shared.all.reversed() }
     }
   }
 
