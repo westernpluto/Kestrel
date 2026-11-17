@@ -245,6 +245,21 @@ struct EmoteTextField: UIViewRepresentable {
         parent.onSubmit()
         return false
       }
+      // Backspace right after an emote's picture and the space behind it: the emote goes as one
+      // thing, space and all. Deleting just the space put the cursor against the emote, which then
+      // turned back into its name to be deleted letter by letter.
+      if text.isEmpty, range.length == 1, range.location > 0, textView.markedTextRange == nil {
+        let storage = textView.textStorage
+        let deleted = (storage.string as NSString).substring(with: range)
+        let before = range.location - 1
+        let emoteBefore = storage.attribute(.attachment, at: before, effectiveRange: nil) is EmoteAttachment
+        if emoteBefore, deleted == " " || deleted == "\u{00A0}" {
+          storage.deleteCharacters(in: NSRange(location: before, length: 2))
+          textView.selectedRange = NSRange(location: before, length: 0)
+          textViewDidChange(textView)
+          return false
+        }
+      }
       return true
     }
 
