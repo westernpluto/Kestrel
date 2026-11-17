@@ -1553,7 +1553,7 @@ struct ChatPanel: View {
     .onChange(of: account.session?.login) { _ in chat.reconnect() }
     .onChange(of: focused) { isFocused in
       if isFocused, pickerOpen { closePickerUnderKeyboard() }
-      if isFocused { KeyboardObserver.shared.checkSoon() }
+      if isFocused { KeyboardObserver.shared.checkSoon() } else { KeyboardObserver.shared.messageBoxLeft() }
     }
     .onChange(of: pickerOpen) { open in
       let space = open ? pickerHeight + pickerPad : 0

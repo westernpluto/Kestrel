@@ -340,6 +340,12 @@ final class KeyboardObserver: ObservableObject {
           self?.measureAgain()
         })
     }
+    // Back in front with the message box still holding the keyboard: iOS can bring the keyboard
+    // back without saying so (see `recoverUnannouncedKeyboard`).
+    tokens.append(
+      center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        if FirstResponder.current is UITextView { self?.checkSoon() }
+      })
   }
 
   /// The keyboard's last frame (screen coordinates) and the screen it was on, while it's up.
@@ -377,6 +383,10 @@ final class KeyboardObserver: ObservableObject {
       guard let self else { return }
       let before = self.overlap
       if before == 0 { self.measureAgain() }
+      if self.overlap == 0, self.lastEnd == nil, FirstResponder.current is UITextView {
+        self.recoverUnannouncedKeyboard()
+        return
+      }
       let after = self.overlap
       let screen = Self.laidOutKeyboard
       guard before == 0 || screen == 0 else { return }
@@ -388,6 +398,63 @@ final class KeyboardObserver: ObservableObject {
         "Keyboard: typing, measured \(Int(before)) then \(Int(after)); screen laid out for \(Int(screen)) at \(Int(Self.laidOutHeight)) tall; "
           + "keyboard frame \(self.lastEnd.map { "\(Int($0.minY))–\(Int($0.maxY))" } ?? "never reported"), window \(Int(window?.bounds.height ?? 0)) tall; scenes: \(scenes)")
     }
+  }
+
+  /// Kept up by `recoverUnannouncedKeyboard` (no notification will take it down again).
+  private var assumed = false
+
+  /// The keyboard's up for the message box, but iOS never said so (back from Picture in Picture or
+  /// the background, it can bring the keyboard back without a word, and the message box stayed
+  /// under it until the stream was opened again). Asked to say so; failing that, measured from the
+  /// window's keyboard guide; failing that, the height it had last time in a window this size.
+  private func recoverUnannouncedKeyboard() {
+    FirstResponder.current?.reloadInputViews()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+      guard let self, FirstResponder.current is UITextView else { return }
+      if self.lastEnd != nil {
+        ActivityLog.shared.add("Keyboard: up without a word from iOS; asked again, measured \(Int(self.overlap))")
+        return
+      }
+      let window = Self.window(on: nil)
+      let height = window?.bounds.height ?? AppWindow.bounds.height
+      var value: CGFloat = 0
+      var how = "nothing to go on"
+      if let window {
+        window.layoutIfNeeded()
+        let guide = window.keyboardLayoutGuide.layoutFrame
+        let reach = window.bounds.maxY - guide.minY
+        if guide.height > 40, reach > 40, reach < height * 0.62 {
+          value = reach
+          how = "from the window's keyboard guide"
+        }
+      }
+      if value == 0, let remembered = Self.remembered(forWindowHeight: height) {
+        value = remembered
+        how = "as last time at this size"
+      }
+      ActivityLog.shared.add("Keyboard: up without a word from iOS; \(Int(value)) \(how)")
+      guard value > 0 else { return }
+      self.assumed = true
+      withAnimation(Self.animation(duration: 0.25)) { self.overlap = value }
+    }
+  }
+
+  /// The message box let go of the keyboard: a height that was only assumed goes (no
+  /// notification would take it away).
+  func messageBoxLeft() {
+    guard assumed else { return }
+    assumed = false
+    withAnimation(Self.animation(duration: 0.25)) { overlap = 0 }
+  }
+
+  /// The keyboard's height last seen in a window this tall (kept between launches).
+  private static func remembered(forWindowHeight height: CGFloat) -> CGFloat? {
+    let value = UserDefaults.standard.double(forKey: "keyboardHeight.\(Int(height))")
+    return value > 40 ? CGFloat(value) : nil
+  }
+
+  private static func remember(_ value: CGFloat, forWindowHeight height: CGFloat) {
+    UserDefaults.standard.set(Double(value), forKey: "keyboardHeight.\(Int(height))")
   }
 
   private func measureAgain() {
@@ -435,7 +502,12 @@ final class KeyboardObserver: ObservableObject {
           "Keyboard: up but not over the window (keyboard \(Int(end.minY))–\(Int(end.maxY)), window \(Int(window?.bounds.height ?? 0)) tall, \(UIApplication.shared.connectedScenes.count) scenes)")
       }
     }
-    if value > 40 { Self.lastHeight = value }
+    if value > 40 {
+      Self.lastHeight = value
+      assumed = false
+      Self.remember(value, forWindowHeight: Self.window(on: screen)?.bounds.height ?? AppWindow.bounds.height)
+    }
+    if hidingNote { assumed = false }
     let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
     guard abs(value - overlap) > 0.5 else { return }
     // "Did" notifications only correct a missed "will"; a zero duration means the keyboard itself
