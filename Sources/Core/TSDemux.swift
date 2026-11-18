@@ -326,25 +326,49 @@ struct TSDemuxer {
 enum AnnexB {
   /// The NAL units in Annex B data (start codes taken off).
   static func units(_ data: Data) -> [Data] {
-    let d = Data(data)
-    var units: [Data] = []
-    var start: Int?
-    var i = 0
-    while i + 3 <= d.count {
-      if d[i] == 0, d[i + 1] == 0, d[i + 2] == 1 {
-        if let s = start {
-          var e = i
-          if e > s, d[e - 1] == 0 { e -= 1 }  // the 4-byte form's leading zero
-          if e > s { units.append(d[s..<e]) }
+    let base = data.startIndex
+    return ranges(data).map { data.subdata(in: (base + $0.lowerBound)..<(base + $0.upperBound)) }
+  }
+
+  /// Each NAL unit's first byte (its header, which says its type), without copying the units: for
+  /// telling a keyframe, asked of every frame as it's unpacked.
+  static func headers(_ data: Data) -> [UInt8] {
+    let base = data.startIndex
+    return ranges(data).map { data[base + $0.lowerBound] }
+  }
+
+  /// Where each NAL unit is (offsets from the data's start). Read straight from memory, three bytes
+  /// at a time where a start code can't begin (byte by byte through `Data`, this was most of the
+  /// time unpacking a transport stream segment took, on the main thread).
+  static func ranges(_ data: Data) -> [Range<Int>] {
+    let count = data.count
+    guard count >= 3 else { return [] }
+    var found: [Range<Int>] = []
+    data.withUnsafeBytes { raw in
+      guard let p = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+      var start = -1
+      var i = 0
+      while i + 3 <= count {
+        // A start code (00 00 01) can't begin at i, i+1 or i+2 when the byte at i+2 is above 1.
+        if p[i + 2] > 1 {
+          i += 3
+          continue
         }
-        i += 3
-        start = i
-      } else {
-        i += 1
+        if p[i] == 0, p[i + 1] == 0, p[i + 2] == 1 {
+          if start >= 0 {
+            var end = i
+            if end > start, p[end - 1] == 0 { end -= 1 }  // the 4-byte form's leading zero
+            if end > start { found.append(start..<end) }
+          }
+          i += 3
+          start = i
+        } else {
+          i += 1
+        }
       }
+      if start >= 0, start < count { found.append(start..<count) }
     }
-    if let s = start, s < d.count { units.append(d[s..<d.count]) }
-    return units.map { Data($0) }
+    return found
   }
 
   /// Each NAL unit behind a 4-byte big-endian length (what the system's decoder takes), leaving
@@ -370,7 +394,7 @@ enum H264 {
   static func type(_ unit: Data) -> UInt8 { (unit.first ?? 0) & 0x1F }
 
   static func isKeyframe(_ data: Data.SubSequence) -> Bool {
-    AnnexB.units(Data(data)).contains { type($0) == 5 }
+    AnnexB.headers(Data(data)).contains { $0 & 0x1F == 5 }
   }
 
   /// The sequence and picture parameter sets in a frame (a keyframe carries them).
@@ -400,7 +424,7 @@ enum HEVC {
   static func type(_ unit: Data) -> UInt8 { ((unit.first ?? 0) >> 1) & 0x3F }
 
   static func isKeyframe(_ data: Data.SubSequence) -> Bool {
-    AnnexB.units(Data(data)).contains { (16...21).contains(type($0)) }
+    AnnexB.headers(Data(data)).contains { (16...21).contains(($0 >> 1) & 0x3F) }
   }
 
   static func parameterSets(_ units: [Data]) -> (vps: Data, sps: Data, pps: Data)? {

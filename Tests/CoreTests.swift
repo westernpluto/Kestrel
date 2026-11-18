@@ -248,6 +248,52 @@ func testDates() {
   }
 }
 
+/// The NAL splitter (read from memory, three bytes at a time) against a plain byte-by-byte one.
+func testAnnexBSplitter() {
+  func plain(_ d: [UInt8]) -> [[UInt8]] {
+    var units: [[UInt8]] = []
+    var start: Int?
+    var i = 0
+    while i + 3 <= d.count {
+      if d[i] == 0, d[i + 1] == 0, d[i + 2] == 1 {
+        if let s = start {
+          var e = i
+          if e > s, d[e - 1] == 0 { e -= 1 }
+          if e > s { units.append(Array(d[s..<e])) }
+        }
+        i += 3
+        start = i
+      } else {
+        i += 1
+      }
+    }
+    if let s = start, s < d.count { units.append(Array(d[s..<d.count])) }
+    return units
+  }
+  var generator = SystemRandomNumberGenerator()
+  var samples: [[UInt8]] = []
+  for _ in 0..<300 {
+    // Mostly small bytes, so start codes turn up often.
+    samples.append((0..<Int.random(in: 0...400, using: &generator)).map { _ in [0, 0, 0, 1, 2, 3, 255].randomElement(using: &generator)! })
+  }
+  let dir = URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent()
+  if let segment = try? Data(contentsOf: dir.appendingPathComponent("twitch_1080p_bframes.ts")) {
+    var demuxer = TSDemuxer()
+    for case .video(let frame) in demuxer.feed(segment) + demuxer.flush() { samples.append([UInt8](frame.data)) }
+  }
+  var same = true
+  for bytes in samples {
+    // (Also from a slice that doesn't start at zero.)
+    let sliced = Data([9, 9] + bytes).dropFirst(2)
+    if AnnexB.units(Data(bytes)).map({ [UInt8]($0) }) != plain(bytes) || AnnexB.units(sliced).map({ [UInt8]($0) }) != plain(bytes)
+      || AnnexB.headers(Data(bytes)) != plain(bytes).map({ $0.first ?? 0 })
+    {
+      same = false
+    }
+  }
+  check(same, "NAL splitter matches the plain one over \(samples.count) samples")
+}
+
 func testMasterParsing() {
   // Damaged input (found by fuzzing): reads past the data give zeros, odd lengths are kept sane.
   check(MP4.u32(Data([1, 2]), 0) == 0 && MP4.type(Data([1]), 0) == "" && MP4.byte(Data(), 5) == 0, "MP4 reads past the end")
@@ -2703,6 +2749,7 @@ testAV1Init()
 testCatchUpHoldsOneSpeed()
 testCatchUpHoversWithoutFlipping()
 testAdTimeline()
+testAnnexBSplitter()
 testTimelineAndRender()
 testSession(lowLatency: true)
 testSession(lowLatency: false)
