@@ -36,7 +36,9 @@ enum ScreenTour {
       case "emotes": NotificationCenter.default.post(name: openEmotes, object: nil)
       case "emotes-scroll", "emotes-scroll-back", "emotes-pick-scroll":
         NotificationCenter.default.post(name: openEmotes, object: nil)
-        try? await Task.sleep(nanoseconds: 5_000_000_000)
+        // Until the emotes have come (up to 30 s), then a moment for them to settle.
+        for _ in 0..<60 where pickerState.isEmpty { try? await Task.sleep(nanoseconds: 500_000_000) }
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
         note(screen, "open · \(pickerState)")
         if screen == "emotes-pick-scroll" {
           NotificationCenter.default.post(name: pickEmoteSection, object: nil)
@@ -100,7 +102,8 @@ enum ScreenTour {
     try? image.pngData()?.write(to: folder.appendingPathComponent("\(screen)-\(index).png"))
   }
 
-  /// The emote picker's list: the tallest scroll view up and down that isn't chat.
+  /// The emote picker's list: the lowest scroll view up and down on screen that isn't chat (the
+  /// picker sits under it).
   @MainActor
   private static func emoteScrollView() -> UIScrollView? {
     let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
@@ -114,7 +117,8 @@ enum ScreenTour {
       view.subviews.forEach(walk)
     }
     windows.forEach(walk)
-    return found.max { $0.contentSize.height < $1.contentSize.height }
+    for scroll in found { ActivityLog.shared.add("Screen tour: scroll view \(scroll.convert(scroll.bounds, to: nil)) content \(scroll.contentSize)") }
+    return found.max { $0.convert($0.bounds, to: nil).minY < $1.convert($1.bounds, to: nil).minY }
   }
 
   /// Asks chat's message box to open the emote picker (screen tour only).

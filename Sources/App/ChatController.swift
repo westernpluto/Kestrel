@@ -1963,8 +1963,11 @@ struct EmotePicker: View {
         }
       }
       .background(Color(white: 0.09))
-      .onChange(of: "\(current ?? "-")|\(atTop ?? "-")|\(jumping)|\(pastTop)") { state in
-        if ScreenTour.requested != nil { ScreenTour.pickerState = "current|atTop|jumping|pastTop = " + state }
+      .onChange(of: tourState) { state in
+        if ScreenTour.requested != nil { ScreenTour.pickerState = state }
+      }
+      .onAppear {
+        if ScreenTour.requested != nil { ScreenTour.pickerState = tourState }
       }
       // (Screen tour: a pick in the strip, as a tap on its fourth icon.)
       .onReceive(NotificationCenter.default.publisher(for: ScreenTour.pickEmoteSection)) { _ in
@@ -1972,6 +1975,11 @@ struct EmotePicker: View {
         jump(to: sections[min(3, sections.count - 1)].id, proxy)
       }
     }
+  }
+
+  /// What the screen tour notes down (empty while there are no sections yet).
+  private var tourState: String {
+    sections.isEmpty ? "" : "current \(current ?? "-") · at top \(atTop ?? "-") · jumping \(jumping) · title copy \(pastTop)"
   }
 
   /// The section scrolled to (nil: the first).
