@@ -2166,29 +2166,93 @@ struct EmoteGrid: UIViewRepresentable {
 
 /// One emote in the picker's grid: its picture (animated ones play), shrinking a little while
 /// pressed.
+///
+/// Its first frame comes first, fetched on its own and dropped as soon as the cell scrolls away;
+/// the animation only once the emote has stayed in view a moment. (Asking for whole pictures, a
+/// fast scroll through xQc's thousands of emotes queued hundreds of downloads and animations
+/// nobody would see, and the emotes in view waited behind them: a grid of blanks.)
 final class EmoteGridCell: UICollectionViewCell {
   static let reuse = "emote"
-  private let image = LoadingImageView()
+  private static let pixels: CGFloat = 112
+  private let stillView = UIImageView()
+  private let animatedView = LoadingImageView()
+  /// While the picture is still coming: a faint tile, so a slow connection doesn't look empty.
+  private let tile = UIView()
+  private var loading: Task<Void, Never>?
+  private var url: URL?
 
   override init(frame: CGRect) {
     super.init(frame: frame)
-    image.contentMode = .scaleAspectFit
-    image.translatesAutoresizingMaskIntoConstraints = false
-    contentView.addSubview(image)
-    NSLayoutConstraint.activate([
-      image.widthAnchor.constraint(equalToConstant: 32), image.heightAnchor.constraint(equalToConstant: 32),
-      image.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-      image.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
-    ])
+    tile.backgroundColor = UIColor(white: 1, alpha: 0.06)
+    tile.layer.cornerRadius = 7
+    tile.layer.cornerCurve = .continuous
+    for view in [tile, stillView, animatedView] {
+      view.contentMode = .scaleAspectFit
+      view.translatesAutoresizingMaskIntoConstraints = false
+      contentView.addSubview(view)
+      NSLayoutConstraint.activate([
+        view.widthAnchor.constraint(equalToConstant: 32), view.heightAnchor.constraint(equalToConstant: 32),
+        view.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+        view.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+      ])
+    }
     isAccessibilityElement = true
     accessibilityTraits = .button
   }
 
   required init?(coder: NSCoder) { fatalError() }
 
+  override func prepareForReuse() {
+    super.prepareForReuse()
+    loading?.cancel()
+    loading = nil
+  }
+
   func show(_ emote: NamedEmote) {
-    image.load(emote.url, maxPixels: 112, fallback: nil)
     accessibilityLabel = emote.name
+    guard emote.url != url || loading == nil && stillView.image == nil && animatedView.shownPicture == nil else { return }
+    url = emote.url
+    loading?.cancel()
+    stillView.image = nil
+    animatedView.load(nil, maxPixels: Self.pixels, fallback: nil)
+    animatedView.isHidden = true
+    let url = emote.url
+    // Already in memory (seen in chat, or a moment ago): as it is, animation and all.
+    if ImagePipeline.shared.cached(url, maxPixels: Self.pixels) != nil {
+      tile.isHidden = true
+      animatedView.isHidden = false
+      animatedView.load(url, maxPixels: Self.pixels, fallback: nil)
+      return
+    }
+    tile.isHidden = false
+    loading = Task { @MainActor [weak self] in
+      var still: UIImage?
+      for attempt in 0..<4 {
+        if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 3_000_000_000) }
+        guard !Task.isCancelled else { return }
+        still = await ImagePipeline.shared.stillImage(url, maxPixels: Self.pixels)
+        if still != nil || Task.isCancelled { break }
+      }
+      guard let self, !Task.isCancelled, self.url == url else { return }
+      if let still {
+        UIView.transition(with: self.stillView, duration: 0.15, options: .transitionCrossDissolve) {
+          self.stillView.image = still
+          self.tile.isHidden = true
+        }
+      }
+      // Animated ones play once the emote has stayed in view a moment (not for every one flicked
+      // past).
+      try? await Task.sleep(nanoseconds: 350_000_000)
+      guard !Task.isCancelled else { return }
+      ImagePipeline.shared.load(url, maxPixels: Self.pixels) { [weak self] image in
+        guard let self, self.url == url, let image else { return }
+        guard (image.images?.count ?? 0) > 1 || self.stillView.image == nil else { return }
+        self.animatedView.load(url, maxPixels: Self.pixels, fallback: nil)
+        self.animatedView.isHidden = false
+        self.stillView.image = nil
+        self.tile.isHidden = true
+      }
+    }
   }
 
   override var isHighlighted: Bool {
