@@ -38,41 +38,92 @@ struct IRCMessage: Equatable {
     return result
   }
 
+  /// Parsed as bytes (IRC's delimiters are all ASCII; only what's kept is decoded): as Characters,
+  /// with Foundation trimming, each message took about 50 µs, on the main thread, in chat that
+  /// can run to hundreds a second.
   static func parse(_ raw: String) -> IRCMessage? {
-    var rest = Substring(raw.trimmingCharacters(in: CharacterSet(charactersIn: "\r\n")))
-    guard !rest.isEmpty else { return nil }
+    let b = Array(raw.utf8)
+    var end = b.count
+    var i = 0
+    while end > i, b[end - 1] == 13 || b[end - 1] == 10 { end -= 1 }
+    while i < end, b[i] == 13 || b[i] == 10 { i += 1 }
+    guard i < end else { return nil }
+    func text(_ from: Int, _ to: Int) -> String { String(decoding: b[from..<to], as: UTF8.self) }
+    func spaceAfter(_ from: Int) -> Int? {
+      var j = from
+      while j < end, b[j] != 32 { j += 1 }
+      return j < end ? j : nil
+    }
+    func skipSpaces(_ from: Int) -> Int {
+      var j = from
+      while j < end, b[j] == 32 { j += 1 }
+      return j
+    }
     var tags: [String: String] = [:]
-    if rest.hasPrefix("@") {
-      guard let space = rest.firstIndex(of: " ") else { return nil }
-      for pair in rest[rest.index(after: rest.startIndex)..<space].split(separator: ";") {
-        if let eq = pair.firstIndex(of: "=") {
-          tags[String(pair[..<eq])] = unescapeTag(pair[pair.index(after: eq)...])
-        } else {
-          tags[String(pair)] = ""
+    if b[i] == 64 {  // '@'
+      guard let space = spaceAfter(i) else { return nil }
+      var pair = i + 1
+      while pair < space {
+        var stop = pair
+        while stop < space, b[stop] != 59 { stop += 1 }  // ';'
+        if stop > pair {
+          var eq = pair
+          while eq < stop, b[eq] != 61 { eq += 1 }  // '='
+          if eq < stop {
+            tags[text(pair, eq)] = unescapeTag(b[(eq + 1)..<stop])
+          } else {
+            tags[text(pair, stop)] = ""
+          }
         }
+        pair = stop + 1
       }
-      rest = rest[rest.index(after: space)...].drop { $0 == " " }
+      i = skipSpaces(space + 1)
     }
     var prefix: String?
-    if rest.hasPrefix(":") {
-      guard let space = rest.firstIndex(of: " ") else { return nil }
-      prefix = String(rest[rest.index(after: rest.startIndex)..<space])
-      rest = rest[rest.index(after: space)...].drop { $0 == " " }
+    if i < end, b[i] == 58 {  // ':'
+      guard let space = spaceAfter(i) else { return nil }
+      prefix = text(i + 1, space)
+      i = skipSpaces(space + 1)
     }
     var params: [String] = []
     var command = ""
-    while !rest.isEmpty {
-      if rest.hasPrefix(":"), !command.isEmpty {
-        params.append(String(rest.dropFirst()))
+    while i < end {
+      if b[i] == 58, !command.isEmpty {
+        params.append(text(i + 1, end))
         break
       }
-      let end = rest.firstIndex(of: " ") ?? rest.endIndex
-      let token = String(rest[..<end])
+      let stop = spaceAfter(i) ?? end
+      let token = text(i, stop)
       if command.isEmpty { command = token } else { params.append(token) }
-      rest = end == rest.endIndex ? "" : rest[rest.index(after: end)...].drop { $0 == " " }
+      i = stop == end ? end : skipSpaces(stop + 1)
     }
     guard !command.isEmpty else { return nil }
     return IRCMessage(tags: tags, prefix: prefix, command: command, params: params)
+  }
+
+  /// A tag value's escapes undone, from its bytes.
+  static func unescapeTag(_ value: ArraySlice<UInt8>) -> String {
+    guard value.contains(92) else { return String(decoding: value, as: UTF8.self) }  // '\'
+    var out: [UInt8] = []
+    out.reserveCapacity(value.count)
+    var escaping = false
+    for c in value {
+      if escaping {
+        switch c {
+        case 58: out.append(59)  // \: → ;
+        case 115: out.append(32)  // \s → space
+        case 114: out.append(13)  // \r
+        case 110: out.append(10)  // \n
+        default: out.append(c)
+        }
+        escaping = false
+      } else if c == 92 {
+        escaping = true
+      } else {
+        out.append(c)
+      }
+    }
+    return String(decoding: out, as: UTF8.self)
   }
 }
 
@@ -313,33 +364,32 @@ struct ChatMessage: Identifiable, Equatable {
     return merged
   }
 
+  /// Third-party emotes by word. Words are cut at spaces in the bytes and looked up as they are
+  /// (built a Character at a time before: most of the time it took to lay out a message).
   private static func splitThirdParty(_ text: String, _ emotes: [String: URL]) -> [ChatFragment] {
     guard !emotes.isEmpty else { return [.text(text)] }
     var result: [ChatFragment] = []
-    var buffer = ""
-    var word = ""
-    func flushWord() {
-      if let url = emotes[word] {
-        if !buffer.isEmpty { result.append(.text(buffer)) }
-        buffer = ""
-        result.append(.emote(name: word, url: url))
-      } else {
-        buffer += word
+    let bytes = text.utf8
+    var bufferStart = bytes.startIndex
+    var wordStart = bytes.startIndex
+    var i = bytes.startIndex
+    while true {
+      let atEnd = i == bytes.endIndex
+      if atEnd || bytes[i] == 32 {
+        if wordStart < i, let url = emotes[String(text[wordStart..<i])] {
+          if bufferStart < wordStart { result.append(.text(String(text[bufferStart..<wordStart]))) }
+          result.append(.emote(name: String(text[wordStart..<i]), url: url))
+          bufferStart = i
+        }
+        if atEnd { break }
+        wordStart = bytes.index(after: i)
       }
-      word = ""
+      i = bytes.index(after: i)
     }
-    for character in text {
-      if character == " " {
-        flushWord()
-        buffer.append(character)
-      } else {
-        word.append(character)
-      }
-    }
-    flushWord()
-    if !buffer.isEmpty { result.append(.text(buffer)) }
+    if bufferStart < bytes.endIndex { result.append(.text(String(text[bufferStart..<bytes.endIndex]))) }
     return result
   }
+
 }
 
 // MARK: - Message box text
