@@ -1924,20 +1924,37 @@ struct EmotePicker: View {
               }
             }
             .coordinateSpace(name: "emoteList")
-            // How far the list has scrolled: where its top is on screen.
+            // (Before iOS 18: how far the list has scrolled, from where its top and the view's are
+            // on screen. Measured against the scroll view itself, it never changed as it scrolled.)
             .background(
               GeometryReader { geometry in
-                Color.clear.preference(
-                  key: EmoteListOffset.self,
-                  value: EmoteListOffset.Value(scrolled: -geometry.frame(in: .named("emotes")).minY, height: geometry.size.height))
+                let frame = geometry.frame(in: .global)
+                Color.clear.preference(key: EmoteListOffset.self, value: EmoteListOffset.Value(top: frame.minY, height: frame.height))
               }
             )
             .padding(.bottom, 8)
           }
-          .coordinateSpace(name: "emotes")
-          .background(GeometryReader { geometry in Color.clear.preference(key: EmoteViewHeight.self, value: geometry.size.height) })
-          .onPreferenceChange(EmoteViewHeight.self) { height in
-            viewHeight = height
+          // iOS 18 and later: the scroll view says how far it has scrolled, and scrolls to a
+          // section's exact place when one is picked.
+          .modifier(
+            EmoteScrollTracking(target: jumpTarget) { offset, view, content in
+              scrolled = offset
+              viewHeight = view
+              listHeight = content - 8
+              follow()
+            })
+          .background(
+            GeometryReader { geometry in
+              let frame = geometry.frame(in: .global)
+              Color.clear.preference(key: EmoteViewFrame.self, value: EmoteListOffset.Value(top: frame.minY, height: frame.height))
+            }
+          )
+          .onPreferenceChange(EmoteViewFrame.self) { view in
+            guard !EmoteScrollTracking.native else { return }
+            viewTop = view.top
+            viewHeight = view.height
+            scrolled = viewTop - listTop
+            follow()
           }
           // The section scrolled to: the last whose title is at or above the top of the view, from
           // where the titles are in the list and how far it has scrolled. (Worked out from where
@@ -1948,8 +1965,10 @@ struct EmotePicker: View {
             follow()
           }
           .onPreferenceChange(EmoteListOffset.self) { list in
-            scrolled = list.scrolled
+            guard !EmoteScrollTracking.native else { return }
+            listTop = list.top
             listHeight = list.height
+            scrolled = viewTop - listTop
             follow()
           }
           // Its title stays at the top while its emotes scroll under it.
@@ -2029,6 +2048,11 @@ struct EmotePicker: View {
   /// can't reach the top).
   @State private var listHeight: CGFloat = 0
   @State private var viewHeight: CGFloat = 0
+  /// (Before iOS 18) where the list's top and the view's are on screen.
+  @State private var listTop: CGFloat = 0
+  @State private var viewTop: CGFloat = 0
+  /// A place in the list to scroll to (iOS 18 and later), and which request it is.
+  @State private var jumpTarget = EmoteScrollTracking.Target()
   /// A section picked in the strip: what's passed on the way isn't taken as scrolled to.
   @State private var jumping = false
   /// The current section's own title has scrolled off the top (its copy stays there instead).
@@ -2037,15 +2061,27 @@ struct EmotePicker: View {
   /// Scrolls to a section, then lines up on its title again once the rows around it have been
   /// laid out: the first scroll goes by SwiftUI's estimate of the rows on the way, which landed
   /// on the wrong section now and then (a second tap on the icon got it right).
+  /// (iOS 18 and later: straight to where its title is in the list, measured. Going by the
+  /// section's identity, it landed thousands of points short of a far one.)
   private func jump(to id: String, _ proxy: ScrollViewProxy) {
     current = id
     jumping = true
     jumpCount += 1
     let mine = jumpCount
-    withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .top) }
+    let native = EmoteScrollTracking.native && sectionTops[id] != nil
+    if native {
+      jumpTarget = jumpTarget.next(sectionTops[id] ?? 0, animated: true)
+    } else {
+      withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .top) }
+    }
     for delay in [0.3, 0.55] {
       DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
         guard mine == jumpCount else { return }
+        if native {
+          // (Lined up again, in case the rows on the way changed its place as they were made.)
+          if let top = sectionTops[id], abs(top - scrolled) > 1 { jumpTarget = jumpTarget.next(top, animated: false) }
+          return
+        }
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) { proxy.scrollTo(id, anchor: .top) }
@@ -2159,20 +2195,76 @@ enum TwitchEmoteStore {
   }
 }
 
-/// How far the emote picker's list has scrolled, and how tall it is (see EmotePicker).
+/// Where the emote picker's list is on screen, and how tall it is (see EmotePicker; before iOS 18).
 private struct EmoteListOffset: PreferenceKey {
   struct Value: Equatable {
-    var scrolled: CGFloat = 0
+    var top: CGFloat = 0
     var height: CGFloat = 0
   }
   static var defaultValue = Value()
   static func reduce(value: inout Value, nextValue: () -> Value) { value = nextValue() }
 }
 
-/// The emote picker's visible height.
-private struct EmoteViewHeight: PreferenceKey {
-  static var defaultValue: CGFloat = 0
-  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+/// Where the emote picker's scroll view is on screen, and how tall (before iOS 18).
+private struct EmoteViewFrame: PreferenceKey {
+  static var defaultValue = EmoteListOffset.Value()
+  static func reduce(value: inout EmoteListOffset.Value, nextValue: () -> EmoteListOffset.Value) { value = nextValue() }
+}
+
+/// iOS 18 and later: the emote picker's scroll view reports how far it has scrolled (with the
+/// view's and the list's heights), and scrolls to an exact place when asked.
+private struct EmoteScrollTracking: ViewModifier {
+  struct Target: Equatable {
+    var offset: CGFloat = 0
+    var animated = false
+    var serial = 0
+
+    func next(_ offset: CGFloat, animated: Bool) -> Target { Target(offset: offset, animated: animated, serial: serial + 1) }
+  }
+
+  static var native: Bool {
+    if #available(iOS 18, tvOS 18, *) { return true }
+    return false
+  }
+
+  let target: Target
+  let report: (_ offset: CGFloat, _ view: CGFloat, _ content: CGFloat) -> Void
+
+  func body(content: Content) -> some View {
+    if #available(iOS 18, tvOS 18, *) {
+      content.modifier(Native(target: target, report: report))
+    } else {
+      content
+    }
+  }
+
+  @available(iOS 18, tvOS 18, *)
+  private struct Native: ViewModifier {
+    let target: Target
+    let report: (_ offset: CGFloat, _ view: CGFloat, _ content: CGFloat) -> Void
+    @State private var position = ScrollPosition()
+    @State private var sizes = CGSize.zero
+
+    func body(content: Content) -> some View {
+      content
+        .scrollPosition($position)
+        .onScrollGeometryChange(for: [CGFloat].self) { geometry in
+          [geometry.contentOffset.y + geometry.contentInsets.top, geometry.containerSize.height, geometry.contentSize.height]
+        } action: { _, value in
+          sizes = CGSize(width: value[1], height: value[2])
+          report(value[0], value[1], value[2])
+        }
+        .onChange(of: target) { _, target in
+          // (Not past the end: the last sections' titles can't come up to the top.)
+          let y = max(0, min(target.offset, sizes.height - sizes.width))
+          if target.animated {
+            withAnimation(.easeInOut(duration: 0.25)) { position.scrollTo(y: y) }
+          } else {
+            position.scrollTo(y: y)
+          }
+        }
+    }
+  }
 }
 
 /// Where each emote section's title is in the picker's scroll view (see EmotePicker).
