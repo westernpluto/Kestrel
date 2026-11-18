@@ -182,7 +182,11 @@ final class ImagePipeline: @unchecked Sendable {
   private func runPrefetches() {
     lock.lock()
     var next: [URL] = []
-    while prefetching < 3, !prefetchQueue.isEmpty {
+    // More at once on Wi-Fi (HTTP/2 carries them over one connection; 7TV's take up to a second
+    // each to start coming, and three at a time took most of a minute for a channel's few
+    // hundred), fewer on cellular or Low Data Mode, where the stream comes first.
+    let limit = NetworkWatch.shared.kind == .wifi && !NetworkWatch.shared.constrained ? 8 : 2
+    while prefetching < limit, !prefetchQueue.isEmpty {
       prefetching += 1
       next.append(prefetchQueue.removeFirst())
     }
@@ -274,8 +278,21 @@ final class ImagePipeline: @unchecked Sendable {
     DispatchQueue.main.async { callbacks.forEach { $0(picture) } }
   }
 
+  /// An emote's or badge's picture never changes for the same address: the copy on disk is used
+  /// however old. (Twitch's and FFZ's say to check again after a day, and then every emote waited
+  /// on a round trip to be told it hadn't changed, the first time it showed each day.)
+  static func isUnchanging(_ url: URL) -> Bool {
+    switch url.host {
+    case "cdn.7tv.app", "cdn.betterttv.net", "cdn.frankerfacez.com": return true
+    case "static-cdn.jtvnw.net": return url.path.hasPrefix("/emoticons/") || url.path.hasPrefix("/badges/")
+    default: return false
+    }
+  }
+
   private func fetch(_ url: URL, maxPixels: CGFloat?, fallback: URL?, attempt: Int, key: String) {
-    let task = session.dataTask(with: url) { [weak self] data, response, error in
+    var request = URLRequest(url: url)
+    if Self.isUnchanging(url) { request.cachePolicy = .returnCacheDataElseLoad }
+    let task = session.dataTask(with: request) { [weak self] data, response, error in
       guard let self else { return }
       let status = (response as? HTTPURLResponse)?.statusCode ?? 0
       if let data, (200..<300).contains(status) {

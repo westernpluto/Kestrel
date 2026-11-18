@@ -74,7 +74,7 @@ struct ChannelSearchResult: Identifiable, Hashable, Sendable {
   var id: String { channel.id }
 }
 
-struct TwitchEmote: Hashable, Sendable {
+struct TwitchEmote: Hashable, Sendable, Codable {
   var id: String
   var token: String
   var setID: String?
@@ -84,7 +84,7 @@ struct TwitchEmote: Hashable, Sendable {
   var url: URL? { ChatMessage.twitchEmoteURL(id) }
 }
 
-struct TwitchEmoteGroup: Sendable {
+struct TwitchEmoteGroup: Sendable, Codable {
   var ownerID: String?
   var ownerName: String?
   var ownerImage: String?

@@ -310,11 +310,31 @@ final class ChatController: ObservableObject {
   }
 
   /// Your Twitch emotes for this channel (needs sign-in).
+  /// Your Twitch emotes here: the ones saved from last time at once, then fetched again behind
+  /// them (up to four pages, one after another, which the picker and your messages used to wait
+  /// for every time a chat opened).
   func loadTwitchEmotes() {
     let channelID = channel.id.isEmpty ? nil : channel.id
-    Task {
-      twitchGroups = await TwitchAPI.shared.availableEmotes(channelID: channelID)
+    // Signed out (or just signed out): none of your Twitch emotes.
+    guard let login = TwitchAuth.shared.session?.login else {
+      if !twitchGroups.isEmpty {
+        twitchGroups = []
+        rebuildEmoteSections()
+      }
+      return
+    }
+    let key = TwitchEmoteStore.key(login: login, channelID: channelID)
+    if let key, twitchGroups.isEmpty, let saved = TwitchEmoteStore.read(key) {
+      twitchGroups = saved
       rebuildEmoteSections()
+    }
+    Task {
+      let fresh = await TwitchAPI.shared.availableEmotes(channelID: channelID)
+      // (Nothing came, a hiccup: what's shown stays.)
+      guard !fresh.isEmpty || twitchGroups.isEmpty else { return }
+      twitchGroups = fresh
+      rebuildEmoteSections()
+      if let key, !fresh.isEmpty { TwitchEmoteStore.write(fresh, key) }
     }
   }
 
@@ -1930,5 +1950,40 @@ struct PressableStyle: ButtonStyle {
         .opacity(configuration.isPressed ? (reduceMotion ? 0.6 : 0.85) : 1)
         .animation(reduceMotion ? .easeOut(duration: 0.1) : .spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
     }
+  }
+}
+
+/// Your Twitch emotes in each channel, saved for next time (the caches folder: iOS may clear it).
+enum TwitchEmoteStore {
+  static func key(login: String?, channelID: String?) -> String? {
+    guard let login, !login.isEmpty else { return nil }
+    let safe = { (s: String) in s.filter { $0.isLetter || $0.isNumber || $0 == "_" } }
+    return "twitch-\(safe(login))-\(safe(channelID ?? "none"))"
+  }
+
+  private static func file(_ key: String) -> URL? {
+    guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+    let folder = caches.appendingPathComponent("EmoteSets", isDirectory: true)
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    return folder.appendingPathComponent(key + ".json")
+  }
+
+  private struct Stored: Codable {
+    var at: Date
+    var groups: [TwitchEmoteGroup]
+  }
+
+  /// Saved within the last week.
+  static func read(_ key: String) -> [TwitchEmoteGroup]? {
+    guard let file = file(key), let data = try? Data(contentsOf: file), let stored = try? JSONDecoder().decode(Stored.self, from: data),
+      Date().timeIntervalSince(stored.at) < 7 * 24 * 3600, !stored.groups.isEmpty
+    else { return nil }
+    return stored.groups
+  }
+
+  static func write(_ groups: [TwitchEmoteGroup], _ key: String) {
+    guard let file = file(key) else { return }
+    let stored = Stored(at: Date(), groups: groups)
+    DispatchQueue.global(qos: .utility).async { try? JSONEncoder().encode(stored).write(to: file, options: .atomic) }
   }
 }
