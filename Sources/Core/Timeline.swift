@@ -322,3 +322,20 @@ struct AdTimeline {
     ranges.sort { $0.lowerBound < $1.lowerBound }
   }
 }
+
+/// Whether the frame on screen is covered as an ad: inside an ad's marked times, or at or past a
+/// jump in the live stream the playlist hasn't marked yet (an ad starting shows that way two
+/// seconds before it's marked), for four seconds after the jump was noticed, unless the jump is
+/// the return from an ad.
+enum AdCovering {
+  static let suspicion: TimeInterval = 4
+
+  static func covered(playing: Date?, now: Date, ads: AdTimeline, seam: (date: Date, noticed: Date)?) -> Bool {
+    let suspect = seam.map { seam in
+      now.timeIntervalSince(seam.noticed) < suspicion && (playing.map { $0 >= seam.date.addingTimeInterval(-0.3) } ?? true)
+        // (Not the jump back from an ad to the stream: just before it was the ad.)
+        && !ads.covers(seam.date.addingTimeInterval(-1), margin: 0)
+    } ?? false
+    return suspect || (playing.map { ads.covers($0) } ?? ads.isActive)
+  }
+}

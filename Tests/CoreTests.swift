@@ -303,6 +303,95 @@ func testAdsSeenInCopies() {
   AdsSeenInCopies.reset()
 }
 
+/// A real stitched ad (Twitch's pre-roll, captured) against the stream around it: the player's
+/// timeline sees a jump where an ad begins and ends, and none between two of the stream's own
+/// segments, fed the way the player feeds it (each segment's first frame begins it).
+func testAdSeamsOnRealSegments() {
+  let dir = URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent()
+  func frames(_ name: String) -> [DemuxedFrame] {
+    guard let data = try? Data(contentsOf: dir.appendingPathComponent(name)) else { return [] }
+    var demuxer = TSDemuxer()
+    return demuxer.feed(data) + demuxer.flush()
+  }
+  let ad = frames("twitch_ad_tail.ts"), live = frames("twitch_live_after_ad.ts"), next = frames("twitch_live_next.ts")
+  check(!ad.isEmpty && !live.isEmpty && !next.isEmpty, "ad fixtures unpacked")
+  var timeline = StreamTimeline()
+  func play(_ segment: [DemuxedFrame]) {
+    guard let first = segment.first else { return }
+    switch first {
+    case .video(let v): timeline.beginSegment(firstPTS: v.pts, isVideo: true, discontinuity: false)
+    case .audio(let a): timeline.beginSegment(firstPTS: a.pts, isVideo: false, discontinuity: false)
+    }
+    for frame in segment {
+      switch frame {
+      case .video(let v): _ = timeline.map(v.pts, isVideo: true)
+      case .audio(let a): _ = timeline.map(a.pts, isVideo: false)
+      }
+    }
+  }
+  play(live)
+  play(next)
+  check(timeline.unmarkedSeams == 0, "the stream's own segments follow on (\(timeline.unmarkedSeams) jumps)")
+  play(ad)
+  check(timeline.unmarkedSeams == 1, "an ad starting is a jump (\(timeline.unmarkedSeams))")
+  play(live)
+  check(timeline.unmarkedSeams == 2, "back from the ad is a jump too (\(timeline.unmarkedSeams))")
+}
+
+/// The ad cover's decision over a break, on a made-up clock: an ad starting is covered from its
+/// first frame before the playlist marks it, the return to the stream isn't held up, a second ad
+/// right after the first is caught the same way, and a jump that turns out not to be an ad lifts.
+func testAdCoveringScenarios() {
+  let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+  func playlist(_ ads: [(start: Double, length: Double)], liveUntil: Double, adAtEdge: Bool) -> HLSMediaPlaylist {
+    // Two-second segments from t0, ad ones titled as Twitch titles them.
+    var lines = ["#EXTM3U", "#EXT-X-MEDIA-SEQUENCE:1"]
+    var t = 0.0
+    while t < liveUntil {
+      let isAd = ads.contains { t >= $0.start && t < $0.start + $0.length }
+      lines.append("#EXT-X-PROGRAM-DATE-TIME:\(HLSDate.format(t0.addingTimeInterval(t)))")
+      lines.append("#EXTINF:2.000,\(isAd ? "Amazon|1" : "live")")
+      lines.append("https://x.test/\(Int(t)).ts")
+      t += 2
+    }
+    if adAtEdge, let last = ads.last {
+      lines.append("#EXT-X-PROGRAM-DATE-TIME:\(HLSDate.format(t0.addingTimeInterval(t)))")
+      lines.append("#EXTINF:2.000,Amazon|1")
+      lines.append("https://x.test/edge\(Int(last.start)).ts")
+    }
+    return HLSMediaPlaylist.parse(lines.joined(separator: "\n"), base: nil)
+  }
+  func at(_ s: Double) -> Date { t0.addingTimeInterval(s) }
+  var ads = AdTimeline()
+  // 1. The stream until 20 s; the player (1.3 s behind) notices a jump at 20 s while unpacking,
+  // 1 s before showing it; the playlist doesn't mark it yet.
+  ads.update(with: playlist([], liveUntil: 20, adAtEdge: false), now: at(19))
+  let first = (date: at(20), noticed: at(19))
+  check(!AdCovering.covered(playing: at(19.5), now: at(19.5), ads: ads, seam: first), "stream before the ad shows")
+  check(AdCovering.covered(playing: at(20), now: at(20), ads: ads, seam: first), "ad's first frame covered before it's marked")
+  check(AdCovering.covered(playing: at(21.5), now: at(21.5), ads: ads, seam: first), "ad still covered, still unmarked")
+  // The playlist marks the ad (20-50 s) while it runs: covered by its marks past the suspicion.
+  ads.update(with: playlist([(20, 30)], liveUntil: 24, adAtEdge: true), now: at(23))
+  check(AdCovering.covered(playing: at(30), now: at(30), ads: ads, seam: first), "marked ad covered")
+  // 2. Back to the stream at 50 s: a jump too, noticed at 49 s; the break closed in the playlist.
+  ads.update(with: playlist([(20, 30)], liveUntil: 54, adAtEdge: false), now: at(53))
+  let back = (date: at(50), noticed: at(49))
+  check(AdCovering.covered(playing: at(49.5), now: at(49.5), ads: ads, seam: back), "ad's last moment covered")
+  check(!AdCovering.covered(playing: at(50.6), now: at(50.6), ads: ads, seam: back), "stream shows straight after the ad")
+  // 3. A second ad at 52 s, a moment after the stream came back: noticed at 51 s, not yet marked.
+  let second = (date: at(52), noticed: at(51))
+  check(!AdCovering.covered(playing: at(51.2), now: at(51.2), ads: ads, seam: second), "stream between the ads shows")
+  check(AdCovering.covered(playing: at(52), now: at(52), ads: ads, seam: second), "second ad covered from its first frame")
+  check(AdCovering.covered(playing: at(54.5), now: at(54.5), ads: ads, seam: second), "second ad covered until marked")
+  // 4. A jump that isn't an ad (the playlist never marks one): covered at most four seconds.
+  let stray = (date: at(80), noticed: at(79))
+  ads.update(with: playlist([(20, 30)], liveUntil: 90, adAtEdge: false), now: at(89))
+  check(AdCovering.covered(playing: at(80.5), now: at(80.5), ads: ads, seam: stray), "an unmarked jump covered meanwhile")
+  check(!AdCovering.covered(playing: at(83.2), now: at(83.2), ads: ads, seam: stray), "lifted once nothing marks it an ad")
+  // Paused before an ad that was noticed ahead: the paused frame isn't covered.
+  check(!AdCovering.covered(playing: at(18), now: at(25), ads: ads, seam: first), "paused frame before a jump stays uncovered")
+}
+
 func testMasterParsing() {
   // Damaged input (found by fuzzing): reads past the data give zeros, odd lengths are kept sane.
   check(MP4.u32(Data([1, 2]), 0) == 0 && MP4.type(Data([1]), 0) == "" && MP4.byte(Data(), 5) == 0, "MP4 reads past the end")
@@ -2763,6 +2852,8 @@ testCatchUpHoversWithoutFlipping()
 testAdTimeline()
 testAnnexBSplitter()
 testAdsSeenInCopies()
+testAdSeamsOnRealSegments()
+testAdCoveringScenarios()
 testTimelineAndRender()
 testSession(lowLatency: true)
 testSession(lowLatency: false)

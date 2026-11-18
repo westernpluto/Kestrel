@@ -259,15 +259,9 @@ final class KestrelController {
     // Only when no ad-free copy was found does the player get ad video: hidden and muted then.
     // The frame on screen, by the stream's clock (paused too: the frame it's paused on).
     let playing = engine.shownDate ?? latency.map { Date().addingTimeInterval(-$0) }
-    // An unmarked jump in the stream (most likely an ad starting) is covered from where it is
-    // until the playlist has had time to say (four seconds): an ad stays covered by its marks
-    // then; anything else shows again.
-    // (Not the jump back from an ad to the stream: just before it was the ad.)
-    let suspect = engine.unannouncedSeam.map { seam in
-      Date().timeIntervalSince(seam.noticed) < 4 && (playing.map { $0 >= seam.date.addingTimeInterval(-0.3) } ?? true)
-        && !adTimeline.covers(seam.date.addingTimeInterval(-1), margin: 0)
-    } ?? false
-    let inAd = suspect || (playing.map { adTimeline.covers($0) } ?? adTimeline.isActive)
+    // An ad's marked times, or an unmarked jump in the stream (most likely an ad starting) until
+    // the playlist has had time to say (see AdCovering).
+    let inAd = AdCovering.covered(playing: playing, now: Date(), ads: adTimeline, seam: engine.unannouncedSeam)
     if !inAd { engine.noteCleanPicture() }
     if inAd != model.coveringAd {
       // The cover goes up over the stream's last frame.
