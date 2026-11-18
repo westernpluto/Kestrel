@@ -729,6 +729,8 @@ struct PickerEmoteImage: View {
   @State private var still: UIImage?
   /// The whole animation is in the cache (decoded once this emote had been on screen a moment).
   @State private var animated = false
+  /// The picture couldn't be had (no tile left standing for it).
+  @State private var failed = false
 
   var body: some View {
     if animated || isAnimatedInCache {
@@ -737,12 +739,20 @@ struct PickerEmoteImage: View {
       Group {
         if let still {
           Image(uiImage: still).resizable().interpolation(.high).scaledToFit()
-        } else {
+            .transition(.opacity)
+        } else if failed {
           Color.clear
+        } else {
+          // Still coming: a faint tile, so a slow connection doesn't look like an empty menu.
+          RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.white.opacity(0.06))
         }
       }
       .task(id: url) {
-        if still == nil { still = await ImagePipeline.shared.stillImage(url, maxPixels: 112) }
+        if still == nil {
+          let image = await ImagePipeline.shared.stillImage(url, maxPixels: 112)
+          withAnimation(.easeOut(duration: 0.15)) { still = image }
+          if image == nil, !Task.isCancelled { failed = true }
+        }
         // Animated emotes play in the menu too: the animation's decoded once the emote has stayed
         // in view a moment (not for every one flicked past; the grid lets go of those out of view,
         // and the cache drops the oldest within its budget). Before, only ones already playing in
