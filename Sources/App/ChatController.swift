@@ -1864,14 +1864,14 @@ struct EmotePicker: View {
             // still made only as they come into view.)
             VStack(alignment: .leading, spacing: 4) {
               ForEach(sections) { section in
-                // Each section one piece (its title and emotes), so the scroll view can say which
-                // one is at the top.
                 VStack(alignment: .leading, spacing: 4) {
+                  // Where its title is in the list itself (not on screen): that only changes when
+                  // the list does, not as it scrolls.
                   header(section.title)
                     .background(
                       GeometryReader { geometry in
                         Color.clear.preference(
-                          key: EmoteSectionTops.self, value: [section.id: geometry.frame(in: .named("emotes")).minY])
+                          key: EmoteSectionTops.self, value: [section.id: geometry.frame(in: .named("emoteList")).minY])
                       }
                     )
                   LazyVGrid(columns: columns, spacing: 4) {
@@ -1895,28 +1895,34 @@ struct EmotePicker: View {
                 .id(section.id)
               }
             }
-            .emoteSectionsLayout()
+            .coordinateSpace(name: "emoteList")
+            // How far the list has scrolled: where its top is on screen.
+            .background(
+              GeometryReader { geometry in
+                Color.clear.preference(
+                  key: EmoteListOffset.self,
+                  value: EmoteListOffset.Value(scrolled: -geometry.frame(in: .named("emotes")).minY, height: geometry.size.height))
+              }
+            )
             .padding(.bottom, 8)
           }
           .coordinateSpace(name: "emotes")
-          // The section scrolled to. iOS 17 and later say which section is at the top themselves:
-          // worked out from where the titles said they were, it went back to a wrong section as
-          // you scrolled (the positions of titles far off screen were out of date).
-          .emoteSectionAtTop($atTop)
-          .onChange(of: atTop) { id in
-            guard !jumping, let id, id != current else { return }
-            current = id
+          .background(GeometryReader { geometry in Color.clear.preference(key: EmoteViewHeight.self, value: geometry.size.height) })
+          .onPreferenceChange(EmoteViewHeight.self) { height in
+            viewHeight = height
           }
+          // The section scrolled to: the last whose title is at or above the top of the view, from
+          // where the titles are in the list and how far it has scrolled. (Worked out from where
+          // each title said it was on screen, it went back to a wrong section as you scrolled:
+          // titles off screen didn't always say they'd moved.)
           .onPreferenceChange(EmoteSectionTops.self) { tops in
-            guard !jumping else { return }
-            if #unavailable(iOS 17, tvOS 17) {
-              // iOS 16: the last section whose title has reached the top.
-              let reached = sections.last { (tops[$0.id] ?? .infinity) <= 1 }?.id ?? sections.first?.id
-              if reached != current { current = reached }
-            }
-            let shown = current ?? sections.first?.id
-            let past = shown.map { (tops[$0] ?? 0) < -1 } ?? false
-            if past != pastTop { pastTop = past }
+            sectionTops = tops
+            follow()
+          }
+          .onPreferenceChange(EmoteListOffset.self) { list in
+            scrolled = list.scrolled
+            listHeight = list.height
+            follow()
           }
           // Its title stays at the top while its emotes scroll under it.
           .overlay(alignment: .top) {
@@ -1979,13 +1985,22 @@ struct EmotePicker: View {
 
   /// What the screen tour notes down (empty while there are no sections yet).
   private var tourState: String {
-    sections.isEmpty ? "" : "current \(current ?? "-") · at top \(atTop ?? "-") · jumping \(jumping) · title copy \(pastTop)"
+    sections.isEmpty
+      ? ""
+      : "current \(current ?? "-") · scrolled \(Int(scrolled)) · tops "
+        + sections.map { "\($0.id)@\(sectionTops[$0.id].map { String(Int($0)) } ?? "?")" }.joined(separator: " ")
+        + " · jumping \(jumping) · title copy \(pastTop)"
   }
 
   /// The section scrolled to (nil: the first).
   @State private var current: String?
-  /// The section at the top of the scroll view, as iOS 17 and later report it.
-  @State private var atTop: String?
+  /// Where each section's title is in the list, and how far the list has scrolled.
+  @State private var sectionTops: [String: CGFloat] = [:]
+  @State private var scrolled: CGFloat = 0
+  /// The list's whole height and the view's (at the end of the list, the last sections' titles
+  /// can't reach the top).
+  @State private var listHeight: CGFloat = 0
+  @State private var viewHeight: CGFloat = 0
   /// A section picked in the strip: what's passed on the way isn't taken as scrolled to.
   @State private var jumping = false
   /// The current section's own title has scrolled off the top (its copy stays there instead).
@@ -2012,6 +2027,22 @@ struct EmotePicker: View {
       guard mine == jumpCount else { return }
       jumping = false
     }
+  }
+
+  /// The section scrolled to, and whether its title has gone past the top.
+  private func follow() {
+    var reached = sections.last { (sectionTops[$0.id] ?? .infinity) <= scrolled + 1 }?.id ?? sections.first?.id
+    // Scrolled to the end: a section picked there stays picked while its title is in view (it
+    // can't come up to the top, and scrolling went back to the one above it).
+    if listHeight > 0, viewHeight > 0, scrolled >= listHeight + 8 - viewHeight - 2, let current,
+      let top = sectionTops[current], top >= scrolled - 1, top < scrolled + viewHeight
+    {
+      reached = current
+    }
+    if !jumping, reached != current { current = reached }
+    let shown = current ?? sections.first?.id
+    let past = shown.map { (sectionTops[$0] ?? 0) < scrolled - 1 } ?? false
+    if past != pastTop { pastTop = past }
   }
 
   /// Which jump is the latest (an earlier one's corrections stand down).
@@ -2100,16 +2131,20 @@ enum TwitchEmoteStore {
   }
 }
 
-extension View {
-  /// The emote picker's sections as the pieces its scroll view tracks (iOS 17 and later).
-  @ViewBuilder fileprivate func emoteSectionsLayout() -> some View {
-    if #available(iOS 17, tvOS 17, *) { scrollTargetLayout() } else { self }
+/// How far the emote picker's list has scrolled, and how tall it is (see EmotePicker).
+private struct EmoteListOffset: PreferenceKey {
+  struct Value: Equatable {
+    var scrolled: CGFloat = 0
+    var height: CGFloat = 0
   }
+  static var defaultValue = Value()
+  static func reduce(value: inout Value, nextValue: () -> Value) { value = nextValue() }
+}
 
-  /// Which emote section is at the top of the picker (iOS 17 and later; earlier, left nil).
-  @ViewBuilder fileprivate func emoteSectionAtTop(_ id: Binding<String?>) -> some View {
-    if #available(iOS 17, tvOS 17, *) { scrollPosition(id: id, anchor: .top) } else { self }
-  }
+/// The emote picker's visible height.
+private struct EmoteViewHeight: PreferenceKey {
+  static var defaultValue: CGFloat = 0
+  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 /// Where each emote section's title is in the picker's scroll view (see EmotePicker).
