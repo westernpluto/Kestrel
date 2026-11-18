@@ -1957,12 +1957,31 @@ struct EmotePicker: View {
   /// The current section's own title has scrolled off the top (its copy stays there instead).
   @State private var pastTop = false
 
+  /// Scrolls to a section, then lines up on its title again once the rows around it have been
+  /// laid out: the first scroll goes by SwiftUI's estimate of the rows on the way, which landed
+  /// on the wrong section now and then (a second tap on the icon got it right).
   private func jump(to id: String, _ proxy: ScrollViewProxy) {
     current = id
     jumping = true
-    withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(id, anchor: .top) }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { jumping = false }
+    jumpCount += 1
+    let mine = jumpCount
+    withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .top) }
+    for delay in [0.3, 0.55] {
+      DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+        guard mine == jumpCount else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { proxy.scrollTo(id, anchor: .top) }
+      }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+      guard mine == jumpCount else { return }
+      jumping = false
+    }
   }
+
+  /// Which jump is the latest (an earlier one's corrections stand down).
+  @State private var jumpCount = 0
 
   private func header(_ title: String) -> some View {
     Text(title)
