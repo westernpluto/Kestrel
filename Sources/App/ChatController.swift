@@ -160,7 +160,13 @@ final class ChatController: ObservableObject {
     Task {
       let http = URLSessionHTTPClient(timeout: 25)
       async let history = replay ? [] : ThirdPartyEmotes.recentMessages(login: channel.login, http: http)
-      async let badgeMap = TwitchAPI.shared.badges(channelID: channel.id)
+      // Badges as soon as they're in (they waited for the recent messages, a slow service at times).
+      Task { [weak self] in
+        let loaded = await TwitchAPI.shared.badges(channelID: channel.id)
+        guard let self, self.running, !loaded.isEmpty else { return }
+        self.badges = loaded
+        self.onUpdate(true)
+      }
       // (Each list shown as it comes, not only once all six are in.)
       async let emoteSets = ThirdPartyEmotes.load(channelID: channel.id, http: http) { [weak self] partial in
         Task { @MainActor in self?.applyEarlyEmotes(partial) }
@@ -168,8 +174,7 @@ final class ChatController: ObservableObject {
       // Emotes (usually from memory now) are waited for only briefly: the recent messages show as
       // soon as they're in, and any emotes that come later are put into them then (it used to
       // wait for the slowest of six emote services before showing anything).
-      let (recent, loadedBadges) = await (history, badgeMap)
-      badges = loadedBadges
+      let recent = await history
       let old = recent.compactMap(ChatMessage.init(irc:)).filter { $0.kind != .notice }
       messages = Array((old + messages).suffix(maxMessages))
       for message in old.reversed() { noteChatter(message.displayName) }
