@@ -344,7 +344,7 @@ final class KeyboardObserver: ObservableObject {
     // back without saying so (see `recoverUnannouncedKeyboard`).
     tokens.append(
       center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-        if FirstResponder.current is UITextView { self?.checkSoon() }
+        if self?.boxFocused == true || FirstResponder.current is UITextView { self?.checkSoon() }
       })
   }
 
@@ -379,11 +379,12 @@ final class KeyboardObserver: ObservableObject {
   /// way (the message box stayed under the keyboard now and then, on iPhone Duo's inner display,
   /// until the stream was opened again; which part failed wasn't known).
   func checkSoon() {
+    boxFocused = true
     DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
       guard let self else { return }
       let before = self.overlap
       if before == 0 { self.measureAgain() }
-      if self.overlap == 0, self.lastEnd == nil, FirstResponder.current is UITextView {
+      if self.overlap == 0, self.lastEnd == nil, self.boxFocused || FirstResponder.current is UITextView {
         self.recoverUnannouncedKeyboard()
         return
       }
@@ -402,6 +403,9 @@ final class KeyboardObserver: ObservableObject {
 
   /// Kept up by `recoverUnannouncedKeyboard` (no notification will take it down again).
   private var assumed = false
+  /// Chat's message box has the keyboard, by its own word (asking UIKit which view has it came back
+  /// with nothing now and then, and the keyboard covered chat until the box was tapped again).
+  private(set) var boxFocused = false
 
   /// The keyboard's up for the message box, but iOS never said so (back from Picture in Picture or
   /// the background, it can bring the keyboard back without a word, and the message box stayed
@@ -410,7 +414,7 @@ final class KeyboardObserver: ObservableObject {
   private func recoverUnannouncedKeyboard() {
     FirstResponder.current?.reloadInputViews()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-      guard let self, FirstResponder.current is UITextView else { return }
+      guard let self, self.boxFocused || FirstResponder.current is UITextView else { return }
       if self.lastEnd != nil {
         ActivityLog.shared.add("Keyboard: up without a word from iOS; asked again, measured \(Int(self.overlap))")
         return
@@ -442,6 +446,7 @@ final class KeyboardObserver: ObservableObject {
   /// The message box let go of the keyboard: a height that was only assumed goes (no
   /// notification would take it away).
   func messageBoxLeft() {
+    boxFocused = false
     guard assumed else { return }
     assumed = false
     withAnimation(Self.animation(duration: 0.25)) { overlap = 0 }
@@ -703,17 +708,33 @@ struct PlayerLayout: Equatable {
       let textLeft = max(columnLeft, 0)
       let textWidth = min(columnRight, safe.width) - textLeft
       let windowBottom = safe.height + insets.bottom
+      // Typing: the keyboard runs the window's whole width, over this column too. The picture goes
+      // into the room above it (smaller if it has to be); left where it was, the keyboard covered
+      // most of it while chat's message box moved up.
+      let keyboardTop: CGFloat? = keyboard > 0 ? windowBottom - keyboard : nil
       if theater {
-        // Theater: the stream and chat, nothing else; the video halfway down its column.
+        // Theater: the stream and chat, nothing else; the video halfway down its column (or the
+        // room above the keyboard).
         let fullHeight = (column * 9 / 16).rounded()
-        let height = min(fullHeight, windowHeight)
-        video = CGRect(x: columnLeft, y: windowTop + ((windowHeight - height) / 2).rounded(), width: column, height: height)
+        let room = (keyboardTop ?? windowBottom) - windowTop - (keyboardTop == nil ? 0 : 8)
+        let height = max(0, min(fullHeight, windowHeight, room))
+        let width = height < fullHeight ? (height * 16 / 9).rounded() : column
+        video = CGRect(
+          x: columnLeft + ((column - width) / 2).rounded(), y: windowTop + ((min(windowHeight, room) - height) / 2).rounded(),
+          width: width, height: height)
         info = nil
+      } else if let keyboardTop, windowTop + videoHeight > keyboardTop - 8 {
+        // The video at the top, shrunk to end above the keyboard; no info or details meanwhile.
+        let height = max(0, keyboardTop - 8 - windowTop)
+        let width = min(column, (height * 16 / 9).rounded())
+        video = CGRect(x: columnLeft + ((column - width) / 2).rounded(), y: windowTop, width: width, height: height)
+        info = nil
+        details = nil
       } else {
         video = CGRect(x: columnLeft, y: windowTop, width: column, height: videoHeight)
         info = CGRect(x: textLeft, y: video.maxY, width: textWidth, height: Self.infoHeight)
         let detailsTop = video.maxY + Self.infoHeight
-        let room = windowBottom - detailsTop
+        let room = (keyboardTop ?? windowBottom) - detailsTop
         details = room >= 80 ? CGRect(x: textLeft, y: detailsTop, width: textWidth, height: room) : nil
       }
       controls = EdgeInsets(
