@@ -1017,12 +1017,23 @@ final class KestrelEngine: NSObject {
       // seconds of ad showed).
       // (Only after a real switch of copies is a jump expected: going by any change, the ad cover
       // coming down too, a second ad right after the first wasn't caught and showed.)
+      // Only when the segment itself says it's no part of the broadcast (Twitch's metadata in it,
+      // read ahead of its first frame: an ad was never ingested from the streamer): the stream's
+      // own jumps (the streamer reconnecting, an encoder restart) were covered as ads for a few
+      // seconds too.
       if timeline.unmarkedSeams > seamsBefore, load.planned.live, Date().timeIntervalSince(copySwitchedAt) > 3,
         let time = timeline.lastUnmarkedSeam, let anchor
       {
-        let date = anchor.date.addingTimeInterval(Double(time - anchor.time) / Double(Self.clock))
-        unannouncedSeam = (date, Date())
-        ActivityLog.shared.add("Kestrel player: the stream jumped in time without a word from Twitch (an ad starting?); covered until it's known")
+        let info = load.demuxer?.twitchInfo
+        if let info, !info.ingested {
+          let date = anchor.date.addingTimeInterval(Double(time - anchor.time) / Double(Self.clock))
+          unannouncedSeam = (date, Date())
+          ActivityLog.shared.add(
+            "Kestrel player: the stream jumped to video that never came from the streamer (\(info.streamOffset.map { "\(Int($0))s in" } ?? "an ad")): an ad starting, covered until Twitch marks it")
+        } else {
+          ActivityLog.shared.add(
+            "Kestrel player: the stream jumped in time, \(info == nil ? "with nothing in it saying it's an ad" : "still the streamer's broadcast") (not covered)")
+        }
       }
     }
     switch frame {

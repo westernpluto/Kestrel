@@ -329,6 +329,47 @@ func testAdSeamsOnRealSegments() {
       }
     }
   }
+  func info(_ name: String) -> TwitchSegmentInfo? {
+    guard let data = try? Data(contentsOf: dir.appendingPathComponent(name)) else { return nil }
+    // Fed in small pieces, as it comes in: the metadata is read before the first frame is out.
+    var demuxer = TSDemuxer()
+    var offset = 0
+    var framesBeforeInfo = 0
+    while offset < data.count, demuxer.twitchInfo == nil {
+      framesBeforeInfo += demuxer.feed(data.subdata(in: offset..<min(data.count, offset + 500))).count
+      offset += 500
+    }
+    check(framesBeforeInfo == 0, "\(name): metadata ahead of the first frame (\(framesBeforeInfo) frames before it)")
+    return demuxer.twitchInfo
+  }
+  let adInfo = info("twitch_ad_tail.ts"), liveInfo = info("twitch_live_after_ad.ts"), nextInfo = info("twitch_live_next.ts")
+  check(adInfo?.ingested == false && adInfo?.streamOffset == 30, "the ad says it never came from the streamer (\(String(describing: adInfo)))")
+  check(liveInfo?.ingested == true && liveInfo?.streamOffset == 21130, "the stream says it did (\(String(describing: liveInfo)))")
+  check(nextInfo?.ingested == true && nextInfo?.streamOffset == 21132, "and its next segment two seconds on (\(String(describing: nextInfo)))")
+  check(TwitchSegmentInfo(metadata: Data("no metadata here".utf8)) == nil, "no metadata, no info")
+  check(TwitchSegmentInfo(metadata: Data(#"xx{"cmd":"ld_lat_data","broadc_r":0}"#.utf8)) == nil, "without ingest_r, no verdict")
+  // Damaged copies of the real segments, fed in random pieces: unpacked without a crash.
+  var seed: UInt64 = 0x9E37_79B9_7F4A_7C15
+  func random(_ bound: Int) -> Int {
+    seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+    return Int((seed >> 33) % UInt64(max(1, bound)))
+  }
+  for name in ["twitch_ad_tail.ts", "twitch_live_after_ad.ts"] {
+    guard let clean = try? Data(contentsOf: dir.appendingPathComponent(name)) else { continue }
+    for _ in 0..<150 {
+      var bytes = [UInt8](clean.prefix(2000 + random(clean.count)))
+      for _ in 0..<(1 + random(40)) where !bytes.isEmpty { bytes[random(bytes.count)] = UInt8(random(256)) }
+      var demuxer = TSDemuxer()
+      var offset = 0
+      while offset < bytes.count {
+        let end = min(bytes.count, offset + 1 + random(900))
+        _ = demuxer.feed(Data(bytes[offset..<end]))
+        offset = end
+      }
+      _ = demuxer.flush()
+      _ = demuxer.twitchInfo
+    }
+  }
   play(live)
   play(next)
   check(timeline.unmarkedSeams == 0, "the stream's own segments follow on (\(timeline.unmarkedSeams) jumps)")

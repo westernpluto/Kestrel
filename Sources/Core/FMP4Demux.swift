@@ -473,6 +473,12 @@ enum SegmentDemuxer {
     return nil
   }
 
+  /// MPEG-TS from Twitch: what the segment says about itself (see TwitchSegmentInfo).
+  var twitchInfo: TwitchSegmentInfo? {
+    if case .ts(let demuxer) = self { return demuxer.twitchInfo }
+    return nil
+  }
+
   var transportStart: (video: Int64?, audio: Int64?)? {
     if case .ts(let demuxer) = self { return demuxer.start() }
     return nil

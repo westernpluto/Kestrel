@@ -51,12 +51,44 @@ enum DemuxedFrame: Equatable, Sendable {
   }
 }
 
+/// What a Twitch segment says about itself in its timed metadata ("segmentmetadata": a little
+/// JSON in an ID3 text frame). A segment of the broadcast was ingested from the streamer's
+/// encoder (`ingest_r`, when Twitch received it) and sits `stream_offset` seconds into the
+/// broadcast; a stitched-in ad was never ingested (`ingest_r` and `broadc_r` 0) and starts again
+/// near 0. Captured: an ad said `"ingest_r":0 ... "stream_offset":30`, the stream around it
+/// `"ingest_r":1795027923252 ... "stream_offset":21130`.
+struct TwitchSegmentInfo: Equatable, Sendable {
+  /// Came from the streamer's encoder (not an ad Twitch stitched in).
+  var ingested: Bool
+  /// Seconds into the broadcast.
+  var streamOffset: Double?
+
+  /// From a metadata PES packet (or any bytes holding its JSON); nil without Twitch's.
+  init?(metadata: Data) {
+    let bytes = [UInt8](metadata)
+    let marker = Array(#"{"cmd""#.utf8)
+    guard bytes.count >= marker.count,
+      let start = (0...(bytes.count - marker.count)).first(where: { bytes[$0..<($0 + marker.count)].elementsEqual(marker) }),
+      let end = bytes[start...].firstIndex(of: UInt8(ascii: "}")),
+      let object = try? JSONSerialization.jsonObject(with: Data(bytes[start...end])) as? [String: Any]
+    else { return nil }
+    func number(_ key: String) -> Double? { (object[key] as? NSNumber)?.doubleValue }
+    guard let ingest = number("ingest_r") else { return nil }
+    ingested = ingest > 0 || (number("broadc_r") ?? 0) > 0
+    streamOffset = number("stream_offset")
+  }
+}
+
 /// Unpacks an MPEG transport stream fed in pieces of any size.
 struct TSDemuxer {
   static let packetSize = 188
   static let clock: Double = 90_000
 
-  private enum Kind { case h264, hevc, aac }
+  private enum Kind { case h264, hevc, aac, id3 }
+
+  /// What Twitch wrote into the segment about itself (its timed ID3 metadata), once read: comes
+  /// right after the PAT/PMT, ahead of the first frame.
+  private(set) var twitchInfo: TwitchSegmentInfo?
 
   private var leftover = Data()
   private var pmtPID: Int?
@@ -91,6 +123,7 @@ struct TSDemuxer {
       case .aac:
         guard let end = Self.audioEnd(data, pts: pts) else { continue }
         audio = max(audio ?? end, end)
+      case .id3: continue
       }
     }
     return (video, audio)
@@ -105,6 +138,7 @@ struct TSDemuxer {
       switch kind {
       case .h264, .hevc: video = min(video ?? pts, pts)
       case .aac: audio = min(audio ?? pts, pts)
+      case .id3: continue
       }
     }
     return (video, audio)
@@ -158,7 +192,12 @@ struct TSDemuxer {
   mutating func flush() -> [DemuxedFrame] {
     var out: [DemuxedFrame] = []
     for (pid, data) in pending.sorted(by: { $0.key < $1.key }) where !data.isEmpty {
-      if let kind = streams[pid] { pes(data, kind: kind, pid: pid, into: &out) }
+      guard let kind = streams[pid] else { continue }
+      if kind == .id3 {
+        readMetadata(data)
+      } else {
+        pes(data, kind: kind, pid: pid, into: &out)
+      }
     }
     for (_, frame) in heldFrames.sorted(by: { $0.key < $1.key }) { out.append(.video(frame)) }
     heldFrames = [:]
@@ -189,6 +228,23 @@ struct TSDemuxer {
       return
     }
     guard let kind = streams[pid] else { return }
+    if kind == .id3 {
+      // Only the first metadata in a segment is wanted (it says where the segment came from).
+      guard twitchInfo == nil else { return }
+      if unitStart {
+        pending[pid] = Data(payload)
+      } else if pending[pid] != nil {
+        pending[pid]!.append(contentsOf: payload)
+      }
+      if let data = pending[pid], data.count >= 6 {
+        let declared = Int(data[data.startIndex + 4]) << 8 | Int(data[data.startIndex + 5])
+        if declared == 0 || data.count >= 6 + declared {
+          readMetadata(data)
+          pending[pid] = nil
+        }
+      }
+      return
+    }
     if unitStart {
       if let previous = pending[pid], !previous.isEmpty { pes(previous, kind: kind, pid: pid, into: &out) }
       pending[pid] = Data(payload)
@@ -209,6 +265,10 @@ struct TSDemuxer {
         pending[pid] = nil
       }
     }
+  }
+
+  private mutating func readMetadata(_ pes: Data) {
+    if twitchInfo == nil { twitchInfo = TwitchSegmentInfo(metadata: pes) }
   }
 
   /// A PSI section's bytes, past its pointer field.
@@ -251,6 +311,7 @@ struct TSDemuxer {
       case 0x1B: found[pid] = .h264
       case 0x24: found[pid] = .hevc
       case 0x0F: found[pid] = .aac
+      case 0x15: found[pid] = .id3
       default: break
       }
       i += 5 + esInfo
@@ -307,6 +368,8 @@ struct TSDemuxer {
       heldFrames[pid] = VideoFrame(codec: codec, pts: pts, dts: dts, data: data, isKeyframe: key)
       firstVideo = min(firstVideo ?? pts, pts)
       newestVideo = max(newestVideo ?? pts, pts)
+    case .id3:
+      return
     case .aac:
       var time = pts
       for frame in ADTS.frames(in: body) {
