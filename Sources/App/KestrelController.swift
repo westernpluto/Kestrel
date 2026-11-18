@@ -262,8 +262,10 @@ final class KestrelController {
     // An unmarked jump in the stream (most likely an ad starting) is covered from where it is
     // until the playlist has had time to say (four seconds): an ad stays covered by its marks
     // then; anything else shows again.
+    // (Not the jump back from an ad to the stream: just before it was the ad.)
     let suspect = engine.unannouncedSeam.map { seam in
       Date().timeIntervalSince(seam.noticed) < 4 && (playing.map { $0 >= seam.date.addingTimeInterval(-0.3) } ?? true)
+        && !adTimeline.covers(seam.date.addingTimeInterval(-1), margin: 0)
     } ?? false
     let inAd = suspect || (playing.map { adTimeline.covers($0) } ?? adTimeline.isActive)
     if !inAd { engine.noteCleanPicture() }
@@ -273,8 +275,9 @@ final class KestrelController {
       withAnimation(.easeInOut(duration: 0.35)) { model.coveringAd = inAd }
       // Into or out of a covered ad: the switch between the stream and the ad (and back) isn't
       // the connection's, so a hiccup there doesn't lower the quality or raise the margin (the
-      // stream came back with a stall and a restart after ads).
-      engine.sourceChanged()
+      // stream came back with a stall and a restart after ads). (Not a switch of copies: the
+      // video still comes from where it did.)
+      engine.sourceChanged(copySwitch: false)
     }
     engine.setMuted(inAd || userMuted)
     // Auto says what it's playing now ("Auto · 720p60"), in the menu and on its button.

@@ -578,12 +578,17 @@ final class KestrelEngine: NSObject {
     }
   }
 
-  func sourceChanged() {
+  /// - Parameter copySwitch: the video itself now comes from elsewhere (an ad-free copy, or back
+  ///   from it); false for the ad cover going up or coming down, where it doesn't.
+  func sourceChanged(copySwitch: Bool = true) {
     sourceChangedAt = Date()
+    if copySwitch { copySwitchedAt = Date() }
     catchUp.quiet(for: Self.sourceChangeGrace)
   }
 
   private var sourceChangedAt = Date.distantPast
+  /// When the video last switched to or from an ad-free copy (its times jump: not an ad starting).
+  private var copySwitchedAt = Date.distantPast
   static let sourceChangeGrace: TimeInterval = 10
 
   /// The least to keep in hand on this connection (cellular: more, see NetworkWatch).
@@ -1010,7 +1015,9 @@ final class KestrelEngine: NSObject {
       // after a switch to or from an ad-free copy: most likely an ad stitched in. Said at once,
       // so it's covered from its first frame (the playlist marks it two seconds later, and those
       // seconds of ad showed).
-      if timeline.unmarkedSeams > seamsBefore, load.planned.live, Date().timeIntervalSince(sourceChangedAt) > 3,
+      // (Only after a real switch of copies is a jump expected: going by any change, the ad cover
+      // coming down too, a second ad right after the first wasn't caught and showed.)
+      if timeline.unmarkedSeams > seamsBefore, load.planned.live, Date().timeIntervalSince(copySwitchedAt) > 3,
         let time = timeline.lastUnmarkedSeam, let anchor
       {
         let date = anchor.date.addingTimeInterval(Double(time - anchor.time) / Double(Self.clock))
