@@ -19,6 +19,9 @@ final class KestrelController {
   private var audioIndex: Int?
   private var variants: [HLSVariant] = []
   private var adTimeline = AdTimeline()
+  /// Twitch sends this account no ads here (subscribed, Turbo): a jump in the stream is the
+  /// broadcast's own (the streamer reconnecting), not an ad, and isn't covered.
+  private var accountAdFree = false
   /// Straight from Twitch, with an ad-free server's copy only during an ad (Automatic).
   private var adFreeForAdsOnly = false
   private var stopped = false
@@ -207,6 +210,7 @@ final class KestrelController {
 
   private func apply(_ update: LowLatencyUpdate) {
     adTimeline = update.ads
+    accountAdFree = update.accountAdFree
     // The video now comes from somewhere else (an ad-free copy standing in for an ad, or back from
     // it): a gap at the switch isn't the connection's, so it doesn't lower the quality or raise
     // the margin.
@@ -261,7 +265,7 @@ final class KestrelController {
     let playing = engine.shownDate ?? latency.map { Date().addingTimeInterval(-$0) }
     // An ad's marked times, or an unmarked jump in the stream (most likely an ad starting) until
     // the playlist has had time to say (see AdCovering).
-    let inAd = AdCovering.covered(playing: playing, now: Date(), ads: adTimeline, seam: engine.unannouncedSeam)
+    let inAd = AdCovering.covered(playing: playing, now: Date(), ads: adTimeline, seam: accountAdFree ? nil : engine.unannouncedSeam)
     if !inAd { engine.noteCleanPicture() }
     if inAd != model.coveringAd {
       // The cover goes up over the stream's last frame.

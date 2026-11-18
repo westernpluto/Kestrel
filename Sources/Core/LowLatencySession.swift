@@ -48,6 +48,9 @@ struct LowLatencyUpdate: Sendable {
   var state: AdState
   /// Stitched ads the player was given (only when no ad-free copy was found).
   var ads: AdTimeline
+  /// Signed in and Twitch sends this account no ads on this channel (subscribed, Turbo): a jump
+  /// in the stream can't be an ad starting.
+  var accountAdFree = false
 }
 
 actor LowLatencySession: PlaylistSource {
@@ -132,6 +135,8 @@ actor LowLatencySession: PlaylistSource {
       checkAccountFirst: config.checkAccountFirst, playerType: config.mainPlayerType, http: http, tokens: tokens, log: log)
     masterFetchedAt = Date()
     route = fetched.route
+    // (Said straight away: the player needs to know whether ads can come at all.)
+    if case .twitchAdFree = route { publish(state) }
     let text = fetched.text
     let base = fetched.url
     broadcastStarted = LowLatencyPlaylist.broadcastStart(text)
@@ -466,7 +471,9 @@ actor LowLatencySession: PlaylistSource {
 
   private func publish(_ newState: AdState) {
     state = newState
-    onUpdate(LowLatencyUpdate(state: newState, ads: ads))
+    var accountAdFree = false
+    if case .twitchAdFree = route { accountAdFree = true }
+    onUpdate(LowLatencyUpdate(state: newState, ads: ads, accountAdFree: accountAdFree))
   }
 
   private func playerTypes() -> [String] {
