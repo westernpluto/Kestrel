@@ -166,6 +166,10 @@ final class ImagePipeline: @unchecked Sendable {
     runPrefetches()
   }
 
+  /// How many pictures are fetched ahead at once (the iPhone app sets it by the connection; the
+  /// Apple TV app, which shares this file, keeps three).
+  nonisolated(unsafe) static var prefetchLimit: @Sendable () -> Int = { 3 }
+
   private var prefetchQueue: [URL] = []
   private var stillSizes: [URL: CGFloat] = [:]
   private var prefetching = 0
@@ -185,7 +189,7 @@ final class ImagePipeline: @unchecked Sendable {
     // More at once on Wi-Fi (HTTP/2 carries them over one connection; 7TV's take up to a second
     // each to start coming, and three at a time took most of a minute for a channel's few
     // hundred), fewer on cellular or Low Data Mode, where the stream comes first.
-    let limit = NetworkWatch.shared.kind == .wifi && !NetworkWatch.shared.constrained ? 8 : 2
+    let limit = Self.prefetchLimit()
     while prefetching < limit, !prefetchQueue.isEmpty {
       prefetching += 1
       next.append(prefetchQueue.removeFirst())

@@ -15,6 +15,7 @@ struct KestrelApp: App {
     signal(SIGPIPE, SIG_IGN)
     try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
     _ = try? StreamProxy.shared.ensureRunning()
+    ImagePipeline.prefetchLimit = { NetworkWatch.shared.kind == .wifi && !NetworkWatch.shared.constrained ? 8 : 2 }
   }
 
   var body: some Scene {
