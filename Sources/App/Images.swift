@@ -15,7 +15,8 @@ final class ImagePipeline: @unchecked Sendable {
 
   private let cache = NSCache<NSString, UIImage>()
   private let lock = NSLock()
-  private var waiting: [String: [(UIImage?) -> Void]] = [:]
+  private var waiting: [String: [(id: Int, completion: (UIImage?) -> Void)]] = [:]
+  private var nextWaiter = 0
   /// Cached as a first frame, with the whole animation still decoding.
   private var upgrading: Set<String> = []
   private var failuresLogged: Set<String> = []
@@ -237,34 +238,99 @@ final class ImagePipeline: @unchecked Sendable {
   ///   - fallback: tried when `url` fails (e.g. the original size of a resized Twitch image).
   ///   - completion: called on the main queue, or straight away when it's in memory. For an
   ///     animated picture it can be called twice: with the first frame, then the animation.
-  func load(_ url: URL, maxPixels: CGFloat? = nil, fallback: URL? = nil, completion: @escaping (UIImage?) -> Void) {
+  /// - Returns: a ticket to `cancel` the wait with (nil when it was in memory and handed out).
+  @discardableResult
+  func load(_ url: URL, maxPixels: CGFloat? = nil, fallback: URL? = nil, completion: @escaping (UIImage?) -> Void) -> Int? {
     let key = Self.key(url, maxPixels)
     lock.lock()
     let image = cache.object(forKey: key as NSString)
     if let image, !upgrading.contains(key) {
       lock.unlock()
       completion(image)
-      return
+      return nil
     }
+    nextWaiter += 1
+    let id = nextWaiter
     if waiting[key] != nil {
-      waiting[key]?.append(completion)
+      waiting[key]?.append((id, completion))
       lock.unlock()
       if let image { completion(image) }
-      return
+      return id
     }
-    waiting[key] = [completion]
+    waiting[key] = [(id, completion)]
     lock.unlock()
-    // (Off the main thread: whether the WebP's on disk is a look at the disk cache.)
+    // (Off the main thread: whether it's on disk is a look at the disk cache.)
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
       guard let self else { return }
-      self.fetch(self.smaller(url), maxPixels: maxPixels, fallback: fallback, attempt: 1, key: key)
-    }
-    // A 7TV emote that's slow to come: its still picture (a couple of kilobytes) up meanwhile.
-    if let still = Self.sevenTVStill(url) {
-      DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { [weak self] in
-        self?.stillMeanwhile(still, maxPixels: maxPixels, key: key)
+      let target = self.smaller(url)
+      // A 7TV emote not on disk: its still picture (a couple of kilobytes) asked for at once, and
+      // up in a moment; the animation follows. 7TV sends some 14 KB a second all told (BTTV, about
+      // 2 MB): a 50 KB animation took seconds, a 300 KB one most of a minute.
+      if let still = Self.sevenTVStill(url), self.session.configuration.urlCache?.cachedResponse(for: URLRequest(url: target)) == nil {
+        self.stillMeanwhile(still, maxPixels: maxPixels, key: key)
       }
+      self.fetch(target, maxPixels: maxPixels, fallback: fallback, attempt: 1, key: key)
     }
+    return id
+  }
+
+  /// No longer wanted by whoever asked (its chat message scrolled away, its cell was reused):
+  /// once nobody wants a picture, its download is called off, or never started. In xQc's chat,
+  /// downloads for messages long gone kept going, hundreds at once on 7TV's slow connection, and
+  /// the emotes on screen crawled in behind them, or timed out and showed as words.
+  func cancel(_ ticket: Int, _ url: URL, maxPixels: CGFloat? = nil) {
+    let key = Self.key(url, maxPixels)
+    lock.lock()
+    waiting[key]?.removeAll { $0.id == ticket }
+    var task: URLSessionTask?
+    if waiting[key]?.isEmpty == true {
+      waiting[key] = nil
+      upgrading.remove(key)
+      queued.removeAll { $0.key == key }
+      task = running.removeValue(forKey: key)
+    }
+    lock.unlock()
+    task?.cancel()
+  }
+
+  // MARK: Downloads of small pictures, newest first, a few at a time
+  //
+  // Emotes and badges: what's just been asked for (the newest chat messages) first, and only so
+  // many at once, so each comes quickly instead of all of them sharing the connection and
+  // crawling. Waiting here, nothing times out.
+
+  private var queued: [(key: String, task: URLSessionTask)] = []
+  private var running: [String: URLSessionTask] = [:]
+  /// (Few: 7TV's whole connection is slow, so more at once only makes each slower; its stills
+  /// don't wait here.)
+  private static let downloadsAtOnce = 5
+
+  private func enqueue(_ task: URLSessionTask, key: String) {
+    lock.lock()
+    queued.append((key, task))
+    lock.unlock()
+    startDownloads()
+  }
+
+  private func startDownloads() {
+    lock.lock()
+    var next: [URLSessionTask] = []
+    while running.count < Self.downloadsAtOnce, let item = queued.popLast() {
+      // (Its key may already be downloading, from an earlier format or retry: started anyway, the
+      // last one wins the slot.)
+      running[item.key] = item.task
+      next.append(item.task)
+    }
+    lock.unlock()
+    next.forEach { $0.resume() }
+  }
+
+  /// A download ended (came, failed or called off): the next one starts.
+  private func downloadEnded(_ key: String, _ task: URLSessionTask) {
+    lock.lock()
+    if running[key] === task { running[key] = nil }
+    lock.unlock()
+    startDownloads()
   }
 
   // MARK: 7TV's emotes, smaller
@@ -360,9 +426,9 @@ final class ImagePipeline: @unchecked Sendable {
     return failedKeys.contains(Self.key(url, maxPixels))
   }
 
-  private func deliver(_ key: String, _ image: UIImage?, final: Bool) {
+  private func deliver(_ key: String, _ image: UIImage?, final: Bool, permanent: Bool = true) {
     lock.lock()
-    if final, image == nil, cache.object(forKey: key as NSString) == nil { failedKeys.insert(key) }
+    if final, permanent, image == nil, cache.object(forKey: key as NSString) == nil { failedKeys.insert(key) }
     if image != nil { failedKeys.remove(key) }
     var picture = image
     if let image {
@@ -373,11 +439,11 @@ final class ImagePipeline: @unchecked Sendable {
     }
     let callbacks: [(UIImage?) -> Void]
     if final {
-      callbacks = waiting.removeValue(forKey: key) ?? []
+      callbacks = (waiting.removeValue(forKey: key) ?? []).map(\.completion)
       upgrading.remove(key)
     } else {
-      callbacks = waiting[key] ?? []
-      upgrading.insert(key)
+      callbacks = (waiting[key] ?? []).map(\.completion)
+      if waiting[key] != nil { upgrading.insert(key) }
     }
     lock.unlock()
     DispatchQueue.main.async { callbacks.forEach { $0(picture) } }
@@ -395,10 +461,19 @@ final class ImagePipeline: @unchecked Sendable {
   }
 
   private func fetch(_ url: URL, maxPixels: CGFloat?, fallback: URL?, attempt: Int, key: String) {
+    // (Nobody wants it any more: not fetched, nor tried again.)
+    lock.lock()
+    let wanted = waiting[key] != nil
+    lock.unlock()
+    guard wanted else { return }
+    let small = (maxPixels ?? .infinity) <= 160
     var request = URLRequest(url: url)
     if Self.isUnchanging(url) { request.cachePolicy = .returnCacheDataElseLoad }
+    var made: URLSessionTask?
     let task = session.dataTask(with: request) { [weak self] data, response, error in
       guard let self else { return }
+      if small, let made { self.downloadEnded(key, made) }
+      if (error as? URLError)?.code == .cancelled { return }
       let status = (response as? HTTPURLResponse)?.statusCode ?? 0
       if let data, (200..<300).contains(status) {
         self.decode(data, maxPixels: maxPixels, key: key, url: url, mimeType: response?.mimeType)
@@ -423,11 +498,18 @@ final class ImagePipeline: @unchecked Sendable {
         return
       }
       self.logFailure(url, status == 0 ? (error?.localizedDescription ?? "no response") : "HTTP \(status)")
-      self.deliver(key, nil, final: true)
+      // (The network giving up isn't the picture missing: blank for now, asked for again the next
+      // time it shows, not its name for the rest of the session.)
+      self.deliver(key, nil, final: true, permanent: status != 0 && status != 429 && status < 500)
     }
+    made = task
     // Small pictures (emotes, badges) first: they're what chat is waiting on.
-    if let maxPixels, maxPixels <= 160 { task.priority = URLSessionTask.highPriority }
-    task.resume()
+    if small {
+      task.priority = URLSessionTask.highPriority
+      enqueue(task, key: key)
+    } else {
+      task.resume()
+    }
   }
 
   private func decode(_ data: Data, maxPixels: CGFloat?, key: String, url: URL, mimeType: String?) {
@@ -647,8 +729,22 @@ final class LoadingImageView: UIImageView {
     didSet { framesLayer?.contentsGravity = Self.gravity(contentMode) }
   }
 
+  /// What this view is waiting for (called off when it wants something else, or goes).
+  private var ticket: (id: Int, url: URL, maxPixels: CGFloat?)?
+
+  private func callOff() {
+    guard let ticket else { return }
+    self.ticket = nil
+    ImagePipeline.shared.cancel(ticket.id, ticket.url, maxPixels: ticket.maxPixels)
+  }
+
+  deinit {
+    if let ticket { ImagePipeline.shared.cancel(ticket.id, ticket.url, maxPixels: ticket.maxPixels) }
+  }
+
   func load(_ url: URL?, maxPixels: CGFloat?, fallback: URL?) {
     guard url != current else { return }
+    callOff()
     current = url
     showingStill = false
     guard let url else {
@@ -659,10 +755,11 @@ final class LoadingImageView: UIImageView {
       show(cached)
       // Only its first frame so far: the animation follows.
       guard ImagePipeline.shared.isUpgrading(url, maxPixels: maxPixels) else { return }
-      ImagePipeline.shared.load(url, maxPixels: maxPixels, fallback: fallback) { [weak self] image in
+      let id = ImagePipeline.shared.load(url, maxPixels: maxPixels, fallback: fallback) { [weak self] image in
         guard let self, self.current == url, let image, image !== self.shownPicture else { return }
         self.show(image)
       }
+      if let id { ticket = (id, url, maxPixels) }
       return
     }
     // A first frame decoded ahead: up at once while the whole picture comes.
@@ -681,7 +778,7 @@ final class LoadingImageView: UIImageView {
   /// Asks for the picture; if nothing came (the network gave up), asks again a little later while
   /// it's still the one wanted here, rather than staying blank.
   private func request(_ url: URL, maxPixels: CGFloat?, fallback: URL?, attempt: Int) {
-    ImagePipeline.shared.load(url, maxPixels: maxPixels, fallback: fallback) { [weak self] image in
+    let id = ImagePipeline.shared.load(url, maxPixels: maxPixels, fallback: fallback) { [weak self] image in
       guard let self, self.current == url else { return }
       if image == nil, self.shownPicture == nil || self.showingStill, attempt < 4 {
         DispatchQueue.main.asyncAfter(deadline: .now() + 5 * Double(attempt)) { [weak self] in
@@ -699,6 +796,7 @@ final class LoadingImageView: UIImageView {
         self.show(image)
       }
     }
+    if let id { ticket = (id, url, maxPixels) }
   }
 
   /// What's on screen (the first frame of an animation until the animation arrives).

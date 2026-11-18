@@ -189,13 +189,15 @@ final class ChatController: ObservableObject {
       keepImagesWarm()
       // (The channel's 7TV set is known now, on a first visit: its live changes from here.)
       if let set = SevenTVSets.set(for: channel.id) { sevenTV?.watch(set: set) }
-      // The channel's own emotes' pictures fetched ahead (a few dozen), so the picker and chat
-      // show them at once rather than filling in one by one.
-      // (Only downloaded, not decoded: see `prefetch`. They stay on disk, so this is mostly once
-      // per channel: 7TV's pictures take up to a second or more each to start arriving, and the
-      // emote picker filled in slowly. More on Wi-Fi, a few dozen on cellular.)
-      let ahead = NetworkWatch.shared.kind == .cellular || NetworkWatch.shared.constrained ? 60 : 300
-      for url in emotes.channel.flatMap(\.emotes).prefix(ahead).map(\.url) where ImagePipeline.shared.cached(url, maxPixels: 112) == nil {
+      // The channel's own emotes' still pictures fetched ahead, so the picker shows them at once.
+      // (They stay on disk, so this is mostly once per channel. A little after the chat opens, and
+      // not too many: 7TV's connection is slow all told, and the emotes chat is showing come
+      // first.)
+      let ahead = NetworkWatch.shared.kind == .cellular || NetworkWatch.shared.constrained ? 40 : 150
+      let urls = emotes.channel.flatMap(\.emotes).prefix(ahead).map(\.url)
+      try? await Task.sleep(nanoseconds: 12_000_000_000)
+      guard running else { return }
+      for url in urls where ImagePipeline.shared.cached(url, maxPixels: 112) == nil {
         ImagePipeline.shared.prefetch(url, stillPixels: 112)
       }
     }
@@ -874,7 +876,7 @@ final class ChatMessageView: UIView {
   private let storage = NSTextStorage()
   private let manager = NSLayoutManager()
   private let container = NSTextContainer(size: .zero)
-  private var imageViews: [LoadingImageView] = []
+  fileprivate var imageViews: [LoadingImageView] = []
   private var slots: [RenderedMessage.Slot] = []
 
   override init(frame: CGRect) {
@@ -902,7 +904,8 @@ final class ChatMessageView: UIView {
     }
     for (index, view) in imageViews.enumerated() {
       view.isHidden = index >= slots.count
-      if index < slots.count { view.load(slots[index].url, maxPixels: slots[index].maxPixels, fallback: nil) }
+      // (A spare one lets go of what it was loading: nobody will see it.)
+      view.load(index < slots.count ? slots[index].url : nil, maxPixels: index < slots.count ? slots[index].maxPixels : nil, fallback: nil)
     }
     setNeedsLayout()
     setNeedsDisplay()
@@ -987,6 +990,15 @@ final class ChatCell: UITableViewCell {
   override func layoutSubviews() {
     super.layoutSubviews()
     messageView.frame = contentView.bounds.inset(by: Self.insets)
+  }
+}
+
+extension ChatMessageView {
+  /// Off screen: the pictures it was still waiting for are let go (it's shown again, and asks
+  /// again, if it scrolls back).
+  func letGoOfPictures() {
+    // (All of them, animations still coming included: what's in memory is back at once.)
+    for view in imageViews { view.load(nil, maxPixels: nil, fallback: nil) }
   }
 }
 
@@ -1342,6 +1354,12 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   }
 
   func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { displayed.count }
+
+  /// A message scrolled out of view (in fast chat, seconds after it came): the emotes it was
+  /// still waiting for aren't downloaded for nobody.
+  func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+    (cell as? ChatCell)?.messageView.letGoOfPictures()
+  }
 
   func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
     let message = displayed[indexPath.row]
