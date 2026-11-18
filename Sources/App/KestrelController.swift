@@ -257,7 +257,8 @@ final class KestrelController {
     // (Ad times are on the stream's own clock: uncorrected.)
     let latency = engine.rawLatency
     // Only when no ad-free copy was found does the player get ad video: hidden and muted then.
-    let playing = latency.map { Date().addingTimeInterval(-$0) }
+    // The frame on screen, by the stream's clock (paused too: the frame it's paused on).
+    let playing = engine.shownDate ?? latency.map { Date().addingTimeInterval(-$0) }
     let inAd = playing.map { adTimeline.covers($0) } ?? adTimeline.isActive
     if !inAd { engine.noteCleanPicture() }
     if inAd != model.coveringAd {
@@ -270,10 +271,12 @@ final class KestrelController {
       // stream came back with a stall and a restart after ads).
       engine.sourceChanged()
     }
-    if inAd, let at = playing, let end = adTimeline.plannedEnd(for: at), let start = adTimeline.plannedStart(for: at) {
-      // (On the playing clock: the countdown runs with what's shown.)
-      let shown = start.addingTimeInterval(latency ?? 0)...end.addingTimeInterval(latency ?? 0)
-      if model.adBreak.map({ abs($0.upperBound.timeIntervalSince(shown.upperBound)) > 0.5 }) ?? true { model.adBreak = shown }
+    if inAd, let at = playing, let end = adTimeline.breakEnd(for: at), let start = adTimeline.breakStart(for: at), end > start {
+      // On the stream's clock, from the frame on screen: the countdown runs with what's shown
+      // (held while paused, which it wasn't: it ran on by the wall clock).
+      let now = Date()
+      let shown = now.addingTimeInterval(start.timeIntervalSince(at))...now.addingTimeInterval(end.timeIntervalSince(at))
+      if model.adBreak.map({ abs($0.upperBound.timeIntervalSince(shown.upperBound)) > 0.3 }) ?? true { model.adBreak = shown }
     }
     engine.setMuted(inAd || userMuted)
     // Auto says what it's playing now ("Auto · 720p60"), in the menu and on its button.

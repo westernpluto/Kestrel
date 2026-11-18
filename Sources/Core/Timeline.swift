@@ -273,6 +273,20 @@ struct AdTimeline {
     return end
   }
 
+  /// When the break holding the frame stamped `date` ends: where its ads really ended once the
+  /// break is over at the live edge (often not where Twitch planned), else the planned end.
+  func breakEnd(for date: Date) -> Date? {
+    if openStart == nil, let range = ranges.first(where: { date >= $0.lowerBound.addingTimeInterval(-0.5) && date <= $0.upperBound.addingTimeInterval(0.5) }) {
+      return range.upperBound
+    }
+    return plannedEnd(for: date) ?? ranges.first { $0.contains(date) }?.upperBound
+  }
+
+  /// When the break holding the frame stamped `date` began (planned, else its first ad).
+  func breakStart(for date: Date) -> Date? {
+    plannedStart(for: date) ?? ranges.first { date >= $0.lowerBound.addingTimeInterval(-0.5) && date <= $0.upperBound }?.lowerBound
+  }
+
   /// When the planned break holding the frame stamped `date` began.
   func plannedStart(for date: Date) -> Date? {
     planned.filter { $0.contains(date) }.map(\.lowerBound).min()

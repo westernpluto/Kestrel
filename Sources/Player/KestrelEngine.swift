@@ -680,6 +680,16 @@ final class KestrelEngine: NSObject {
     streamClockLatency
   }
 
+  /// When the frame on screen was broadcast, by the stream's own clock: also while paused (where
+  /// latency can't be told, and ad covering went by whether Twitch was showing an ad right then,
+  /// covering a paused frame from after an ad that had been blocked).
+  var shownDate: Date? {
+    // (Playing, or paused on a frame: before the clock has started, there's no frame on screen.)
+    guard let anchor, firstVideoTime != nil, clockRunning || paused else { return nil }
+    let date = anchor.date.addingTimeInterval(Double(now - anchor.time) / Double(Self.clock))
+    return date.timeIntervalSince1970.isFinite ? date : nil
+  }
+
   /// By the stream's own clock, unclamped (a channel whose clock runs ahead reads below zero).
   private var streamClockLatency: Double? {
     guard clockRunning, let anchor else { return nil }

@@ -494,6 +494,24 @@ func testAdTimeline() {
   check(end.map { abs($0.timeIntervalSince(start) - 30.235) < 0.01 } ?? false, "planned break end \(String(describing: end))")
   check(planned.plannedStart(for: start.addingTimeInterval(5)) == start, "planned break start")
   check(planned.plannedEnd(for: start.addingTimeInterval(40)) == nil, "no planned break after it")
+  // While the break runs at the live edge, the countdown aims at the planned end; once it's over,
+  // at where its ads really ended.
+  check(planned.breakEnd(for: start.addingTimeInterval(1)).map { abs($0.timeIntervalSince(start) - 30.235) < 0.01 } ?? false, "open break: planned end")
+  let over = """
+    #EXTM3U
+    #EXT-X-MEDIA-SEQUENCE:10
+    #EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad",START-DATE="\(stamp)",DURATION=30.235
+    #EXT-X-PROGRAM-DATE-TIME:\(stamp)
+    #EXTINF:2.000,Amazon|1
+    https://ad.test/1.ts
+    #EXT-X-PROGRAM-DATE-TIME:\(HLSDate.format(start.addingTimeInterval(2)))
+    #EXTINF:2.000,live
+    https://live.test/2.ts
+    """
+  planned.update(with: HLSMediaPlaylist.parse(over, base: nil), now: start.addingTimeInterval(5))
+  check(planned.breakEnd(for: start.addingTimeInterval(1)).map { abs($0.timeIntervalSince(start) - 2) < 0.01 } ?? false,
+    "closed break: real end \(String(describing: planned.breakEnd(for: start.addingTimeInterval(1))))")
+  check(planned.breakStart(for: start.addingTimeInterval(1)) == start, "break start")
 }
 
 func testTimelineAndRender() {
