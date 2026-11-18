@@ -346,12 +346,18 @@ final class ChatController: ObservableObject {
       return
     }
     let key = TwitchEmoteStore.key(login: login, channelID: channelID)
-    if let key, twitchGroups.isEmpty, let saved = TwitchEmoteStore.read(key) {
-      twitchGroups = saved
-      rebuildEmoteSections()
-    }
     Task {
-      let fresh = await TwitchAPI.shared.availableEmotes(channelID: channelID)
+      // Saved from last time, read off the main thread (with many subs, a big file to decode
+      // while the stream opens), unless the fresh list beat it.
+      async let fetched = TwitchAPI.shared.availableEmotes(channelID: channelID)
+      if let key, twitchGroups.isEmpty {
+        let saved = await Task.detached(priority: .userInitiated) { TwitchEmoteStore.read(key) }.value
+        if let saved, twitchGroups.isEmpty {
+          twitchGroups = saved
+          rebuildEmoteSections()
+        }
+      }
+      let fresh = await fetched
       // (Nothing came, a hiccup: what's shown stays.)
       guard !fresh.isEmpty || twitchGroups.isEmpty else { return }
       twitchGroups = fresh
