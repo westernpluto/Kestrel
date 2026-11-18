@@ -1286,7 +1286,7 @@ struct MultiviewTileFace: View {
         .allowsHitTesting(false)
       status
       if player.coveringAd {
-        AdCover(still: player.adStill, span: player.adBreak)
+        AdCover(still: player.adStill)
           .allowsHitTesting(false)
           .transition(.opacity)
       }

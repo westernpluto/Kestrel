@@ -287,7 +287,7 @@ struct PlayerVideoArea: View {
       .transition(.opacity)
     case .playing:
       if model.coveringAd {
-        AdCover(still: model.adStill, span: model.adBreak)
+        AdCover(still: model.adStill)
           .allowsHitTesting(false)
           .transition(.opacity)
       } else if model.isBuffering && !model.isPaused {
@@ -1487,11 +1487,12 @@ struct PlayerSettingsMenu: View, Equatable {
 }
 
 /// Over an ad Kestrel couldn't replace (hidden and muted): the stream's last frame, blurred and
-/// dimmed, with how long the break has left.
+/// dimmed, saying it's an ad break. No countdown: Twitch's planned lengths and the ads it really
+/// sends differ too much for one to be right.
 struct AdCover: View {
   var still: UIImage?
-  /// The break, on the playing clock (nil: its length isn't known).
-  var span: ClosedRange<Date>?
+  @State private var pulsing = false
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     ZStack {
@@ -1504,42 +1505,30 @@ struct AdCover: View {
           .overlay(Color.black.opacity(0.5))
           .clipped()
       }
-      TimelineView(.periodic(from: .now, by: 0.5)) { context in
-        VStack(spacing: 10) {
-          Label("Ad break", systemImage: "shield.lefthalf.filled")
-            .font(.subheadline.weight(.semibold))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(.ultraThinMaterial, in: Capsule())
-          if let span {
-            let left = max(0, span.upperBound.timeIntervalSince(context.date))
-            let total = max(1, span.upperBound.timeIntervalSince(span.lowerBound))
-            Text(left > 0.5 ? "Back in \(Self.clock(left))" : "Back in a moment")
-              .font(.caption.weight(.medium).monospacedDigit())
-              .foregroundColor(.white.opacity(0.85))
-            Capsule()
-              .fill(Color.white.opacity(0.18))
-              .frame(width: 120, height: 3)
-              .overlay(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.85))
-                  .frame(width: 120 * min(1, max(0, 1 - left / total)), height: 3)
-                  .animation(.linear(duration: 0.5), value: left)
-              }
-          } else {
-            Text("Back in a moment")
-              .font(.caption.weight(.medium))
-              .foregroundColor(.white.opacity(0.85))
-          }
+      VStack(spacing: 10) {
+        Label("Ad break", systemImage: "shield.lefthalf.filled")
+          .font(.subheadline.weight(.semibold))
+          .padding(.horizontal, 12)
+          .padding(.vertical, 6)
+          .background(.ultraThinMaterial, in: Capsule())
+        HStack(spacing: 6) {
+          // (A soft pulse, so the cover doesn't look frozen.)
+          Circle()
+            .fill(Color.accentTeal)
+            .frame(width: 6, height: 6)
+            .opacity(pulsing ? 1 : 0.35)
+          Text("Back to the stream shortly")
+            .font(.caption.weight(.medium))
+            .foregroundColor(.white.opacity(0.85))
         }
-        .foregroundColor(.white)
       }
+      .foregroundColor(.white)
+    }
+    .onAppear {
+      guard !reduceMotion else { return }
+      withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { pulsing = true }
     }
     .accessibilityElement(children: .combine)
     .accessibilityLabel("Ad break, the stream will be back shortly")
-  }
-
-  private static func clock(_ seconds: Double) -> String {
-    let whole = Int(seconds.rounded(.up))
-    return String(format: "%d:%02d", whole / 60, whole % 60)
   }
 }

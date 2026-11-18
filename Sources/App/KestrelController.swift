@@ -268,21 +268,13 @@ final class KestrelController {
     let inAd = suspect || (playing.map { adTimeline.covers($0) } ?? adTimeline.isActive)
     if !inAd { engine.noteCleanPicture() }
     if inAd != model.coveringAd {
-      // The cover goes up over the stream's last frame, and says how long the break has left.
+      // The cover goes up over the stream's last frame.
       if inAd { model.adStill = engine.cleanStill }
       withAnimation(.easeInOut(duration: 0.35)) { model.coveringAd = inAd }
-      if !inAd { model.adBreak = nil }
       // Into or out of a covered ad: the switch between the stream and the ad (and back) isn't
       // the connection's, so a hiccup there doesn't lower the quality or raise the margin (the
       // stream came back with a stall and a restart after ads).
       engine.sourceChanged()
-    }
-    if inAd, let at = playing, let end = adTimeline.breakEnd(for: at), let start = adTimeline.breakStart(for: at), end > start {
-      // On the stream's clock, from the frame on screen: the countdown runs with what's shown
-      // (held while paused, which it wasn't: it ran on by the wall clock).
-      let now = Date()
-      let shown = now.addingTimeInterval(start.timeIntervalSince(at))...now.addingTimeInterval(end.timeIntervalSince(at))
-      if model.adBreak.map({ abs($0.upperBound.timeIntervalSince(shown.upperBound)) > 0.3 }) ?? true { model.adBreak = shown }
     }
     engine.setMuted(inAd || userMuted)
     // Auto says what it's playing now ("Auto · 720p60"), in the menu and on its button.

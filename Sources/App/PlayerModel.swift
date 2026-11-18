@@ -52,15 +52,13 @@ final class PlayerModel: ObservableObject {
   @Published var selectedQuality: Int?
   @Published var adState: AdState = .none
   @Published var coveringAd = false
-  /// While an ad is covered: the stream's last frame before it (blurred under the cover), and
-  /// when the break is due to end on the playing clock (for its countdown), if known.
+  /// While an ad is covered: the stream's last frame before it (blurred under the cover).
   @Published var adStill: UIImage?
   /// When the broadcast began, by Twitch's playlist (the uptime's fallback while Twitch's API
   /// doesn't list the stream yet: joined in its first minute or two, no uptime showed at all).
   @Published var broadcastStart: Date?
   /// When the stream began: Twitch's API, else the playlist.
   var startedAt: Date? { stream?.startedAt ?? broadcastStart }
-  @Published var adBreak: ClosedRange<Date>?
   @Published private(set) var latency: Double?
   @Published private(set) var stream: LiveStream?
   @Published private(set) var channel: Channel?
@@ -872,7 +870,6 @@ final class PlayerModel: ObservableObject {
     adRanges = []
     coveringAd = false
     adStill = nil
-    adBreak = nil
     broadcastStart = nil
     if mutedForAd {
       player.isMuted = userMuted
