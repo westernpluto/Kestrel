@@ -2057,18 +2057,49 @@ struct EmoteGrid: UIViewRepresentable {
       return section
     }
 
+    /// Sections that came while the list was moving, shown once it stops.
+    private var waitingSections: [EmoteSection]?
+
     func show(_ new: [EmoteSection]) {
       let newShape = new.map { "\($0.id)#\($0.emotes.count)#\($0.emotes.first?.name ?? "")#\($0.emotes.last?.name ?? "")" }
+      guard let view else { return }
+      if newShape == shape {
+        // (Back to what's shown: nothing waits any more.)
+        waitingSections = nil
+        sections = new
+        return
+      }
+      // Not while it's moving (a finger on it, coasting, or on its way to a section picked): a
+      // list arriving then stopped it dead, or put it back where it had been.
+      if view.isTracking || view.isDragging || view.isDecelerating || jumpingTo != nil {
+        waitingSections = new
+        return
+      }
+      waitingSections = nil
+      let oldIDs = sections.map(\.id)
+      let changed = newShape.indices.filter { $0 >= shape.count || shape[$0] != newShape[$0] }
       sections = new
-      guard newShape != shape, let view else { return }
       shape = newShape
-      // (Where it was is kept: lists coming in one by one don't throw it back to the top.)
-      let offset = view.contentOffset
-      view.reloadData()
-      view.layoutIfNeeded()
-      let maxY = max(-view.adjustedContentInset.top, view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom)
-      view.contentOffset = CGPoint(x: offset.x, y: min(offset.y, maxY))
+      if oldIDs == new.map(\.id) {
+        // The same sections, some with more or other emotes: only those shown again (the others'
+        // pictures stay up, and it stays where it is).
+        UIView.performWithoutAnimation { view.reloadSections(IndexSet(changed)) }
+      } else {
+        // (Where it was is kept: lists coming in one by one don't throw it back to the top.)
+        let offset = view.contentOffset
+        view.reloadData()
+        view.layoutIfNeeded()
+        let maxY = max(-view.adjustedContentInset.top, view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom)
+        view.contentOffset = CGPoint(x: offset.x, y: min(offset.y, maxY))
+      }
       followScroll()
+    }
+
+    /// The list has stopped: sections that came meanwhile go up now.
+    private func settled() {
+      guard let waiting = waitingSections else { return }
+      waitingSections = nil
+      show(waiting)
     }
 
     /// Where a section begins: its title's place before it sticks to the top.
@@ -2128,6 +2159,13 @@ struct EmoteGrid: UIViewRepresentable {
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
       jumpingTo = nil
       followScroll()
+      settled()
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { settled() }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+      if !decelerate { settled() }
     }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
