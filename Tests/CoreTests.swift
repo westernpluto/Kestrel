@@ -294,6 +294,15 @@ func testAnnexBSplitter() {
   check(same, "NAL splitter matches the plain one over \(samples.count) samples")
 }
 
+func testAdsSeenInCopies() {
+  AdsSeenInCopies.reset()
+  let start = Date(timeIntervalSince1970: 1_800_000_000)
+  AdsSeenInCopies.note("proxy:as.luminous.dev", at: start)
+  check(AdsSeenInCopies.recent(now: start.addingTimeInterval(60)) == ["proxy:as.luminous.dev"], "copy with ads remembered")
+  check(AdsSeenInCopies.recent(now: start.addingTimeInterval(31 * 60)).isEmpty, "forgotten after half an hour")
+  AdsSeenInCopies.reset()
+}
+
 func testMasterParsing() {
   // Damaged input (found by fuzzing): reads past the data give zeros, odd lengths are kept sane.
   check(MP4.u32(Data([1, 2]), 0) == 0 && MP4.type(Data([1]), 0) == "" && MP4.byte(Data(), 5) == 0, "MP4 reads past the end")
@@ -2750,6 +2759,7 @@ testCatchUpHoldsOneSpeed()
 testCatchUpHoversWithoutFlipping()
 testAdTimeline()
 testAnnexBSplitter()
+testAdsSeenInCopies()
 testTimelineAndRender()
 testSession(lowLatency: true)
 testSession(lowLatency: false)

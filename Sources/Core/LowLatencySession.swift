@@ -348,6 +348,10 @@ actor LowLatencySession: PlaylistSource {
         case .success:
           log.add("Ad-free copy (\(backup.type)) started showing ads, looking for another")
           contaminated.insert(backup.type)
+          // Tried last for a while, by every stream (pinned, it was tried first in every break:
+          // ads within seconds, another switch, a stall each time).
+          AdsSeenInCopies.note(backup.type)
+          if pinnedType == backup.type { pinnedType = nil }
           active = nil
           startSearchIfNeeded(target: target)
         case .failure:
@@ -476,6 +480,9 @@ actor LowLatencySession: PlaylistSource {
       types.remove(at: i)
       types.insert(pinned, at: 0)
     }
+    // Copies that showed ads mid-break lately go to the back (still tried, after the rest).
+    let lately = AdsSeenInCopies.recent()
+    if !lately.isEmpty { types = types.filter { !lately.contains($0) } + types.filter { lately.contains($0) } }
     if config.allowLowQualityBackup { types.append("autoplay") }
     let usable = types.filter { !contaminated.contains($0) }
     return usable.isEmpty ? types : usable
@@ -722,5 +729,32 @@ enum LowLatencyPlaylist {
     guard let range = line.range(of: "URI=\""), let end = line[range.upperBound...].firstIndex(of: "\"") else { return line }
     let uri = line[range.upperBound..<end]
     return line.replacingCharacters(in: range.upperBound..<end, with: HLS.resolve(uri, base: base))
+  }
+}
+
+/// Ad-free copies that started showing ads part-way through a break lately (half an hour), across
+/// streams: tried after the others meanwhile.
+enum AdsSeenInCopies {
+  private static let lock = NSLock()
+  nonisolated(unsafe) private static var seen: [String: Date] = [:]
+  static let memory: TimeInterval = 30 * 60
+
+  static func note(_ type: String, at date: Date = Date()) {
+    lock.lock()
+    defer { lock.unlock() }
+    seen[type] = date
+  }
+
+  static func recent(now: Date = Date()) -> Set<String> {
+    lock.lock()
+    defer { lock.unlock() }
+    seen = seen.filter { now.timeIntervalSince($0.value) < memory }
+    return Set(seen.keys)
+  }
+
+  static func reset() {
+    lock.lock()
+    defer { lock.unlock() }
+    seen = [:]
   }
 }
