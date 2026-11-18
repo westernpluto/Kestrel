@@ -37,7 +37,7 @@ SCREENS="${SCREENS:-following browse search settings channel player emotes mini 
 for screen in $SCREENS; do
   echo "==> $screen"
   xcrun simctl launch --terminate-running-process "$UDID" "$BUNDLE_ID" -KestrelShow "$screen" >/dev/null
-  case "$screen" in emotes-*) sleep 55 ;; player*|mini|emotes) sleep 22 ;; *) sleep 9 ;; esac
+  case "$screen" in emotes-*) sleep 100 ;; player*|mini|emotes) sleep 22 ;; *) sleep 9 ;; esac
   # iPhone Duo: display 3 is the inner one, 1 the outer one (whichever the device shows now).
   for display in $DISPLAYS; do
     xcrun simctl io "$UDID" screenshot --type=png --display="$display" "shots/$screen-d$display.png" >/dev/null 2>&1 \

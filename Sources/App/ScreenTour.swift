@@ -36,8 +36,8 @@ enum ScreenTour {
       case "emotes": NotificationCenter.default.post(name: openEmotes, object: nil)
       case "emotes-scroll", "emotes-scroll-back", "emotes-pick-scroll":
         NotificationCenter.default.post(name: openEmotes, object: nil)
-        // Until the emotes have come (up to 30 s), then a moment for them to settle.
-        for _ in 0..<60 where pickerState.isEmpty { try? await Task.sleep(nanoseconds: 500_000_000) }
+        // Until the emotes have come (up to 75 s: slow on the simulator job), then a moment for them to settle.
+        for _ in 0..<150 where pickerState.isEmpty { try? await Task.sleep(nanoseconds: 500_000_000) }
         try? await Task.sleep(nanoseconds: 2_000_000_000)
         note(screen, "open · \(pickerState)")
         if screen == "emotes-pick-scroll" {
