@@ -43,5 +43,8 @@ for screen in $SCREENS; do
     xcrun simctl io "$UDID" screenshot --type=png --display="$display" "shots/$screen-d$display.png" >/dev/null 2>&1 \
       || xcrun simctl io "$UDID" screenshot --type=png "shots/$screen.png" >/dev/null 2>&1 || true
   done
+  # The tour's own frames and notes, if it took any.
+  DATA="$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data 2>/dev/null)"
+  [ -d "$DATA/Documents/tour" ] && cp -R "$DATA/Documents/tour/." shots/ || true
 done
 ls -la shots

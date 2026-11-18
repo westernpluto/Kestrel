@@ -37,9 +37,11 @@ enum ScreenTour {
       case "emotes-scroll", "emotes-scroll-back", "emotes-pick-scroll":
         NotificationCenter.default.post(name: openEmotes, object: nil)
         try? await Task.sleep(nanoseconds: 5_000_000_000)
+        note(screen, "open · \(pickerState)")
         if screen == "emotes-pick-scroll" {
           NotificationCenter.default.post(name: pickEmoteSection, object: nil)
           try? await Task.sleep(nanoseconds: 1_500_000_000)
+          note(screen, "picked · \(pickerState)")
         }
         guard let scroll = emoteScrollView() else {
           ActivityLog.shared.add("Screen tour: no emote list to scroll")
@@ -55,14 +57,47 @@ enum ScreenTour {
           case "emotes-scroll-back": [0.2, 0.45, 0.7, 0.85, 0.6, 0.42].map { height * $0 }
           default: [120, 260, 420, 600].map { min(height, start + $0) }
           }
-        for stop in stops {
+        note(screen, "list frame \(scroll.convert(scroll.bounds, to: nil)) content \(scroll.contentSize) at \(scroll.contentOffset.y) · \(pickerState)")
+        frame(screen, 0)
+        for (index, stop) in stops.enumerated() {
           scroll.setContentOffset(CGPoint(x: 0, y: stop.rounded()), animated: true)
           try? await Task.sleep(nanoseconds: 900_000_000)
+          note(screen, "step \(index + 1): to \(Int(stop)), at \(Int(scroll.contentOffset.y)) · \(pickerState)")
+          frame(screen, index + 1)
         }
       default: break
       }
     default: break
     }
+  }
+
+  /// What the emote picker takes as the section scrolled to (screen tour only).
+  static var pickerState = ""
+
+  /// Where the tour's own frames and notes go (the job copies them out of the app's folder).
+  private static var folder: URL? {
+    guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+    let folder = documents.appendingPathComponent("tour", isDirectory: true)
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    return folder
+  }
+
+  private static func note(_ screen: String, _ line: String) {
+    ActivityLog.shared.add("Screen tour: \(line)")
+    guard let file = folder?.appendingPathComponent("\(screen).txt") else { return }
+    let old = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+    try? (old + line + "\n").write(to: file, atomically: true, encoding: .utf8)
+  }
+
+  /// A picture of the screen as it is now.
+  @MainActor
+  private static func frame(_ screen: String, _ index: Int) {
+    let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+    guard let window = windows.first(where: \.isKeyWindow) ?? windows.first, let folder else { return }
+    let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+      window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+    }
+    try? image.pngData()?.write(to: folder.appendingPathComponent("\(screen)-\(index).png"))
   }
 
   /// The emote picker's list: the tallest scroll view up and down that isn't chat.

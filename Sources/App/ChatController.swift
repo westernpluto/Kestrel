@@ -1963,6 +1963,9 @@ struct EmotePicker: View {
         }
       }
       .background(Color(white: 0.09))
+      .onChange(of: "\(current ?? "-")|\(atTop ?? "-")|\(jumping)|\(pastTop)") { state in
+        if ScreenTour.requested != nil { ScreenTour.pickerState = "current|atTop|jumping|pastTop = " + state }
+      }
       // (Screen tour: a pick in the strip, as a tap on its fourth icon.)
       .onReceive(NotificationCenter.default.publisher(for: ScreenTour.pickEmoteSection)) { _ in
         guard !sections.isEmpty else { return }
