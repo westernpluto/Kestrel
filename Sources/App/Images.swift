@@ -680,6 +680,10 @@ final class ImagePipeline: @unchecked Sendable {
       (kCGImagePropertyGIFDictionary, kCGImagePropertyGIFUnclampedDelayTime, kCGImagePropertyGIFDelayTime),
       (kCGImagePropertyPNGDictionary, kCGImagePropertyAPNGUnclampedDelayTime, kCGImagePropertyAPNGDelayTime),
       ("{WebP}" as CFString, "UnclampedDelayTime" as CFString, "DelayTime" as CFString),
+      // (AVIF: 7TV's emotes are fetched as AVIF now; without its timings every frame was held
+      // 0.1 s, and a 30-frames-a-second emote played at a third of its speed.)
+      (kCGImagePropertyAVISDictionary, kCGImagePropertyAVISUnclampedDelayTime, kCGImagePropertyAVISDelayTime),
+      (kCGImagePropertyHEICSDictionary, kCGImagePropertyHEICSUnclampedDelayTime, kCGImagePropertyHEICSDelayTime),
     ]
     for (dictionaryKey, unclamped, clamped) in dictionaries {
       guard let dictionary = properties[dictionaryKey] as? [CFString: Any] else { continue }
