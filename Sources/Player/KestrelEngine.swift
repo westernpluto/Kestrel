@@ -1523,7 +1523,12 @@ final class KestrelEngine: NSObject {
       CMTimebaseSetRate(videoClock, rate: Float64(speed) * (1 + trim))
       return
     }
-    if !stuck, abs(drift) <= 1 {
+    // Just started (a resume above all, the sound waking up a moment after the picture's clock;
+    // more so just after the sound's route changed, headphones out): the picture goes back to the
+    // sound, unseen while it's settling, rather than the sound being cut to meet it (a second or
+    // more off every resume, heard as a gap).
+    let opening = settling || playingSince.map { Date().timeIntervalSince($0) < 3 } ?? false
+    if !stuck, abs(drift) <= (opening ? 3 : 1) {
       // A jump in the sound's times: the picture moves to it (a gap in the sound is worse).
       CMTimebaseSetTime(videoClock, time: CMTime(value: heard, timescale: Self.clock))
       CMTimebaseSetRate(videoClock, rate: Float64(speed))
@@ -1588,7 +1593,14 @@ final class KestrelEngine: NSObject {
       return
     }
     guard now.timeIntervalSince(lastAdJump) >= 3 else { return }
-    let surplus = ahead - catchUp.targetBuffer - (deliversWhole ? Self.segmentLength : 0)
+    // Not just after a switch to or from an ad-free copy: its video comes in a rush and then a
+    // lull, and jumping on the rush left nothing for the lull (a stall of two seconds or more
+    // after nearly every switch in a long break).
+    guard now.timeIntervalSince(sourceChangedAt) > 4 else { return }
+    // During a break, two seconds more kept in hand than the usual margin: another switch can
+    // come at any moment, with a gap of about that much before its video arrives.
+    let cushion = inAdBreak ? 2.0 : 0
+    let surplus = ahead - catchUp.targetBuffer - cushion - (deliversWhole ? Self.segmentLength : 0)
     // Under a second is caught up by playing a little faster instead (a few seconds, not
     // noticed): a jump that small was a visible hitch in the picture and the sound for very little.
     guard surplus > 1.0, surplus < 20 else { return }
