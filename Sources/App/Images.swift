@@ -111,11 +111,18 @@ final class ImagePipeline: @unchecked Sendable {
   func stillImage(_ url: URL, maxPixels: CGFloat) async -> UIImage? {
     if let full = cached(url, maxPixels: maxPixels) { return full.images?.first ?? full }
     if let still = still(url, maxPixels: maxPixels) { return still }
-    var request = URLRequest(url: url)
-    request.cachePolicy = .returnCacheDataElseLoad
-    guard let (data, response) = try? await session.data(for: request),
-      ((response as? HTTPURLResponse)?.statusCode ?? 0) == 200, !Task.isCancelled
-    else { return nil }
+    // (7TV: its still picture, a couple of kilobytes, not the whole animation.)
+    var data: Data?
+    for address in [Self.sevenTVStill(url), url].compactMap({ $0 }) {
+      var request = URLRequest(url: address)
+      request.cachePolicy = .returnCacheDataElseLoad
+      if let (body, response) = try? await session.data(for: request), ((response as? HTTPURLResponse)?.statusCode ?? 0) == 200 {
+        data = body
+        break
+      }
+      if Task.isCancelled { return nil }
+    }
+    guard let data, !Task.isCancelled else { return nil }
     let key = Self.key(url, maxPixels)
     let image = await Task.detached(priority: .userInitiated) { () -> UIImage? in
       guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
@@ -196,7 +203,10 @@ final class ImagePipeline: @unchecked Sendable {
     }
     lock.unlock()
     for url in next {
-      let task = prefetchSession.dataTask(with: url) { [weak self] data, response, _ in
+      // (7TV: only its still picture, a couple of kilobytes; the whole animation comes when it's
+      // shown. Fetching xQc's 300 emotes ahead whole was some 15 MB, slowly, beside chat's own.)
+      let address = Self.sevenTVStill(url) ?? url
+      let task = prefetchSession.dataTask(with: address) { [weak self] data, response, _ in
         guard let self else { return }
         self.lock.lock()
         self.prefetching -= 1
@@ -244,7 +254,98 @@ final class ImagePipeline: @unchecked Sendable {
     }
     waiting[key] = [completion]
     lock.unlock()
-    fetch(url, maxPixels: maxPixels, fallback: fallback, attempt: 1, key: key)
+    // (Off the main thread: whether the WebP's on disk is a look at the disk cache.)
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      guard let self else { return }
+      self.fetch(self.smaller(url), maxPixels: maxPixels, fallback: fallback, attempt: 1, key: key)
+    }
+    // A 7TV emote that's slow to come: its still picture (a couple of kilobytes) up meanwhile.
+    if let still = Self.sevenTVStill(url) {
+      DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { [weak self] in
+        self?.stillMeanwhile(still, maxPixels: maxPixels, key: key)
+      }
+    }
+  }
+
+  // MARK: 7TV's emotes, smaller
+  //
+  // 7TV sends each emote slowly (a 220 KB animation took 16 s to come on a test, a few kilobytes
+  // a second), and xQc's 969 emotes, 667 of them animated, are 50 KB each in the middle and over
+  // 300 KB for the biggest tenth as WebP: busy chat sat on blanks. The same animation as AVIF is
+  // about a quarter of the size, and every emote has a still picture of a couple of kilobytes.
+
+  /// AVIF is read here (iOS 17 and later, until one fails to decode a few times).
+  private var avifFailures = 0
+  private var avifReadable: Bool {
+    guard #available(iOS 17, tvOS 17, *) else { return false }
+    lock.lock()
+    defer { lock.unlock() }
+    return avifFailures < 3
+  }
+
+  /// What's fetched for a picture: a 7TV WebP as AVIF, unless the WebP is on disk already.
+  private func smaller(_ url: URL) -> URL {
+    guard url.host == "cdn.7tv.app", url.pathExtension == "webp", !url.lastPathComponent.contains("static"), avifReadable,
+      session.configuration.urlCache?.cachedResponse(for: URLRequest(url: url)) == nil
+    else { return url }
+    return url.deletingPathExtension().appendingPathExtension("avif")
+  }
+
+  /// A 7TV emote's still picture (its first frame on its own).
+  static func sevenTVStill(_ url: URL) -> URL? {
+    guard url.host == "cdn.7tv.app", ["webp", "avif", "gif"].contains(url.pathExtension),
+      !url.lastPathComponent.contains("static")
+    else { return nil }
+    let name = url.deletingPathExtension().lastPathComponent
+    return url.deletingLastPathComponent().appendingPathComponent("\(name)_static.webp")
+  }
+
+  /// The still picture, if the emote is still being waited for and nothing of it is shown yet.
+  private func stillMeanwhile(_ still: URL, maxPixels: CGFloat?, key: String) {
+    lock.lock()
+    let wanted = waiting[key] != nil && cache.object(forKey: key as NSString) == nil
+    lock.unlock()
+    guard wanted else { return }
+    var request = URLRequest(url: still)
+    request.cachePolicy = .returnCacheDataElseLoad
+    let task = session.dataTask(with: request) { [weak self] data, response, _ in
+      guard let self, let data, ((response as? HTTPURLResponse)?.statusCode ?? 0) == 200,
+        let image = Self.decode(data, maxPixels: maxPixels)
+      else { return }
+      self.lock.lock()
+      let stillWanted = self.waiting[key] != nil && self.cache.object(forKey: key as NSString) == nil
+      self.lock.unlock()
+      if stillWanted { self.deliver(key, image, final: false) }
+    }
+    task.priority = URLSessionTask.highPriority
+    task.resume()
+  }
+
+  /// An animated AVIF ("avis" among its brands, in the file's first box).
+  static func isAVIFSequence(_ data: Data) -> Bool {
+    guard data.count >= 16 else { return false }
+    let head = [UInt8](data.prefix(min(data.count, 64)))
+    guard head[4] == UInt8(ascii: "f"), head[5] == UInt8(ascii: "t"), head[6] == UInt8(ascii: "y"), head[7] == UInt8(ascii: "p") else {
+      return false
+    }
+    let size = min(head.count, Int(head[0]) << 24 | Int(head[1]) << 16 | Int(head[2]) << 8 | Int(head[3]))
+    let brand = Array("avis".utf8)
+    var i = 8
+    while i + 4 <= size {
+      if Array(head[i..<(i + 4)]) == brand { return true }
+      i += 4
+    }
+    return false
+  }
+
+  /// An AVIF that couldn't be read: noted (after a few, 7TV's WebP is fetched from the start).
+  private func noteAVIFFailure(_ url: URL) {
+    guard url.pathExtension == "avif" else { return }
+    lock.lock()
+    avifFailures += 1
+    let count = avifFailures
+    lock.unlock()
+    if count == 3 { ActivityLog.shared.add("Images: this device couldn't read 7TV's AVIF emotes; using WebP") }
   }
 
   /// Hands a picture to everyone waiting for it: `final` ends the wait (else it's a first frame,
@@ -332,10 +433,21 @@ final class ImagePipeline: @unchecked Sendable {
   private func decode(_ data: Data, maxPixels: CGFloat?, key: String, url: URL, mimeType: String?) {
     scheduleDecode(key: key) { [weak self] in
       guard let self else { return }
+      // An animated AVIF read as one picture (a system that can't play them): the WebP instead,
+      // rather than an emote that stopped moving.
+      if url.pathExtension == "avif", Self.isAVIFSequence(data),
+        CGImageSourceCreateWithData(data as CFData, nil).map({ CGImageSourceGetCount($0) }) ?? 0 <= 1,
+        let other = Self.otherFormat(url)
+      {
+        self.noteAVIFFailure(url)
+        self.fetch(other, maxPixels: maxPixels, fallback: nil, attempt: 1, key: key)
+        return
+      }
       guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
         CGImageSourceGetCount(source) > 1
       else {
         let image = Self.decode(data, maxPixels: maxPixels)
+        if image == nil { self.noteAVIFFailure(url) }
         if image == nil, let other = Self.otherFormat(url) {
           // (A WebP this iPhone can't read: the same emote as a GIF or PNG.)
           self.fetch(other, maxPixels: maxPixels, fallback: nil, attempt: 1, key: key)
@@ -352,7 +464,9 @@ final class ImagePipeline: @unchecked Sendable {
       let rest = BlockOperation { [weak self] in
         guard let self else { return }
         let animation = Self.decode(data, maxPixels: maxPixels)
-        if animation == nil, self.cached(url, maxPixels: maxPixels) == nil, let other = Self.otherFormat(url) {
+        if animation == nil { self.noteAVIFFailure(url) }
+        // (An AVIF whose animation couldn't be read: the WebP, though its first frame is up.)
+        if animation == nil, self.cached(url, maxPixels: maxPixels) == nil || url.pathExtension == "avif", let other = Self.otherFormat(url) {
           self.fetch(other, maxPixels: maxPixels, fallback: nil, attempt: 1, key: key)
           return
         }
@@ -368,6 +482,7 @@ final class ImagePipeline: @unchecked Sendable {
   static func otherFormat(_ url: URL) -> URL? {
     let address = url.absoluteString
     if url.host == "cdn.7tv.app" {
+      if address.hasSuffix(".avif") { return URL(string: String(address.dropLast(5)) + ".webp") }
       if address.hasSuffix(".webp") { return URL(string: String(address.dropLast(5)) + ".gif") }
       if address.hasSuffix(".gif") { return URL(string: String(address.dropLast(4)) + ".png") }
     }
