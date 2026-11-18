@@ -25,19 +25,32 @@ final class ChatController: ObservableObject {
 
   private var lastSent: (id: String, text: String, at: Date)?
   private(set) var messages: [ChatMessage] = []
-  private(set) var thirdParty: [String: URL] = [:]
+  private(set) var thirdParty: [String: URL] = [:] {
+    didSet { mergedMaps = [:] }
+  }
   /// 7TV's live events for this channel: personal emotes and changes to its set.
   private var sevenTV: SevenTVEvents?
   /// Personal 7TV emote sets (by set id), and whose they are (Twitch user id → set ids).
-  private var personalSets: [String: [String: URL]] = [:]
+  private var personalSets: [String: [String: URL]] = [:] {
+    didSet { mergedMaps = [:] }
+  }
+  /// The channel's emotes with a chatter's personal 7TV sets on top, by set: made once, not for
+  /// every message (each copied and merged the channel's thousands of emotes; in xQc's chat, many
+  /// chatters have personal sets).
+  private var mergedMaps: [String: [String: URL]] = [:]
   private var userSets: [String: Set<String>] = [:]
 
   /// The emotes a message can use: the channel's and the global ones, plus its sender's personal
   /// 7TV emotes.
   func emoteMap(for message: ChatMessage) -> [String: URL] {
     guard let user = message.userID, let sets = userSets[user], !sets.isEmpty else { return thirdParty }
+    let key = sets.sorted().joined(separator: ",")
+    if let made = mergedMaps[key] { return made }
     var map = thirdParty
-    for set in sets { if let emotes = personalSets[set] { map.merge(emotes) { _, personal in personal } } }
+    for set in sets.sorted() { if let emotes = personalSets[set] { map.merge(emotes) { _, personal in personal } } }
+    // (Kept few: chatters' sets come and go.)
+    if mergedMaps.count > 200 { mergedMaps = [:] }
+    mergedMaps[key] = map
     return map
   }
 

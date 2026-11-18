@@ -262,11 +262,11 @@ final class ImagePipeline: @unchecked Sendable {
     // (Off the main thread: whether it's on disk is a look at the disk cache.)
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
       guard let self else { return }
-      let target = self.smaller(url)
+      let (target, onDisk) = self.smaller(url)
       // A 7TV emote not on disk: its still picture (a couple of kilobytes) asked for at once, and
       // up in a moment; the animation follows. 7TV sends some 14 KB a second all told (BTTV, about
       // 2 MB): a 50 KB animation took seconds, a 300 KB one most of a minute.
-      if let still = Self.sevenTVStill(url), self.session.configuration.urlCache?.cachedResponse(for: URLRequest(url: target)) == nil {
+      if !onDisk, let still = Self.sevenTVStill(url) {
         self.stillMeanwhile(still, maxPixels: maxPixels, key: key)
       }
       self.fetch(target, maxPixels: maxPixels, fallback: fallback, attempt: 1, key: key)
@@ -363,12 +363,17 @@ final class ImagePipeline: @unchecked Sendable {
     return avifFailures < 3
   }
 
-  /// What's fetched for a picture: a 7TV WebP as AVIF, unless the WebP is on disk already.
-  private func smaller(_ url: URL) -> URL {
-    guard url.host == "cdn.7tv.app", url.pathExtension == "webp", !url.lastPathComponent.contains("static"), avifReadable,
-      session.configuration.urlCache?.cachedResponse(for: URLRequest(url: url)) == nil
-    else { return url }
-    return url.deletingPathExtension().appendingPathExtension("avif")
+  /// What's fetched for a 7TV emote: as AVIF, unless the WebP is on disk already; and whether
+  /// what's fetched is on disk. (Each look at the disk cache reads the file: one or two, not
+  /// three, for each emote.) Other pictures: as they are (not looked up).
+  private func smaller(_ url: URL) -> (URL, onDisk: Bool) {
+    guard url.host == "cdn.7tv.app", !url.lastPathComponent.contains("static"), let cache = session.configuration.urlCache else {
+      return (url, true)
+    }
+    if cache.cachedResponse(for: URLRequest(url: url)) != nil { return (url, true) }
+    guard url.pathExtension == "webp", avifReadable else { return (url, false) }
+    let avif = url.deletingPathExtension().appendingPathExtension("avif")
+    return (avif, cache.cachedResponse(for: URLRequest(url: avif)) != nil)
   }
 
   /// A 7TV emote's still picture (its first frame on its own).

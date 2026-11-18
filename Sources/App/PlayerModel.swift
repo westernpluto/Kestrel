@@ -1029,11 +1029,12 @@ final class PlayerModel: ObservableObject {
     if !wantsStats, !stats.isEmpty { stats = [] }
     if let kestrel {
       kestrel.tick()
-      if wantsStats { stats = kestrel.stats() }
+      // (Published only when a line changed: every view watching the player redraws on each.)
+      if wantsStats { let lines = kestrel.stats(); if lines != stats { stats = lines } }
       if pictureInPictureActive != kestrel.pictureInPictureActive { pictureInPictureActive = kestrel.pictureInPictureActive }
       return
     }
-    if wantsStats { stats = appleStats() }
+    if wantsStats { let lines = appleStats(); if lines != stats { stats = lines } }
     // Only once the item is ready and not mid-start or mid-seek: before that the player reports
     // "paused" while it loads, which used to stop VODs from ever starting.
     if pendingStart == nil, !seeking, player.currentItem?.status == .readyToPlay, phase == .playing {
@@ -1433,7 +1434,7 @@ final class PlayerModel: ObservableObject {
         lines.append(StatLine(label: "Bandwidth", value: StatFormat.mbps(event.observedBitrate)))
       }
       lines.append(StatLine(label: "Behind live", value: Format.duration(Int(broadcastElapsed - rewindPosition))))
-      stats = lines
+      if lines != stats { stats = lines }
     } else if !stats.isEmpty {
       stats = []
     }

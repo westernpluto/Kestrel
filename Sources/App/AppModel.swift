@@ -547,11 +547,20 @@ enum Format {
     return String(format: "%d:%02d", seconds / 3600, seconds % 3600 / 60)
   }
 
-  static func relative(_ date: Date?) -> String {
-    guard let date else { return "" }
+  /// (One formatter for every row: making one for each was most of the cost of laying out a
+  /// list of videos.)
+  private static let relativeFormatter: RelativeDateTimeFormatter = {
     let formatter = RelativeDateTimeFormatter()
     formatter.unitsStyle = .short
-    return formatter.localizedString(for: date, relativeTo: Date())
+    return formatter
+  }()
+  private static let relativeLock = NSLock()
+
+  static func relative(_ date: Date?) -> String {
+    guard let date else { return "" }
+    relativeLock.lock()
+    defer { relativeLock.unlock() }
+    return relativeFormatter.localizedString(for: date, relativeTo: Date())
   }
 }
 
