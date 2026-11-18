@@ -1858,61 +1858,120 @@ struct EmotePicker: View {
           .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
           ScrollView {
-            LazyVStack(alignment: .leading, spacing: 4, pinnedViews: [.sectionHeaders]) {
+            // Sections in a plain stack, each at its exact height (every row of emotes is the same
+            // height): picking a section in the strip lands on it. In a lazy stack, the sections
+            // between were estimated, and a far one was often missed. (The emotes themselves are
+            // still made only as they come into view.)
+            VStack(alignment: .leading, spacing: 4) {
               ForEach(sections) { section in
-                Section {
-                  LazyVGrid(columns: columns, spacing: 4) {
-                    ForEach(section.emotes, id: \.self) { emote in
-                      Button {
-                        Haptics.tap()
-                        onPick(emote)
-                      } label: {
-                        PickerEmoteImage(url: emote.url)
-                          .frame(width: 32, height: 32)
-                          .frame(maxWidth: .infinity, minHeight: 42)
-                          .contentShape(Rectangle())
-                      }
-                      .buttonStyle(PressableStyle(scale: 0.82))
-                      .accessibilityLabel(emote.name)
+                header(section.title)
+                  .background(
+                    GeometryReader { geometry in
+                      Color.clear.preference(
+                        key: EmoteSectionTops.self, value: [section.id: geometry.frame(in: .named("emotes")).minY])
                     }
+                  )
+                  .id(section.id)
+                LazyVGrid(columns: columns, spacing: 4) {
+                  ForEach(section.emotes, id: \.self) { emote in
+                    Button {
+                      Haptics.tap()
+                      onPick(emote)
+                    } label: {
+                      PickerEmoteImage(url: emote.url)
+                        .frame(width: 32, height: 32)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 42)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressableStyle(scale: 0.82))
+                    .accessibilityLabel(emote.name)
                   }
-                  .padding(.horizontal, 8)
-                } header: {
-                  Text(section.title)
-                    .font(.caption.weight(.bold))
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color(white: 0.09).opacity(0.97))
-                    .id(section.id)
                 }
+                .padding(.horizontal, 8)
               }
             }
             .padding(.bottom, 8)
           }
-          Divider().overlay(Color.white.opacity(0.08))
-          ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 2) {
-              ForEach(sections) { section in
-                Button {
-                  withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(section.id, anchor: .top) }
-                } label: {
-                  tabIcon(section)
-                    .frame(width: 38, height: 34)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(PressableStyle())
-                .accessibilityLabel(section.title)
-              }
-            }
-            .padding(.horizontal, 6)
+          .coordinateSpace(name: "emotes")
+          // The section scrolled to: the last whose title has reached the top.
+          .onPreferenceChange(EmoteSectionTops.self) { tops in
+            guard !jumping else { return }
+            let reached = sections.last { (tops[$0.id] ?? .infinity) <= 1 }?.id ?? sections.first?.id
+            if reached != current { current = reached }
+            let past = reached.map { (tops[$0] ?? 0) < -1 } ?? false
+            if past != pastTop { pastTop = past }
           }
-          .frame(height: 38)
+          // Its title stays at the top while its emotes scroll under it.
+          .overlay(alignment: .top) {
+            if pastTop, let section = sections.first(where: { $0.id == (current ?? sections.first?.id) }) {
+              header(section.title).allowsHitTesting(false)
+            }
+          }
+          Divider().overlay(Color.white.opacity(0.08))
+          ScrollViewReader { strip in
+            ScrollView(.horizontal, showsIndicators: false) {
+              HStack(spacing: 2) {
+                ForEach(sections) { section in
+                  let selected = section.id == (current ?? sections.first?.id)
+                  Button {
+                    jump(to: section.id, proxy)
+                  } label: {
+                    tabIcon(section)
+                      .frame(width: 38, height: 34)
+                      .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                          .fill(selected ? Color.white.opacity(0.14) : Color.clear)
+                      )
+                      .overlay(alignment: .bottom) {
+                        Capsule().fill(Color.accentTeal).frame(width: 16, height: 2.5).opacity(selected ? 1 : 0)
+                      }
+                      .contentShape(Rectangle())
+                  }
+                  .buttonStyle(PressableStyle())
+                  .id("strip-" + section.id)
+                  .accessibilityLabel(section.title)
+                  .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+              }
+              .padding(.horizontal, 6)
+              .animation(.easeInOut(duration: 0.2), value: current)
+            }
+            .frame(height: 38)
+            // The strip keeps the section scrolled to in view.
+            .onChange(of: current) { id in
+              guard let id else { return }
+              withAnimation(.easeInOut(duration: 0.25)) { strip.scrollTo("strip-" + id, anchor: .center) }
+            }
+          }
         }
       }
       .background(Color(white: 0.09))
     }
+  }
+
+  /// The section scrolled to (nil: the first).
+  @State private var current: String?
+  /// A section picked in the strip: what's passed on the way isn't taken as scrolled to.
+  @State private var jumping = false
+  /// The current section's own title has scrolled off the top (its copy stays there instead).
+  @State private var pastTop = false
+
+  private func jump(to id: String, _ proxy: ScrollViewProxy) {
+    current = id
+    jumping = true
+    withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(id, anchor: .top) }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { jumping = false }
+  }
+
+  private func header(_ title: String) -> some View {
+    Text(title)
+      .font(.caption.weight(.bold))
+      .foregroundColor(.secondary)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.horizontal, 12)
+      .padding(.vertical, 6)
+      .background(Color(white: 0.09).opacity(0.97))
   }
 
   @ViewBuilder
@@ -1985,5 +2044,13 @@ enum TwitchEmoteStore {
     guard let file = file(key) else { return }
     let stored = Stored(at: Date(), groups: groups)
     DispatchQueue.global(qos: .utility).async { try? JSONEncoder().encode(stored).write(to: file, options: .atomic) }
+  }
+}
+
+/// Where each emote section's title is in the picker's scroll view (see EmotePicker).
+private struct EmoteSectionTops: PreferenceKey {
+  static var defaultValue: [String: CGFloat] = [:]
+  static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+    value.merge(nextValue()) { $1 }
   }
 }
