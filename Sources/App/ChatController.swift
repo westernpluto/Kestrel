@@ -161,7 +161,10 @@ final class ChatController: ObservableObject {
       let http = URLSessionHTTPClient(timeout: 25)
       async let history = replay ? [] : ThirdPartyEmotes.recentMessages(login: channel.login, http: http)
       async let badgeMap = TwitchAPI.shared.badges(channelID: channel.id)
-      async let emoteSets = ThirdPartyEmotes.load(channelID: channel.id, http: http)
+      // (Each list shown as it comes, not only once all six are in.)
+      async let emoteSets = ThirdPartyEmotes.load(channelID: channel.id, http: http) { [weak self] partial in
+        Task { @MainActor in self?.applyEarlyEmotes(partial) }
+      }
       // Emotes (usually from memory now) are waited for only briefly: the recent messages show as
       // soon as they're in, and any emotes that come later are put into them then (it used to
       // wait for the slowest of six emote services before showing anything).
@@ -172,6 +175,7 @@ final class ChatController: ObservableObject {
       for message in old.reversed() { noteChatter(message.displayName) }
       if !old.isEmpty { onUpdate(true) }
       let emotes = await emoteSets
+      emotesFinal = true
       thirdPartySets = emotes
       thirdParty = emotes.byName
       rebuildEmoteSections()
@@ -197,6 +201,19 @@ final class ChatController: ObservableObject {
     loadTwitchEmotes()
     connect()
     startSevenTV()
+  }
+
+  /// All six emote lists have come (or given up): a list arriving late from the first load (a
+  /// refresh behind the cache) doesn't put back fewer.
+  private var emotesFinal = false
+
+  /// Some of the emote lists, while the rest are still coming: shown in chat and the picker now.
+  private func applyEarlyEmotes(_ partial: ThirdPartyEmoteSets) {
+    guard running, !emotesFinal, partial.byName.count > thirdParty.count else { return }
+    thirdPartySets = partial
+    thirdParty = partial.byName
+    rebuildEmoteSections()
+    onUpdate(true)
   }
 
   /// The connection to the emote hosts (7TV above all) kept open while chat runs (see `keepWarm`).

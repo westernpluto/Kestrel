@@ -433,6 +433,24 @@ func testAdCoveringScenarios() {
   check(!AdCovering.covered(playing: at(18), now: at(25), ads: ads, seam: first), "paused frame before a jump stays uncovered")
 }
 
+/// Emote lists shown as each comes: what's in so far after every one, the channel's 7TV winning a
+/// name clash, and an empty or missing list passing nothing on.
+func testEmoteListsAsTheyCome() {
+  final class Seen: @unchecked Sendable { var all: [ThirdPartyEmoteSets] = [] }
+  let seen = Seen()
+  let partial = PartialEmoteSets { seen.all.append($0) }
+  let u = { (s: String) in URL(string: "https://x.test/\(s)")! }
+  _ = partial.note(.globalFFZ, ["LUL": u("ffz-lul"), "ZreknarF": u("z")])
+  check(seen.all.count == 1 && seen.all[0].byName.count == 2 && seen.all[0].global.map(\.title) == ["FFZ global"], "the first list shows on its own")
+  check(partial.note(.channelBTTV, nil) == nil && partial.note(.globalBTTV, [:]) == [:] && seen.all.count == 1, "nothing new, nothing passed on")
+  _ = partial.note(.channel7TV, ["LUL": u("7tv-lul"), "Clap": u("clap")])
+  let now = seen.all.last!
+  check(now.byName["LUL"] == u("7tv-lul"), "the channel's 7TV wins a clash")
+  check(now.byName.count == 3 && now.channel.map(\.title) == ["7TV"] && !now.complete, "both lists, still not complete")
+  let whole = ThirdPartyEmotes.assemble(globals: ([:], [:], ["A": u("a")]), channel: (["B": u("b")], [:], [:]), complete: true)
+  check(whole.complete && whole.byName.count == 2 && whole.global.count == 1 && whole.channel.count == 1, "put together whole")
+}
+
 func testMasterParsing() {
   // Damaged input (found by fuzzing): reads past the data give zeros, odd lengths are kept sane.
   check(MP4.u32(Data([1, 2]), 0) == 0 && MP4.type(Data([1]), 0) == "" && MP4.byte(Data(), 5) == 0, "MP4 reads past the end")
@@ -2895,6 +2913,7 @@ testAnnexBSplitter()
 testAdsSeenInCopies()
 testAdSeamsOnRealSegments()
 testAdCoveringScenarios()
+testEmoteListsAsTheyCome()
 testTimelineAndRender()
 testSession(lowLatency: true)
 testSession(lowLatency: false)

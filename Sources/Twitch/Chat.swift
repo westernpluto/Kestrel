@@ -587,6 +587,36 @@ struct ThirdPartyEmoteSets: Sendable {
   var complete = true
 }
 
+/// The emote lists that have come so far while loading (see `ThirdPartyEmotes.load`).
+final class PartialEmoteSets: @unchecked Sendable {
+  enum List { case global7TV, globalBTTV, globalFFZ, channel7TV, channelBTTV, channelFFZ }
+
+  private let lock = NSLock()
+  private var globals: EmoteSetCache.Sets = ([:], [:], [:])
+  private var channel: EmoteSetCache.Sets = ([:], [:], [:])
+  private let progress: (@Sendable (ThirdPartyEmoteSets) -> Void)?
+
+  init(progress: (@Sendable (ThirdPartyEmoteSets) -> Void)?) { self.progress = progress }
+
+  /// One list came (or didn't: nil): handed back as is, and what's in so far passed on.
+  func note(_ list: List, _ emotes: [String: URL]?) -> [String: URL]? {
+    guard let progress, let emotes, !emotes.isEmpty else { return emotes }
+    lock.lock()
+    switch list {
+    case .global7TV: globals.seventv = emotes
+    case .globalBTTV: globals.bttv = emotes
+    case .globalFFZ: globals.ffz = emotes
+    case .channel7TV: channel.seventv = emotes
+    case .channelBTTV: channel.bttv = emotes
+    case .channelFFZ: channel.ffz = emotes
+    }
+    let (g, c) = (globals, channel)
+    lock.unlock()
+    progress(ThirdPartyEmotes.assemble(globals: g, channel: c, complete: false))
+    return emotes
+  }
+}
+
 /// Emote sets fetched lately, kept in memory: the global ones once a session (half an hour),
 /// each channel's for ten minutes. Every chat opened (switching chats in multi-view, above all)
 /// fetched all six sets again and waited for the slowest before showing anything.
@@ -696,39 +726,49 @@ actor EmoteSetCache {
 }
 
 enum ThirdPartyEmotes {
-  static func load(channelID: String?, http: HTTPClient) async -> ThirdPartyEmoteSets {
+  /// - Parameter progress: told each time one more list has come, with what's in so far (not
+  ///   when they come from memory or disk: then all of them are there at once). Every chat used
+  ///   to wait for the slowest of the six lists, and one slow service (up to the 25 s timeout)
+  ///   kept the emote picker on "Loading emotes…" and every emote in chat as a word.
+  static func load(
+    channelID: String?, http: HTTPClient, progress: (@Sendable (ThirdPartyEmoteSets) -> Void)? = nil
+  ) async -> ThirdPartyEmoteSets {
+    let partial = PartialEmoteSets(progress: progress)
     async let globalSets = EmoteSetCache.shared.globals {
-      async let seventv = fetch(URL(string: "https://7tv.io/v3/emote-sets/global")!, http) { parse7TV($0["emotes"]) }
-      async let bttv = fetch(URL(string: "https://api.betterttv.net/3/cached/emotes/global")!, http) { parseBTTV($0.array) }
-      async let ffz = fetch(URL(string: "https://api.frankerfacez.com/v1/set/global")!, http) { parseFFZ($0["sets"]) }
+      async let seventv = partial.note(.global7TV, await fetch(URL(string: "https://7tv.io/v3/emote-sets/global")!, http) { parse7TV($0["emotes"]) })
+      async let bttv = partial.note(.globalBTTV, await fetch(URL(string: "https://api.betterttv.net/3/cached/emotes/global")!, http) { parseBTTV($0.array) })
+      async let ffz = partial.note(.globalFFZ, await fetch(URL(string: "https://api.frankerfacez.com/v1/set/global")!, http) { parseFFZ($0["sets"]) })
       let (a, b, c) = await (seventv, bttv, ffz)
       return ((a ?? [:], b ?? [:], c ?? [:]), a != nil && b != nil && c != nil)
     }
-    var channel7TV: [String: URL] = [:]
-    var channelBTTV: [String: URL] = [:]
-    var channelFFZ: [String: URL] = [:]
+    var channelSets: EmoteSetCache.Sets = ([:], [:], [:])
     var channelComplete = true
     if let channelID, !channelID.isEmpty {
       let loaded = await EmoteSetCache.shared.channel(channelID) {
-        async let a = sevenTVChannel(channelID, http)
-        async let b = fetch(URL(string: "https://api.betterttv.net/3/cached/users/twitch/\(channelID)")!, http) {
+        async let a = partial.note(.channel7TV, await sevenTVChannel(channelID, http))
+        async let b = partial.note(.channelBTTV, await fetch(URL(string: "https://api.betterttv.net/3/cached/users/twitch/\(channelID)")!, http) {
           parseBTTV($0["channelEmotes"].array + $0["sharedEmotes"].array)
-        }
-        async let c = fetch(URL(string: "https://api.frankerfacez.com/v1/room/id/\(channelID)")!, http) {
+        })
+        async let c = partial.note(.channelFFZ, await fetch(URL(string: "https://api.frankerfacez.com/v1/room/id/\(channelID)")!, http) {
           parseFFZ($0["sets"])
-        }
+        })
         let (x, y, z) = await (a, b, c)
         return ((x ?? [:], y ?? [:], z ?? [:]), x != nil && y != nil && z != nil)
       }
-      (channel7TV, channelBTTV, channelFFZ) = loaded.sets
+      channelSets = loaded.sets
       channelComplete = loaded.complete
     }
     let globalLoaded = await globalSets
-    let globals = globalLoaded.sets
+    return assemble(globals: globalLoaded.sets, channel: channelSets, complete: channelComplete && globalLoaded.complete)
+  }
+
+  /// The lists put together: one map by name (channel 7TV wins a clash, global FFZ loses), and a
+  /// section per list for the picker.
+  static func assemble(globals: EmoteSetCache.Sets, channel: EmoteSetCache.Sets, complete: Bool) -> ThirdPartyEmoteSets {
     var result = ThirdPartyEmoteSets()
-    result.complete = channelComplete && globalLoaded.complete
+    result.complete = complete
     // Lowest priority first; channel 7TV wins on name clashes.
-    for map in [globals.2, globals.1, globals.0, channelFFZ, channelBTTV, channel7TV] {
+    for map in [globals.ffz, globals.bttv, globals.seventv, channel.ffz, channel.bttv, channel.seventv] {
       result.byName.merge(map) { _, new in new }
     }
     func section(_ title: String, _ map: [String: URL]) -> ThirdPartyEmoteSets.Section? {
@@ -737,8 +777,8 @@ enum ThirdPartyEmotes {
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
       return ThirdPartyEmoteSets.Section(title: title, emotes: emotes)
     }
-    result.channel = [section("7TV", channel7TV), section("BTTV", channelBTTV), section("FFZ", channelFFZ)].compactMap { $0 }
-    result.global = [section("7TV global", globals.0), section("BTTV global", globals.1), section("FFZ global", globals.2)]
+    result.channel = [section("7TV", channel.seventv), section("BTTV", channel.bttv), section("FFZ", channel.ffz)].compactMap { $0 }
+    result.global = [section("7TV global", globals.seventv), section("BTTV global", globals.bttv), section("FFZ global", globals.ffz)]
       .compactMap { $0 }
     return result
   }
