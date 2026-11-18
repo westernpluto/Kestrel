@@ -2581,8 +2581,11 @@ func testTSDemux() {
   timeline.beginSegment(firstPTS: 50_000, discontinuity: true)
   let afterJump = timeline.map(50_000, isVideo: true)
   check(afterJump == lastBefore + 3000, "carries on after a discontinuity: \(afterJump) vs \(lastBefore)")
-  // An unmarked jump of minutes is treated the same way.
+  // A marked jump isn't counted as unmarked (an ad's start is told by unmarked ones).
+  check(timeline.unmarkedSeams == 0, "marked jump not counted as unmarked")
+  // An unmarked jump of minutes is treated the same way (and counted, where it lands noted).
   timeline.beginSegment(firstPTS: 90_000_000, discontinuity: false)
+  check(timeline.unmarkedSeams == 1 && timeline.lastUnmarkedSeam != nil, "unmarked jump counted")
   check(timeline.map(90_000_000, isVideo: true) == afterJump + 3000, "unmarked jump")
   // Following on normally changes nothing.
   timeline.beginSegment(firstPTS: 90_003_000, discontinuity: false)

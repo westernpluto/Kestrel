@@ -680,6 +680,10 @@ final class KestrelEngine: NSObject {
     streamClockLatency
   }
 
+  /// A jump in the live stream's times the playlist didn't mark (see `enqueue`): where it is on the
+  /// stream's clock, and when it was noticed.
+  private(set) var unannouncedSeam: (date: Date, noticed: Date)?
+
   /// When the frame on screen was broadcast, by the stream's own clock: also while paused (where
   /// latency can't be told, and ad covering went by whether Twitch was showing an ad right then,
   /// covering a paused frame from after an ad that had been blocked).
@@ -999,8 +1003,20 @@ final class KestrelEngine: NSObject {
       load.timed = true
       let isVideo: Bool
       if case .video = frame { isVideo = true } else { isVideo = false }
+      let seamsBefore = timeline.unmarkedSeams
       timeline.beginSegment(firstPTS: frame.pts, isVideo: isVideo, discontinuity: load.planned.discontinuity)
       if load.planned.discontinuity { waitingForKeyframe = true }
+      // The live segment being made jumped in time without a word from the playlist, not just
+      // after a switch to or from an ad-free copy: most likely an ad stitched in. Said at once,
+      // so it's covered from its first frame (the playlist marks it two seconds later, and those
+      // seconds of ad showed).
+      if timeline.unmarkedSeams > seamsBefore, load.planned.live, Date().timeIntervalSince(sourceChangedAt) > 3,
+        let time = timeline.lastUnmarkedSeam, let anchor
+      {
+        let date = anchor.date.addingTimeInterval(Double(time - anchor.time) / Double(Self.clock))
+        unannouncedSeam = (date, Date())
+        ActivityLog.shared.add("Kestrel player: the stream jumped in time without a word from Twitch (an ad starting?); covered until it's known")
+      }
     }
     switch frame {
     case .video(let video):

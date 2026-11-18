@@ -521,6 +521,11 @@ struct StreamTimeline {
   private var audioStep: Int64 = 1920
   /// The first segment's first time: the timeline starts there.
   private(set) var origin: Int64?
+  /// Segments that didn't follow on in time without the playlist marking it, and where the last
+  /// one began on the timeline: an ad stitched into the segment being made shows this way before
+  /// the playlist says so (it says once the segment's done, two seconds later).
+  private(set) var unmarkedSeams = 0
+  private(set) var lastUnmarkedSeam: Int64?
   /// How far off a segment's start may be and still count as following on (60 ms: under four
   /// frames at 60 fps).
   static let seamTolerance: Int64 = 5400
@@ -553,6 +558,10 @@ struct StreamTimeline {
       expected = last + videoStep
     }
     if discontinuity || abs(mapped - expected) > Self.seamTolerance {
+      if !discontinuity {
+        unmarkedSeams += 1
+        lastUnmarkedSeam = expected
+      }
       offset = expected - firstPTS
     }
   }
