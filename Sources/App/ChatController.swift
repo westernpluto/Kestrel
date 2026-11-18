@@ -1864,263 +1864,92 @@ struct EmotePicker: View {
   /// Nothing more is coming: with no sections, there are none to show (not still loading).
   var loaded = false
   var onPick: (NamedEmote) -> Void
-  private let columns = [GridItem(.adaptive(minimum: 42, maximum: 56), spacing: 4)]
 
   var body: some View {
-    ScrollViewReader { proxy in
-      VStack(spacing: 0) {
-        if sections.isEmpty, loaded {
-          // (It said "Loading emotes…" forever: signed out, on a channel with no 7TV, BTTV or FFZ
-          // emotes, there are none to load.)
-          VStack(spacing: 6) {
-            Image(systemName: "face.smiling").font(.title2).foregroundColor(.secondary)
-            Text(TwitchAccount.shared.session == nil ? "Sign in to use your Twitch emotes" : "No emotes here yet")
-              .font(.footnote).foregroundColor(.secondary)
-          }
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if sections.isEmpty {
-          VStack(spacing: 6) {
-            ProgressView()
-            Text("Loading emotes…").font(.footnote).foregroundColor(.secondary)
-          }
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-          ScrollView {
-            // Sections in a plain stack, each at its exact height (every row of emotes is the same
-            // height): picking a section in the strip lands on it. In a lazy stack, the sections
-            // between were estimated, and a far one was often missed. (The emotes themselves are
-            // still made only as they come into view.)
-            VStack(alignment: .leading, spacing: 4) {
+    VStack(spacing: 0) {
+      if sections.isEmpty, loaded {
+        // (It said "Loading emotes…" forever: signed out, on a channel with no 7TV, BTTV or FFZ
+        // emotes, there are none to load.)
+        VStack(spacing: 6) {
+          Image(systemName: "face.smiling").font(.title2).foregroundColor(.secondary)
+          Text(TwitchAccount.shared.session == nil ? "Sign in to use your Twitch emotes" : "No emotes here yet")
+            .font(.footnote).foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else if sections.isEmpty {
+        VStack(spacing: 6) {
+          ProgressView()
+          Text("Loading emotes…").font(.footnote).foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else {
+        EmoteGrid(sections: sections, jump: jump, onPick: onPick) { id in
+          if id != current { current = id }
+        }
+        Divider().overlay(Color.white.opacity(0.08))
+        ScrollViewReader { strip in
+          ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
               ForEach(sections) { section in
-                VStack(alignment: .leading, spacing: 4) {
-                  // Where its title is in the list itself (not on screen): that only changes when
-                  // the list does, not as it scrolls.
-                  header(section.title)
+                let selected = section.id == (current ?? sections.first?.id)
+                Button {
+                  current = section.id
+                  jump = EmoteGrid.Jump(section: section.id, serial: jump.serial + 1)
+                } label: {
+                  tabIcon(section)
+                    .frame(width: 38, height: 34)
                     .background(
-                      GeometryReader { geometry in
-                        Color.clear.preference(
-                          key: EmoteSectionTops.self, value: [section.id: geometry.frame(in: .named("emoteList")).minY])
-                      }
+                      RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(selected ? Color.white.opacity(0.14) : Color.clear)
                     )
-                  LazyVGrid(columns: columns, spacing: 4) {
-                    ForEach(section.emotes, id: \.self) { emote in
-                      Button {
-                        Haptics.tap()
-                        onPick(emote)
-                      } label: {
-                        PickerEmoteImage(url: emote.url)
-                          .frame(width: 32, height: 32)
-                          .frame(maxWidth: .infinity)
-                          .frame(height: 42)
-                          .contentShape(Rectangle())
-                      }
-                      .buttonStyle(PressableStyle(scale: 0.82))
-                      .accessibilityLabel(emote.name)
+                    .overlay(alignment: .bottom) {
+                      Capsule().fill(Color.accentTeal).frame(width: 16, height: 2.5).opacity(selected ? 1 : 0)
                     }
-                  }
-                  .padding(.horizontal, 8)
+                    .contentShape(Rectangle())
                 }
-                .id(section.id)
+                .buttonStyle(PressableStyle())
+                .id("strip-" + section.id)
+                .accessibilityLabel(section.title)
+                .accessibilityAddTraits(selected ? .isSelected : [])
               }
             }
-            .coordinateSpace(name: "emoteList")
-            // (Before iOS 18: how far the list has scrolled, from where its top and the view's are
-            // on screen. Measured against the scroll view itself, it never changed as it scrolled.)
-            .background(
-              GeometryReader { geometry in
-                let frame = geometry.frame(in: .global)
-                Color.clear.preference(key: EmoteListOffset.self, value: EmoteListOffset.Value(top: frame.minY, height: frame.height))
-              }
-            )
-            .padding(.bottom, 8)
+            .padding(.horizontal, 6)
+            .animation(.easeInOut(duration: 0.2), value: current)
           }
-          // iOS 18 and later: the scroll view says how far it has scrolled, and scrolls to a
-          // section's exact place when one is picked.
-          .modifier(
-            EmoteScrollTracking(target: jumpTarget) { offset, view, content in
-              scrolled = offset
-              viewHeight = view
-              listHeight = content - 8
-              follow()
-            })
-          .background(
-            GeometryReader { geometry in
-              let frame = geometry.frame(in: .global)
-              Color.clear.preference(key: EmoteViewFrame.self, value: EmoteListOffset.Value(top: frame.minY, height: frame.height))
-            }
-          )
-          .onPreferenceChange(EmoteViewFrame.self) { view in
-            guard !EmoteScrollTracking.native else { return }
-            viewTop = view.top
-            viewHeight = view.height
-            scrolled = viewTop - listTop
-            follow()
-          }
-          // The section scrolled to: the last whose title is at or above the top of the view, from
-          // where the titles are in the list and how far it has scrolled. (Worked out from where
-          // each title said it was on screen, it went back to a wrong section as you scrolled:
-          // titles off screen didn't always say they'd moved.)
-          .onPreferenceChange(EmoteSectionTops.self) { tops in
-            sectionTops = tops
-            follow()
-          }
-          .onPreferenceChange(EmoteListOffset.self) { list in
-            guard !EmoteScrollTracking.native else { return }
-            listTop = list.top
-            listHeight = list.height
-            scrolled = viewTop - listTop
-            follow()
-          }
-          // Its title stays at the top while its emotes scroll under it.
-          .overlay(alignment: .top) {
-            if pastTop, let section = sections.first(where: { $0.id == (current ?? sections.first?.id) }) {
-              header(section.title).allowsHitTesting(false)
-            }
-          }
-          Divider().overlay(Color.white.opacity(0.08))
-          ScrollViewReader { strip in
-            ScrollView(.horizontal, showsIndicators: false) {
-              HStack(spacing: 2) {
-                ForEach(sections) { section in
-                  let selected = section.id == (current ?? sections.first?.id)
-                  Button {
-                    jump(to: section.id, proxy)
-                  } label: {
-                    tabIcon(section)
-                      .frame(width: 38, height: 34)
-                      .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                          .fill(selected ? Color.white.opacity(0.14) : Color.clear)
-                      )
-                      .overlay(alignment: .bottom) {
-                        Capsule().fill(Color.accentTeal).frame(width: 16, height: 2.5).opacity(selected ? 1 : 0)
-                      }
-                      .contentShape(Rectangle())
-                  }
-                  .buttonStyle(PressableStyle())
-                  .id("strip-" + section.id)
-                  .accessibilityLabel(section.title)
-                  .accessibilityAddTraits(selected ? .isSelected : [])
-                }
-              }
-              .padding(.horizontal, 6)
-              .animation(.easeInOut(duration: 0.2), value: current)
-            }
-            .frame(height: 38)
-            // The strip keeps the section scrolled to in view.
-            .onChange(of: current) { id in
-              guard let id else { return }
-              withAnimation(.easeInOut(duration: 0.25)) { strip.scrollTo("strip-" + id, anchor: .center) }
-            }
+          .frame(height: 38)
+          // The strip keeps the section scrolled to in view.
+          .onChange(of: current) { id in
+            guard let id else { return }
+            withAnimation(.easeInOut(duration: 0.25)) { strip.scrollTo("strip-" + id, anchor: .center) }
           }
         }
       }
-      .background(Color(white: 0.09))
-      .onChange(of: tourState) { state in
-        if ScreenTour.requested != nil { ScreenTour.pickerState = state }
-      }
-      .onAppear {
-        if ScreenTour.requested != nil { ScreenTour.pickerState = tourState }
-      }
-      // (Screen tour: a pick in the strip, as a tap on its fourth icon.)
-      .onReceive(NotificationCenter.default.publisher(for: ScreenTour.pickEmoteSection)) { _ in
-        guard !sections.isEmpty else { return }
-        jump(to: sections[min(3, sections.count - 1)].id, proxy)
-      }
+    }
+    .background(Color(white: 0.09))
+    .onChange(of: tourState) { state in
+      if ScreenTour.requested != nil { ScreenTour.pickerState = state }
+    }
+    .onAppear {
+      if ScreenTour.requested != nil { ScreenTour.pickerState = tourState }
+    }
+    // (Screen tour: a pick in the strip, as a tap on its fourth icon.)
+    .onReceive(NotificationCenter.default.publisher(for: ScreenTour.pickEmoteSection)) { _ in
+      guard !sections.isEmpty else { return }
+      let id = sections[min(3, sections.count - 1)].id
+      current = id
+      jump = EmoteGrid.Jump(section: id, serial: jump.serial + 1)
     }
   }
 
   /// What the screen tour notes down (empty while there are no sections yet).
   private var tourState: String {
-    sections.isEmpty
-      ? ""
-      : "current \(current ?? "-") · scrolled \(Int(scrolled)) · tops "
-        + sections.map { "\($0.id)@\(sectionTops[$0.id].map { String(Int($0)) } ?? "?")" }.joined(separator: " ")
-        + " · jumping \(jumping) · title copy \(pastTop)"
+    sections.isEmpty ? "" : "current \(current ?? "-") · sections " + sections.map(\.id).joined(separator: ", ")
   }
 
   /// The section scrolled to (nil: the first).
   @State private var current: String?
-  /// Where each section's title is in the list, and how far the list has scrolled.
-  @State private var sectionTops: [String: CGFloat] = [:]
-  @State private var scrolled: CGFloat = 0
-  /// The list's whole height and the view's (at the end of the list, the last sections' titles
-  /// can't reach the top).
-  @State private var listHeight: CGFloat = 0
-  @State private var viewHeight: CGFloat = 0
-  /// (Before iOS 18) where the list's top and the view's are on screen.
-  @State private var listTop: CGFloat = 0
-  @State private var viewTop: CGFloat = 0
-  /// A place in the list to scroll to (iOS 18 and later), and which request it is.
-  @State private var jumpTarget = EmoteScrollTracking.Target()
-  /// A section picked in the strip: what's passed on the way isn't taken as scrolled to.
-  @State private var jumping = false
-  /// The current section's own title has scrolled off the top (its copy stays there instead).
-  @State private var pastTop = false
-
-  /// Scrolls to a section, then lines up on its title again once the rows around it have been
-  /// laid out: the first scroll goes by SwiftUI's estimate of the rows on the way, which landed
-  /// on the wrong section now and then (a second tap on the icon got it right).
-  /// (iOS 18 and later: straight to where its title is in the list, measured. Going by the
-  /// section's identity, it landed thousands of points short of a far one.)
-  private func jump(to id: String, _ proxy: ScrollViewProxy) {
-    current = id
-    jumping = true
-    jumpCount += 1
-    let mine = jumpCount
-    let native = EmoteScrollTracking.native && sectionTops[id] != nil
-    if native {
-      jumpTarget = jumpTarget.next(sectionTops[id] ?? 0, animated: true)
-    } else {
-      withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .top) }
-    }
-    for delay in [0.3, 0.55] {
-      DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-        guard mine == jumpCount else { return }
-        if native {
-          // (Lined up again, in case the rows on the way changed its place as they were made.)
-          if let top = sectionTops[id], abs(top - scrolled) > 1 { jumpTarget = jumpTarget.next(top, animated: false) }
-          return
-        }
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) { proxy.scrollTo(id, anchor: .top) }
-      }
-    }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-      guard mine == jumpCount else { return }
-      jumping = false
-    }
-  }
-
-  /// The section scrolled to, and whether its title has gone past the top.
-  private func follow() {
-    var reached = sections.last { (sectionTops[$0.id] ?? .infinity) <= scrolled + 1 }?.id ?? sections.first?.id
-    // Scrolled to the end: a section picked there stays picked while its title is in view (it
-    // can't come up to the top, and scrolling went back to the one above it).
-    if listHeight > 0, viewHeight > 0, scrolled >= listHeight + 8 - viewHeight - 2, let current,
-      let top = sectionTops[current], top >= scrolled - 1, top < scrolled + viewHeight
-    {
-      reached = current
-    }
-    if !jumping, reached != current { current = reached }
-    let shown = current ?? sections.first?.id
-    let past = shown.map { (sectionTops[$0] ?? 0) < scrolled - 1 } ?? false
-    if past != pastTop { pastTop = past }
-  }
-
-  /// Which jump is the latest (an earlier one's corrections stand down).
-  @State private var jumpCount = 0
-
-  private func header(_ title: String) -> some View {
-    Text(title)
-      .font(.caption.weight(.bold))
-      .foregroundColor(.secondary)
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(.horizontal, 12)
-      .padding(.vertical, 6)
-      .background(Color(white: 0.09).opacity(0.97))
-  }
+  /// The latest section picked in the strip, for the grid to scroll to.
+  @State private var jump = EmoteGrid.Jump()
 
   @ViewBuilder
   private func tabIcon(_ section: EmoteSection) -> some View {
@@ -2134,6 +1963,277 @@ struct EmotePicker: View {
       CachedImage(url: first.url, maxPixels: 72, contentMode: .scaleAspectFit, placeholder: nil)
         .frame(width: 22, height: 22)
     }
+  }
+}
+
+/// The emote picker's grid: a collection view, its section titles staying at the top while their
+/// emotes scroll under them. (A SwiftUI scroll view put back where it liked as you scrolled a big
+/// list, xQc's 7TV emotes above all: it went back up to just past them, and a far section picked
+/// in the strip was missed. A collection view has every emote's place worked out exactly.)
+struct EmoteGrid: UIViewRepresentable {
+  struct Jump: Equatable {
+    var section: String?
+    var serial = 0
+  }
+
+  let sections: [EmoteSection]
+  let jump: Jump
+  var onPick: (NamedEmote) -> Void
+  /// The section scrolled to changed (the last whose title has reached the top).
+  var onSection: (String) -> Void
+
+  func makeCoordinator() -> Coordinator { Coordinator() }
+
+  func makeUIView(context: Context) -> UICollectionView {
+    let coordinator = context.coordinator
+    let layout = UICollectionViewCompositionalLayout { _, environment in
+      Coordinator.section(width: environment.container.effectiveContentSize.width)
+    }
+    let view = UICollectionView(frame: .zero, collectionViewLayout: layout)
+    view.backgroundColor = .clear
+    view.alwaysBounceVertical = true
+    view.contentInsetAdjustmentBehavior = .never
+    view.contentInset.bottom = 8
+    view.keyboardDismissMode = .none
+    view.register(EmoteGridCell.self, forCellWithReuseIdentifier: EmoteGridCell.reuse)
+    view.register(
+      EmoteGridHeader.self, forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
+      withReuseIdentifier: EmoteGridHeader.reuse)
+    view.dataSource = coordinator
+    view.delegate = coordinator
+    coordinator.view = view
+    return view
+  }
+
+  func updateUIView(_ view: UICollectionView, context: Context) {
+    let coordinator = context.coordinator
+    coordinator.onPick = onPick
+    coordinator.onSection = onSection
+    coordinator.show(sections)
+    if jump.serial != coordinator.jumpSerial {
+      coordinator.jumpSerial = jump.serial
+      if let id = jump.section { coordinator.scroll(to: id) }
+    }
+  }
+
+  final class Coordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegate {
+    weak var view: UICollectionView?
+    var onPick: (NamedEmote) -> Void = { _ in }
+    var onSection: (String) -> Void = { _ in }
+    var jumpSerial = 0
+    private var sections: [EmoteSection] = []
+    /// What the sections were last time (shown again only when that changes).
+    private var shape: [String] = []
+    /// Scrolling to a picked section: the ones passed on the way aren't taken as scrolled to.
+    private var jumpingTo: String?
+    private var reported: String?
+
+    static let headerHeight: CGFloat = 30
+    static let rowHeight: CGFloat = 42
+    static let spacing: CGFloat = 4
+
+    /// As many columns as fit at 42 points or more (as the SwiftUI grid had it).
+    static func section(width: CGFloat) -> NSCollectionLayoutSection {
+      let usable = max(1, width - 16)
+      let columns = max(1, Int((usable + spacing) / (rowHeight + spacing)))
+      let item = NSCollectionLayoutItem(
+        layoutSize: NSCollectionLayoutSize(widthDimension: .fractionalWidth(1 / CGFloat(columns)), heightDimension: .fractionalHeight(1)))
+      let group = NSCollectionLayoutGroup.horizontal(
+        layoutSize: NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(rowHeight)),
+        repeatingSubitem: item, count: columns)
+      group.interItemSpacing = .fixed(spacing)
+      // (Inset in the rows, so the title runs the whole width.)
+      group.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8)
+      let section = NSCollectionLayoutSection(group: group)
+      section.interGroupSpacing = spacing
+      // (Nothing above the first row: a section begins exactly a title's height above it.)
+      section.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: spacing * 2, trailing: 0)
+      let header = NSCollectionLayoutBoundarySupplementaryItem(
+        layoutSize: NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(headerHeight)),
+        elementKind: UICollectionView.elementKindSectionHeader, alignment: .top)
+      header.pinToVisibleBounds = true
+      header.zIndex = 2
+      section.boundarySupplementaryItems = [header]
+      return section
+    }
+
+    func show(_ new: [EmoteSection]) {
+      let newShape = new.map { "\($0.id)#\($0.emotes.count)#\($0.emotes.first?.name ?? "")#\($0.emotes.last?.name ?? "")" }
+      sections = new
+      guard newShape != shape, let view else { return }
+      shape = newShape
+      // (Where it was is kept: lists coming in one by one don't throw it back to the top.)
+      let offset = view.contentOffset
+      view.reloadData()
+      view.layoutIfNeeded()
+      let maxY = max(-view.adjustedContentInset.top, view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom)
+      view.contentOffset = CGPoint(x: offset.x, y: min(offset.y, maxY))
+      followScroll()
+    }
+
+    /// Where a section begins: its title's place before it sticks to the top.
+    private func top(of index: Int) -> CGFloat? {
+      guard let view, index < sections.count, !sections[index].emotes.isEmpty,
+        let first = view.collectionViewLayout.layoutAttributesForItem(at: IndexPath(item: 0, section: index))
+      else { return nil }
+      return first.frame.minY - Self.headerHeight
+    }
+
+    private var maxOffset: CGFloat {
+      guard let view else { return 0 }
+      return max(0, view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom)
+    }
+
+    func scroll(to id: String) {
+      guard let view, let index = sections.firstIndex(where: { $0.id == id }) else { return }
+      view.layoutIfNeeded()
+      guard let top = top(of: index) else { return }
+      let y = min(max(0, top), maxOffset) - view.adjustedContentInset.top
+      guard abs(view.contentOffset.y - y) > 0.5 else {
+        report(id)
+        return
+      }
+      jumpingTo = id
+      report(id)
+      view.setContentOffset(CGPoint(x: 0, y: y), animated: true)
+    }
+
+    /// The section scrolled to: the last whose title has reached the top; scrolled to the end,
+    /// a section picked there stays while its title is in view (it can't come up to the top).
+    private func followScroll() {
+      guard jumpingTo == nil, let view, !sections.isEmpty else { return }
+      let y = view.contentOffset.y + view.adjustedContentInset.top
+      var reached = sections.first?.id
+      for index in sections.indices {
+        guard let top = top(of: index) else { continue }
+        if top <= y + 1 { reached = sections[index].id } else { break }
+      }
+      if y >= maxOffset - 2, let picked = reported, let index = sections.firstIndex(where: { $0.id == picked }),
+        let top = top(of: index), top >= y - 1, top < y + view.bounds.height
+      {
+        reached = picked
+      }
+      if let reached { report(reached) }
+    }
+
+    private func report(_ id: String) {
+      guard id != reported else { return }
+      reported = id
+      // (Told after this pass: it may come while SwiftUI is updating the grid.)
+      DispatchQueue.main.async { [weak self] in self?.onSection(id) }
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) { followScroll() }
+
+    func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+      jumpingTo = nil
+      followScroll()
+    }
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+      // (A finger takes over from a jump still on its way.)
+      jumpingTo = nil
+    }
+
+    func numberOfSections(in collectionView: UICollectionView) -> Int { sections.count }
+
+    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+      sections[section].emotes.count
+    }
+
+    func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+      let cell = collectionView.dequeueReusableCell(withReuseIdentifier: EmoteGridCell.reuse, for: indexPath) as! EmoteGridCell
+      cell.show(sections[indexPath.section].emotes[indexPath.item])
+      return cell
+    }
+
+    func collectionView(
+      _ collectionView: UICollectionView, viewForSupplementaryElementOfKind kind: String, at indexPath: IndexPath
+    ) -> UICollectionReusableView {
+      let header = collectionView.dequeueReusableSupplementaryView(
+        ofKind: kind, withReuseIdentifier: EmoteGridHeader.reuse, for: indexPath) as! EmoteGridHeader
+      header.label.text = sections[indexPath.section].title
+      return header
+    }
+
+    func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+      collectionView.deselectItem(at: indexPath, animated: false)
+      Haptics.tap()
+      onPick(sections[indexPath.section].emotes[indexPath.item])
+    }
+  }
+}
+
+/// One emote in the picker's grid: its picture (animated ones play), shrinking a little while
+/// pressed.
+final class EmoteGridCell: UICollectionViewCell {
+  static let reuse = "emote"
+  private let image = LoadingImageView()
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    image.contentMode = .scaleAspectFit
+    image.translatesAutoresizingMaskIntoConstraints = false
+    contentView.addSubview(image)
+    NSLayoutConstraint.activate([
+      image.widthAnchor.constraint(equalToConstant: 32), image.heightAnchor.constraint(equalToConstant: 32),
+      image.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+      image.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+    ])
+    isAccessibilityElement = true
+    accessibilityTraits = .button
+  }
+
+  required init?(coder: NSCoder) { fatalError() }
+
+  func show(_ emote: NamedEmote) {
+    image.load(emote.url, maxPixels: 112, fallback: nil)
+    accessibilityLabel = emote.name
+  }
+
+  override var isHighlighted: Bool {
+    didSet {
+      guard isHighlighted != oldValue else { return }
+      let reduce = UIAccessibility.isReduceMotionEnabled
+      UIView.animate(
+        withDuration: isHighlighted ? 0.12 : 0.25, delay: 0, usingSpringWithDamping: 0.7, initialSpringVelocity: 0,
+        options: [.allowUserInteraction, .beginFromCurrentState]
+      ) {
+        self.contentView.transform = self.isHighlighted && !reduce ? CGAffineTransform(scaleX: 0.82, y: 0.82) : .identity
+        self.contentView.alpha = self.isHighlighted ? 0.85 : 1
+      }
+    }
+  }
+}
+
+/// A section's title in the picker's grid.
+final class EmoteGridHeader: UICollectionReusableView {
+  static let reuse = "title"
+  let label = UILabel()
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    backgroundColor = UIColor(white: 0.09, alpha: 0.97)
+    let base = UIFont.preferredFont(forTextStyle: .caption1)
+    label.font = UIFont.systemFont(ofSize: base.pointSize, weight: .bold)
+    label.adjustsFontForContentSizeCategory = false
+    label.textColor = .secondaryLabel
+    label.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(label)
+    NSLayoutConstraint.activate([
+      label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+      label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
+      label.centerYAnchor.constraint(equalTo: centerYAnchor),
+    ])
+    isAccessibilityElement = true
+    accessibilityTraits = .header
+  }
+
+  required init?(coder: NSCoder) { fatalError() }
+
+  override var accessibilityLabel: String? {
+    get { label.text }
+    set {}
   }
 }
 
@@ -2195,82 +2295,3 @@ enum TwitchEmoteStore {
   }
 }
 
-/// Where the emote picker's list is on screen, and how tall it is (see EmotePicker; before iOS 18).
-private struct EmoteListOffset: PreferenceKey {
-  struct Value: Equatable {
-    var top: CGFloat = 0
-    var height: CGFloat = 0
-  }
-  static var defaultValue = Value()
-  static func reduce(value: inout Value, nextValue: () -> Value) { value = nextValue() }
-}
-
-/// Where the emote picker's scroll view is on screen, and how tall (before iOS 18).
-private struct EmoteViewFrame: PreferenceKey {
-  static var defaultValue = EmoteListOffset.Value()
-  static func reduce(value: inout EmoteListOffset.Value, nextValue: () -> EmoteListOffset.Value) { value = nextValue() }
-}
-
-/// iOS 18 and later: the emote picker's scroll view reports how far it has scrolled (with the
-/// view's and the list's heights), and scrolls to an exact place when asked.
-private struct EmoteScrollTracking: ViewModifier {
-  struct Target: Equatable {
-    var offset: CGFloat = 0
-    var animated = false
-    var serial = 0
-
-    func next(_ offset: CGFloat, animated: Bool) -> Target { Target(offset: offset, animated: animated, serial: serial + 1) }
-  }
-
-  static var native: Bool {
-    if #available(iOS 18, tvOS 18, *) { return true }
-    return false
-  }
-
-  let target: Target
-  let report: (_ offset: CGFloat, _ view: CGFloat, _ content: CGFloat) -> Void
-
-  func body(content: Content) -> some View {
-    if #available(iOS 18, tvOS 18, *) {
-      content.modifier(Native(target: target, report: report))
-    } else {
-      content
-    }
-  }
-
-  @available(iOS 18, tvOS 18, *)
-  private struct Native: ViewModifier {
-    let target: Target
-    let report: (_ offset: CGFloat, _ view: CGFloat, _ content: CGFloat) -> Void
-    @State private var position = ScrollPosition()
-    @State private var sizes = CGSize.zero
-
-    func body(content: Content) -> some View {
-      content
-        .scrollPosition($position)
-        .onScrollGeometryChange(for: [CGFloat].self) { geometry in
-          [geometry.contentOffset.y + geometry.contentInsets.top, geometry.containerSize.height, geometry.contentSize.height]
-        } action: { _, value in
-          sizes = CGSize(width: value[1], height: value[2])
-          report(value[0], value[1], value[2])
-        }
-        .onChange(of: target) { _, target in
-          // (Not past the end: the last sections' titles can't come up to the top.)
-          let y = max(0, min(target.offset, sizes.height - sizes.width))
-          if target.animated {
-            withAnimation(.easeInOut(duration: 0.25)) { position.scrollTo(y: y) }
-          } else {
-            position.scrollTo(y: y)
-          }
-        }
-    }
-  }
-}
-
-/// Where each emote section's title is in the picker's scroll view (see EmotePicker).
-private struct EmoteSectionTops: PreferenceKey {
-  static var defaultValue: [String: CGFloat] = [:]
-  static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
-    value.merge(nextValue()) { $1 }
-  }
-}
