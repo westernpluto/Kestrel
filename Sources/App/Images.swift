@@ -287,7 +287,7 @@ final class ImagePipeline: @unchecked Sendable {
       waiting[key] = nil
       upgrading.remove(key)
       queued.removeAll { $0.key == key }
-      task = running.removeValue(forKey: key)
+      task = running.removeValue(forKey: key)?.task
     }
     lock.unlock()
     task?.cancel()
@@ -299,15 +299,18 @@ final class ImagePipeline: @unchecked Sendable {
   // many at once, so each comes quickly instead of all of them sharing the connection and
   // crawling. Waiting here, nothing times out.
 
-  private var queued: [(key: String, task: URLSessionTask)] = []
-  private var running: [String: URLSessionTask] = [:]
-  /// (Few: 7TV's whole connection is slow, so more at once only makes each slower; its stills
-  /// don't wait here.)
+  private var queued: [(key: String, task: URLSessionTask, host: String, at: Date)] = []
+  private var running: [String: (task: URLSessionTask, host: String)] = [:]
+  /// For each host (7TV's slowness doesn't hold up BTTV's, FFZ's or Twitch's pictures). Few: 7TV's
+  /// whole connection is slow, so more at once only makes each slower; its stills don't wait here.
   private static let downloadsAtOnce = 5
+  /// Waited this long: next, however much newer has come since (in fast chat, newer emotes kept
+  /// coming, and the strip's icons under the emote picker never did).
+  private static let longWait: TimeInterval = 8
 
-  private func enqueue(_ task: URLSessionTask, key: String) {
+  private func enqueue(_ task: URLSessionTask, key: String, host: String) {
     lock.lock()
-    queued.append((key, task))
+    queued.append((key, task, host, Date()))
     lock.unlock()
     startDownloads()
   }
@@ -315,10 +318,21 @@ final class ImagePipeline: @unchecked Sendable {
   private func startDownloads() {
     lock.lock()
     var next: [URLSessionTask] = []
-    while running.count < Self.downloadsAtOnce, let item = queued.popLast() {
+    var busy: [String: Int] = [:]
+    for item in running.values { busy[item.host, default: 0] += 1 }
+    let now = Date()
+    // Newest first, but one that's waited long goes ahead; each host up to its share.
+    while true {
+      let free = { (host: String) in busy[host, default: 0] < Self.downloadsAtOnce }
+      let index =
+        queued.indices.first { free(queued[$0].host) && now.timeIntervalSince(queued[$0].at) > Self.longWait }
+        ?? queued.indices.last { free(queued[$0].host) }
+      guard let index else { break }
+      let item = queued.remove(at: index)
       // (Its key may already be downloading, from an earlier format or retry: started anyway, the
       // last one wins the slot.)
-      running[item.key] = item.task
+      running[item.key] = (item.task, item.host)
+      busy[item.host, default: 0] += 1
       next.append(item.task)
     }
     lock.unlock()
@@ -328,7 +342,7 @@ final class ImagePipeline: @unchecked Sendable {
   /// A download ended (came, failed or called off): the next one starts.
   private func downloadEnded(_ key: String, _ task: URLSessionTask) {
     lock.lock()
-    if running[key] === task { running[key] = nil }
+    if running[key]?.task === task { running[key] = nil }
     lock.unlock()
     startDownloads()
   }
@@ -506,7 +520,7 @@ final class ImagePipeline: @unchecked Sendable {
     // Small pictures (emotes, badges) first: they're what chat is waiting on.
     if small {
       task.priority = URLSessionTask.highPriority
-      enqueue(task, key: key)
+      enqueue(task, key: key, host: url.host ?? "")
     } else {
       task.resume()
     }
