@@ -1241,6 +1241,9 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   }
 
   private func prune() {
+    // (Only once a good few have gone: in fast chat this came several times a second, each time
+    // going through every message.)
+    guard rendered.count > displayed.count + 120 || heights.count > displayed.count + 120 else { return }
     let live = Set(displayed.map(key))
     rendered = rendered.filter { live.contains($0.key) }
     heights = heights.filter { live.contains($0.key) }
