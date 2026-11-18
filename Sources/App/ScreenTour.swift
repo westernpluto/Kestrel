@@ -1,7 +1,9 @@
 // Opens one screen straight away when the app is launched for screenshots (the simulator job,
 // .github/workflows/screens.yml): `-KestrelShow browse`, `player`, `player-landscape`, `mini`,
-// `channel`, `search`, `settings`, `following`, `emotes`. Without the launch argument it does
-// nothing.
+// `channel`, `search`, `settings`, `following`, `emotes`, `emotes-scroll` (scrolled down through
+// them, as a finger would), `emotes-scroll-back` (down, then partway back up),
+// `emotes-pick-scroll` (the fourth section picked in the strip, then scrolled on). Without the
+// launch argument it does nothing.
 
 import SwiftUI
 
@@ -18,7 +20,7 @@ enum ScreenTour {
     case "browse": app.tab = .browse
     case "search": app.tab = .search
     case "settings": app.tab = .settings
-    case "channel", "player", "player-landscape", "mini", "emotes":
+    case "channel", "player", "player-landscape", "mini", "emotes", "emotes-scroll", "emotes-scroll-back", "emotes-pick-scroll":
       app.tab = .browse
       // The most watched stream right now (a sure one to be live).
       guard let top = try? await TwitchAPI.shared.topStreams(first: 1).items.first else { return }
@@ -32,12 +34,56 @@ enum ScreenTour {
       case "player-landscape": OrientationLock.force(.landscape)
       case "mini": withAnimation { app.playerMinimized = true }
       case "emotes": NotificationCenter.default.post(name: openEmotes, object: nil)
+      case "emotes-scroll", "emotes-scroll-back", "emotes-pick-scroll":
+        NotificationCenter.default.post(name: openEmotes, object: nil)
+        try? await Task.sleep(nanoseconds: 5_000_000_000)
+        if screen == "emotes-pick-scroll" {
+          NotificationCenter.default.post(name: pickEmoteSection, object: nil)
+          try? await Task.sleep(nanoseconds: 1_500_000_000)
+        }
+        guard let scroll = emoteScrollView() else {
+          ActivityLog.shared.add("Screen tour: no emote list to scroll")
+          return
+        }
+        let height = scroll.contentSize.height - scroll.bounds.height
+        ActivityLog.shared.add("Screen tour: emote list \(Int(scroll.contentSize.height)) tall")
+        // Moved in steps, each animated, the way a swipe moves it.
+        let start = scroll.contentOffset.y
+        let stops: [CGFloat] =
+          switch screen {
+          case "emotes-scroll": [0.15, 0.3, 0.45, 0.55].map { height * $0 }
+          case "emotes-scroll-back": [0.2, 0.45, 0.7, 0.85, 0.6, 0.42].map { height * $0 }
+          default: [120, 260, 420, 600].map { min(height, start + $0) }
+          }
+        for stop in stops {
+          scroll.setContentOffset(CGPoint(x: 0, y: stop.rounded()), animated: true)
+          try? await Task.sleep(nanoseconds: 900_000_000)
+        }
       default: break
       }
     default: break
     }
   }
 
+  /// The emote picker's list: the tallest scroll view up and down that isn't chat.
+  @MainActor
+  private static func emoteScrollView() -> UIScrollView? {
+    let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+    var found: [UIScrollView] = []
+    func walk(_ view: UIView) {
+      if let scroll = view as? UIScrollView, !(scroll is UITableView), !(scroll is UITextView),
+        scroll.contentSize.height > scroll.bounds.height + 100, scroll.bounds.width > 150
+      {
+        found.append(scroll)
+      }
+      view.subviews.forEach(walk)
+    }
+    windows.forEach(walk)
+    return found.max { $0.contentSize.height < $1.contentSize.height }
+  }
+
   /// Asks chat's message box to open the emote picker (screen tour only).
   static let openEmotes = Notification.Name("KestrelTourOpenEmotes")
+  /// Asks the emote picker to pick its fourth section, as a tap in its strip would (screen tour only).
+  static let pickEmoteSection = Notification.Name("KestrelTourPickEmoteSection")
 }
