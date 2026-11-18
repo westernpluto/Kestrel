@@ -120,37 +120,77 @@ enum HLS {
     return min(value, 3600)
   }
 
+  /// `text` without spaces, tabs or carriage returns at either end (ASCII only, which is all a
+  /// playlist's lines carry there). Foundation's trimming, used on every line before, was much of
+  /// a playlist's parse time (Twitch's ad tags run past a kilobyte each).
+  static func trim(_ text: Substring) -> Substring {
+    let bytes = text.utf8
+    var start = bytes.startIndex
+    var end = bytes.endIndex
+    func space(_ c: UInt8) -> Bool { c == 32 || c == 9 || c == 13 || c == 10 }
+    while start < end, space(bytes[start]) { start = bytes.index(after: start) }
+    while end > start, space(bytes[bytes.index(before: end)]) { end = bytes.index(before: end) }
+    return Substring(bytes[start..<end])
+  }
+
+  /// The playlist's lines (split at \n, \r\n or \r). Read as bytes: split as Characters (where
+  /// \r\n is one), a playlist took most of a millisecond, asked every second or so.
   static func lines(_ text: String) -> [Substring] {
-    text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r\n" || $0 == "\r" })
+    var out: [Substring] = []
+    let bytes = text.utf8
+    var start = bytes.startIndex
+    var i = start
+    while i != bytes.endIndex {
+      let c = bytes[i]
+      if c == 10 || c == 13 {
+        out.append(Substring(bytes[start..<i]))
+        var next = bytes.index(after: i)
+        if c == 13, next != bytes.endIndex, bytes[next] == 10 { next = bytes.index(after: next) }
+        start = next
+        i = next
+      } else {
+        i = bytes.index(after: i)
+      }
+    }
+    out.append(Substring(bytes[start..<bytes.endIndex]))
+    return out
   }
 
   /// Parses `KEY=VALUE,KEY="quoted, value"` attribute lists (everything after the first ':').
+  /// Read as bytes (the delimiters are all ASCII): as Characters it took about 30 µs a line.
   static func attributes(_ line: Substring) -> [String: String] {
     var result: [String: String] = [:]
-    let list: Substring
-    if let colon = line.firstIndex(of: ":") { list = line[line.index(after: colon)...] } else { list = line }
-    let chars = Array(list)
+    let all = Array(line.utf8)
     var i = 0
-    while i < chars.count {
+    if let colon = all.firstIndex(of: 58) { i = colon + 1 }  // ':'
+    func trimmed(_ from: Int, _ to: Int) -> String {
+      var a = from
+      var b = to
+      while a < b, all[a] == 32 || all[a] == 9 { a += 1 }
+      while b > a, all[b - 1] == 32 || all[b - 1] == 9 { b -= 1 }
+      return String(decoding: all[a..<b], as: UTF8.self)
+    }
+    let count = all.count
+    while i < count {
       let keyStart = i
-      while i < chars.count, chars[i] != "=", chars[i] != "," { i += 1 }
-      let key = String(chars[keyStart..<i]).trimmingCharacters(in: .whitespaces)
-      if i >= chars.count || chars[i] == "," {
+      while i < count, all[i] != 61, all[i] != 44 { i += 1 }  // '=' ','
+      let key = trimmed(keyStart, i)
+      if i >= count || all[i] == 44 {
         i += 1
         continue
       }
       i += 1  // '='
       var value = ""
-      if i < chars.count, chars[i] == "\"" {
+      if i < count, all[i] == 34 {  // '"'
         i += 1
         let valueStart = i
-        while i < chars.count, chars[i] != "\"" { i += 1 }
-        value = String(chars[valueStart..<min(i, chars.count)])
-        while i < chars.count, chars[i] != "," { i += 1 }
+        while i < count, all[i] != 34 { i += 1 }
+        value = String(decoding: all[valueStart..<min(i, count)], as: UTF8.self)
+        while i < count, all[i] != 44 { i += 1 }
       } else {
         let valueStart = i
-        while i < chars.count, chars[i] != "," { i += 1 }
-        value = String(chars[valueStart..<i]).trimmingCharacters(in: .whitespaces)
+        while i < count, all[i] != 44 { i += 1 }
+        value = trimmed(valueStart, i)
       }
       if !key.isEmpty { result[key] = value }
       i += 1
@@ -159,7 +199,7 @@ enum HLS {
   }
 
   static func resolve(_ uri: Substring, base: URL?) -> String {
-    let trimmed = uri.trimmingCharacters(in: .whitespaces)
+    let trimmed = String(trim(uri))
     if trimmed.hasPrefix("https://") || trimmed.hasPrefix("http://") { return trimmed }
     guard let base, let url = URL(string: trimmed, relativeTo: base) else { return trimmed }
     return url.absoluteString
@@ -239,7 +279,7 @@ struct HLSMaster {
       if line.hasPrefix("#EXT-X-STREAM-INF") {
         let a = HLS.attributes(line)
         var j = i + 1
-        while j < lines.count, lines[j].trimmingCharacters(in: .whitespaces).isEmpty || lines[j].hasPrefix("#") {
+        while j < lines.count, HLS.trim(lines[j]).isEmpty || lines[j].hasPrefix("#") {
           if lines[j].hasPrefix("#EXT-X-STREAM-INF") { break }
           j += 1
         }
@@ -298,7 +338,7 @@ struct HLSMaster {
           !keepPortrait
           && ((a["IVS-GROUPS"]?.lowercased() == "portrait") || stable.hasSuffix("portrait") || (height > width && width > 0))
         if !skipNextURI { output.append(String(line)) }
-      } else if line.hasPrefix("#") || line.trimmingCharacters(in: .whitespaces).isEmpty {
+      } else if line.hasPrefix("#") || HLS.trim(line).isEmpty {
         output.append(String(line))
       } else {
         if !skipNextURI { output.append(HLS.resolve(line, base: base)) }
@@ -402,7 +442,7 @@ struct HLSMediaPlaylist {
     var anyLiveTitle = false
 
     for raw in lines {
-      let line = raw.trimmingCharacters(in: .whitespaces)
+      let line = String(HLS.trim(raw))
       if line.isEmpty { continue }
       if line.hasPrefix("#") {
         if line.hasPrefix("#EXTINF:") {
@@ -410,7 +450,7 @@ struct HLSMediaPlaylist {
           let parts = value.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
           // (Negative, infinite or not a number: a damaged playlist. Its times built impossible
           // ranges downstream and crashed.)
-          pendingDuration = HLS.sane(Double(parts.first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""), or: 2)
+          pendingDuration = HLS.sane(Double(parts.first.map { String(HLS.trim($0)) } ?? ""), or: 2)
           pendingTitle = parts.count > 1 ? String(parts[1]) : ""
           if pendingTitle.hasPrefix("live") { anyLiveTitle = true }
         } else if line.hasPrefix("#EXT-X-PROGRAM-DATE-TIME:") {
@@ -446,7 +486,9 @@ struct HLSMediaPlaylist {
         } else if line.hasPrefix("#EXT-X-ENDLIST") {
           playlist.isEnded = true
         }
-        if line.contains("stitched-ad") || line.contains("EXT-X-CUE-OUT") || line.contains("twitch-stitched")
+        // (Looked for until found: six searches through every tag line, long ad tags included.)
+        if !playlist.hasAdSignifier,
+          line.contains("stitched-ad") || line.contains("EXT-X-CUE-OUT") || line.contains("twitch-stitched")
           || line.contains("live-video-net-stitched")
           || line.contains("twitch-maf-ad") || line.contains("twitch-trigger")
         {

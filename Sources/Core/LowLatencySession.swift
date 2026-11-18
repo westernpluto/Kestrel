@@ -142,7 +142,7 @@ actor LowLatencySession: PlaylistSource {
     // A channel streaming vertical video only: its upright renditions are the stream.
     let portraitOnly = HLSMaster.parse(text, base: base).portraitOnly
     for raw in HLS.lines(text) {
-      let line = String(raw).trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+      let line = String(raw)
       if line.hasPrefix("#EXT-X-STREAM-INF") {
         // Parse this one rendition with the regular parser (it knows the portrait/audio rules).
         let parsed = HLSMaster.parse(line + "\nplaceholder.m3u8", base: nil)
@@ -152,7 +152,7 @@ actor LowLatencySession: PlaylistSource {
         if parsed.portraitOnly { single?.isPortrait = true }
         pending = single
         pendingLine = line
-      } else if !line.hasPrefix("#"), !line.trimmingCharacters(in: .whitespaces).isEmpty, var variant = pending {
+      } else if !line.hasPrefix("#"), !HLS.trim(Substring(line)).isEmpty, var variant = pending {
         pending = nil
         if portraitOnly { variant.isPortrait = false }
         guard !variant.isPortrait else { continue }
@@ -645,7 +645,8 @@ enum LowLatencyPlaylist {
   static func filter(_ text: String, base: URL?, dropPrefetch: Bool) -> String {
     var output: [String] = []
     for raw in HLS.lines(text) {
-      let line = String(raw).trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+      // (Lines come without their \r: see HLS.lines.)
+      let line = String(raw)
       if line.hasPrefix("#") {
         if isAdTag(line) { continue }
         if line.hasPrefix("#EXT-X-TWITCH-PREFETCH:") {
@@ -654,7 +655,7 @@ enum LowLatencyPlaylist {
           continue
         }
         output.append(absolutizeTag(line, base: base))
-      } else if line.trimmingCharacters(in: .whitespaces).isEmpty {
+      } else if HLS.trim(raw).isEmpty {
         output.append(line)
       } else {
         output.append(HLS.resolve(Substring(line), base: base))
