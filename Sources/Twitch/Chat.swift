@@ -710,10 +710,7 @@ enum ThirdPartyEmotes {
     var channelComplete = true
     if let channelID, !channelID.isEmpty {
       let loaded = await EmoteSetCache.shared.channel(channelID) {
-        async let a = fetch(URL(string: "https://7tv.io/v3/users/twitch/\(channelID)")!, http) {
-          if let set = $0["emote_set"]["id"].string { SevenTVSets.remember(set, for: channelID) }
-          return parse7TV($0["emote_set"]["emotes"])
-        }
+        async let a = sevenTVChannel(channelID, http)
         async let b = fetch(URL(string: "https://api.betterttv.net/3/cached/users/twitch/\(channelID)")!, http) {
           parseBTTV($0["channelEmotes"].array + $0["sharedEmotes"].array)
         }
@@ -744,6 +741,57 @@ enum ThirdPartyEmotes {
     result.global = [section("7TV global", globals.0), section("BTTV global", globals.1), section("FFZ global", globals.2)]
       .compactMap { $0 }
     return result
+  }
+
+  /// A channel's 7TV emotes, asked for two ways at once, whichever answers first: the regular API
+  /// (its answers are cached near you, and then come in well under a second) and the slim list
+  /// (a quarter of the download and a tenth of the reading, but always from 7TV's own servers,
+  /// which can take many seconds). The other is cancelled.
+  private static func sevenTVChannel(_ channelID: String, _ http: HTTPClient) async -> [String: URL]? {
+    await firstOf(
+      { await fetch(URL(string: "https://7tv.io/v3/users/twitch/\(channelID)")!, http) {
+          if let set = $0["emote_set"]["id"].string { SevenTVSets.remember(set, for: channelID) }
+          return parse7TV($0["emote_set"]["emotes"])
+        }
+      },
+      { await sevenTVChannelSlim(channelID, http) })
+  }
+
+  /// The slim way: the channel's set (remembered from before, else looked up), fetched slim.
+  private static func sevenTVChannelSlim(_ channelID: String, _ http: HTTPClient) async -> [String: URL]? {
+    if let known = SevenTVSets.set(for: channelID), let emotes = await SevenTVSlim.set(known, http: http) {
+      // (The channel may have switched sets since: checked behind it, for next time.)
+      Task {
+        if case .set(let current)? = await SevenTVSlim.channelSet(channelID, http: http), current != known {
+          SevenTVSets.remember(current, for: channelID)
+        }
+      }
+      return emotes
+    }
+    switch await SevenTVSlim.channelSet(channelID, http: http) {
+    case .none?:
+      return [:]
+    case .set(let id)?:
+      SevenTVSets.remember(id, for: channelID)
+      return await SevenTVSlim.set(id, http: http)
+    case nil:
+      return nil
+    }
+  }
+
+  /// The first of two that comes back with something (nil: neither did); the other is cancelled.
+  static func firstOf<T: Sendable>(_ a: @escaping @Sendable () async -> T?, _ b: @escaping @Sendable () async -> T?) async -> T? {
+    await withTaskGroup(of: T?.self) { group in
+      group.addTask { await a() }
+      group.addTask { await b() }
+      for await result in group {
+        if let result {
+          group.cancelAll()
+          return result
+        }
+      }
+      return nil
+    }
   }
 
   /// One emote list: its emotes, empty when the channel has none there (404), nil when it couldn't
@@ -834,6 +882,11 @@ enum SevenTVSets {
 
   /// One 7TV emote set's emotes (a personal one), by name.
   static func emotes(of set: String, http: HTTPClient) async -> [String: URL]? {
+    // (Both ways at once, whichever answers first: see ThirdPartyEmotes.sevenTVChannel.)
+    await ThirdPartyEmotes.firstOf({ await SevenTVSlim.set(set, http: http) }, { await regular(set, http: http) })
+  }
+
+  private static func regular(_ set: String, http: HTTPClient) async -> [String: URL]? {
     guard let url = URL(string: "https://7tv.io/v3/emote-sets/\(set)") else { return nil }
     var request = URLRequest(url: url)
     request.timeoutInterval = 15
@@ -841,5 +894,57 @@ enum SevenTVSets {
       let object = try? JSONSerialization.jsonObject(with: data)
     else { return nil }
     return ThirdPartyEmotes.parse7TV(JSONValue(object)["emotes"])
+  }
+}
+
+/// 7TV's emote lists through its GraphQL API, asking only for each emote's name and picture. Its
+/// regular API sends everything about every emote (tags, its uploader's profile and connections):
+/// 2.4 MB for a big channel's list against 0.9 MB (80 KB against 290 KB over the wire), and about
+/// a tenth of the time to read. Nil whenever it doesn't work out, for the regular API to be used.
+enum SevenTVSlim {
+  enum ChannelSet: Equatable {
+    case set(String)
+    /// The channel isn't on 7TV, or has no set.
+    case none
+  }
+
+  private static func valid(_ id: String) -> Bool {
+    !id.isEmpty && id.count <= 64 && id.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
+  }
+
+  private static func query(_ text: String, http: HTTPClient) async -> JSONValue? {
+    guard let url = URL(string: "https://7tv.io/v3/gql"), let body = try? JSONSerialization.data(withJSONObject: ["query": text])
+    else { return nil }
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = body
+    request.timeoutInterval = 15
+    guard let (data, response) = try? await http.data(for: request), response.statusCode == 200,
+      let object = try? JSONSerialization.jsonObject(with: data)
+    else { return nil }
+    let json = JSONValue(object)
+    guard json["errors"].isNull else { return nil }
+    return json["data"]
+  }
+
+  private static let fields = "emotes { name data { host { url } } }"
+
+  /// A set's emotes, by name.
+  static func set(_ id: String, http: HTTPClient) async -> [String: URL]? {
+    guard valid(id), let data = await query("query { emoteSet(id: \"\(id)\") { \(fields) } }", http: http), !data["emoteSet"].isNull
+    else { return nil }
+    return ThirdPartyEmotes.parse7TV(data["emoteSet"]["emotes"])
+  }
+
+  /// Which set a Twitch channel uses on 7TV.
+  static func channelSet(_ twitchID: String, http: HTTPClient) async -> ChannelSet? {
+    guard valid(twitchID),
+      let data = await query("query { userByConnection(platform: TWITCH, id: \"\(twitchID)\") { connections { platform emote_set_id } } }", http: http)
+    else { return nil }
+    if data["userByConnection"].isNull { return ChannelSet.none }
+    let twitch = data["userByConnection"]["connections"].array.first { $0["platform"].string == "TWITCH" }
+    guard let id = twitch?["emote_set_id"].string, valid(id) else { return ChannelSet.none }
+    return .set(id)
   }
 }
