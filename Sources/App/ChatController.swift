@@ -103,6 +103,8 @@ final class ChatController: ObservableObject {
   @Published private(set) var emotesLoaded = false
   /// Every emote you can type here, by name (autocomplete).
   private(set) var usableEmotes: [NamedEmote] = []
+  /// (For the message box's suggestions: what they were found among has changed.)
+  var usableEmoteCount: Int { usableEmotes.count }
   private var emoteURLs: [String: URL] = [:]
 
   /// The picture for an emote name you can use here (the message box shows it).
@@ -1711,10 +1713,24 @@ struct ChatPanel: View {
 
   private var suggestions: [Suggestion] {
     guard account.session != nil, !chat.isReplay, let word = currentWord else { return [] }
+    // (Once per word typed: the view asks three times each time it's drawn, and each search ran
+    // through all of the channel's emotes, thousands on a big channel.)
     let query = String(word.dropFirst())
-    if word.hasPrefix(":") { return chat.emoteSuggestions(query).map(Suggestion.emote) }
-    return chat.chatterSuggestions(query).map(Suggestion.chatter)
+    // (Chatters: a short list, looked through each time, as it changes with every message.)
+    guard word.hasPrefix(":") else { return chat.chatterSuggestions(query).map(Suggestion.chatter) }
+    let key = "\(word)|\(chat.usableEmoteCount)"
+    if suggestionCache.key == key { return suggestionCache.value }
+    let found = chat.emoteSuggestions(query).map(Suggestion.emote)
+    suggestionCache.key = key
+    suggestionCache.value = found
+    return found
   }
+
+  private final class SuggestionCache {
+    var key = ""
+    var value: [Suggestion] = []
+  }
+  @State private var suggestionCache = SuggestionCache()
 
   private var suggestionStrip: some View {
     ScrollView(.horizontal, showsIndicators: false) {
