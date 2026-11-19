@@ -2309,10 +2309,20 @@ final class EmoteGridCell: UICollectionViewCell {
 
   required init?(coder: NSCoder) { fatalError() }
 
+  /// The whole animation, asked for once the emote stayed in view (called off if it goes).
+  private var animationTicket: (id: Int, url: URL)?
+
+  private func callOffAnimation() {
+    guard let ticket = animationTicket else { return }
+    animationTicket = nil
+    ImagePipeline.shared.cancel(ticket.id, ticket.url, maxPixels: Self.pixels)
+  }
+
   override func prepareForReuse() {
     super.prepareForReuse()
     loading?.cancel()
     loading = nil
+    callOffAnimation()
   }
 
   func show(_ emote: NamedEmote) {
@@ -2320,6 +2330,7 @@ final class EmoteGridCell: UICollectionViewCell {
     guard emote.url != url || loading == nil && stillView.image == nil && animatedView.shownPicture == nil else { return }
     url = emote.url
     loading?.cancel()
+    callOffAnimation()
     stillView.image = nil
     animatedView.load(nil, maxPixels: Self.pixels, fallback: nil)
     animatedView.isHidden = true
@@ -2351,7 +2362,7 @@ final class EmoteGridCell: UICollectionViewCell {
       // past).
       try? await Task.sleep(nanoseconds: 350_000_000)
       guard !Task.isCancelled else { return }
-      ImagePipeline.shared.load(url, maxPixels: Self.pixels) { [weak self] image in
+      let ticket = ImagePipeline.shared.load(url, maxPixels: Self.pixels) { [weak self] image in
         guard let self, self.url == url, let image else { return }
         guard (image.images?.count ?? 0) > 1 || self.stillView.image == nil else { return }
         self.animatedView.load(url, maxPixels: Self.pixels, fallback: nil)
@@ -2359,6 +2370,7 @@ final class EmoteGridCell: UICollectionViewCell {
         self.stillView.image = nil
         self.tile.isHidden = true
       }
+      if let ticket { self.animationTicket = (ticket, url) }
     }
   }
 
