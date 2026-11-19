@@ -20,6 +20,8 @@ final class ImagePipeline: @unchecked Sendable {
   /// Cached as a first frame, with the whole animation still decoding.
   private var upgrading: Set<String> = []
   private var failuresLogged: Set<String> = []
+  /// When each host's connection was last kept warm (see `keepWarm`).
+  private var warmedAt: [String: Date] = [:]
   /// Stills and first frames: what's on screen waits for these. Newest first: in busy chat,
   /// pictures for messages already scrolled away queued ahead of the ones just arriving (first in,
   /// first out), and the emotes in view could wait for seconds or not show before they'd gone.
@@ -159,6 +161,14 @@ final class ImagePipeline: @unchecked Sendable {
   /// emote after a quiet spell waited for a fresh secure connection to 7TV on top of 7TV's own slow
   /// answer, which made emotes drag in slow chats.
   func keepWarm(_ url: URL) {
+    // (Once a host in a while, whoever asks: every chat open asked for the same hosts, six times
+    // over in multi-view.)
+    let host = url.host ?? ""
+    lock.lock()
+    let recent = warmedAt[host].map { Date().timeIntervalSince($0) < 30 } ?? false
+    if !recent { warmedAt[host] = Date() }
+    lock.unlock()
+    guard !recent else { return }
     var request = URLRequest(url: url)
     request.httpMethod = "HEAD"
     request.cachePolicy = .reloadIgnoringLocalCacheData
