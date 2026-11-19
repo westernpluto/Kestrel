@@ -838,7 +838,9 @@ struct FollowingView: View {
           .foregroundColor(recordings.active.isEmpty ? .accentTeal : .liveRed)
           .frame(width: 28)
         Text("Recordings").font(.headline)
-        Text("\(recordings.recordings.count)").font(.subheadline.weight(.semibold)).foregroundColor(.secondary)
+        // (Broadcasts, as the list shows them: a recording started again, after Kestrel was closed
+        // or by hand, is another piece of the same one, not another recording.)
+        Text("\(recordings.groups.count)").font(.subheadline.weight(.semibold)).foregroundColor(.secondary)
         if !recordings.active.isEmpty {
           Text("· recording \(recordings.active.count)").font(.subheadline).foregroundColor(.liveRed)
         }
