@@ -45,6 +45,7 @@ import MetalKit
 import SwiftUI
 import UIKit
 import simd
+import VideoToolbox
 
 /// Where the upscaler gets the picture from.
 protocol UpscaleFrameSource: AnyObject {
@@ -235,7 +236,49 @@ final class UpscaleRenderer: NSObject, MTKViewDelegate {
 
   // MARK: Rendering
 
-  private func render(_ frame: CVPixelBuffer, in view: MTKView) {
+  /// Frames in a form Metal can't read (the decoder's own compressed formats, which is what Kestrel's
+  /// player's frames are on a device): copied by VideoToolbox into plain 4:2:0 frames first. (Left
+  /// as they were, the picture enhancer couldn't use them: "a format it can't use".)
+  private var transfer: VTPixelTransferSession?
+  private var plainPool: CVPixelBufferPool?
+  private var plainPoolSize = CGSize.zero
+
+  private static let readable: Set<OSType> = [
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr10BiPlanarFullRange, kCVPixelFormatType_32BGRA,
+  ]
+
+  private func readable(_ frame: CVPixelBuffer) -> CVPixelBuffer? {
+    if Self.readable.contains(CVPixelBufferGetPixelFormatType(frame)) { return frame }
+    let width = CVPixelBufferGetWidth(frame)
+    let height = CVPixelBufferGetHeight(frame)
+    if transfer == nil { VTPixelTransferSessionCreate(allocator: kCFAllocatorDefault, pixelTransferSessionOut: &transfer) }
+    if plainPool == nil || plainPoolSize != CGSize(width: width, height: height) {
+      let attributes: [CFString: Any] = [
+        kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        kCVPixelBufferWidthKey: width, kCVPixelBufferHeightKey: height,
+        kCVPixelBufferMetalCompatibilityKey: true, kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any],
+      ]
+      plainPool = nil
+      CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attributes as CFDictionary, &plainPool)
+      plainPoolSize = CGSize(width: width, height: height)
+    }
+    guard let transfer, let plainPool else { return nil }
+    var plain: CVPixelBuffer?
+    CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, plainPool, &plain)
+    guard let plain, VTPixelTransferSessionTransferImage(transfer, from: frame, to: plain) == noErr else { return nil }
+    // (Its colour matrix kept, for the conversion to RGB.)
+    if let matrix = CVBufferCopyAttachment(frame, kCVImageBufferYCbCrMatrixKey, nil) {
+      CVBufferSetAttachment(plain, kCVImageBufferYCbCrMatrixKey, matrix, .shouldPropagate)
+    }
+    return plain
+  }
+
+  private func render(_ original: CVPixelBuffer, in view: MTKView) {
+    guard let frame = readable(original) else {
+      show(false, status: "this player's frames can't be read (\(Self.fourCC(CVPixelBufferGetPixelFormatType(original))))")
+      return
+    }
     let width = CVPixelBufferGetWidth(frame)
     let height = CVPixelBufferGetHeight(frame)
     let drawable = view.drawableSize
@@ -291,7 +334,7 @@ final class UpscaleRenderer: NSObject, MTKViewDelegate {
       encoder.setFragmentTexture(picture, index: 0)
     default:
       encoder.endEncoding()
-      show(false, status: "this player's frames are in a format it can't use")
+      show(false, status: "this player's frames are in a format it can't use (\(Self.fourCC(format)))")
       return
     }
     encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
@@ -413,6 +456,12 @@ final class UpscaleRenderer: NSObject, MTKViewDelegate {
     guard visible != showing else { return }
     showing = visible
     view?.alpha = visible ? 1 : 0
+  }
+
+  /// A pixel format's four characters, for the stats.
+  static func fourCC(_ type: OSType) -> String {
+    let bytes = [UInt8((type >> 24) & 0xFF), UInt8((type >> 16) & 0xFF), UInt8((type >> 8) & 0xFF), UInt8(type & 0xFF)]
+    return String(bytes: bytes, encoding: .ascii) ?? "\(type)"
   }
 
   private static var canReadEngine: Bool {
