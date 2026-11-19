@@ -69,17 +69,32 @@ final class ChatController: ObservableObject {
     sevenTV?.watch(set: set)
     // (Its emotes usually came with 7TV's announcement already.)
     guard personalSets[set]?.isEmpty ?? true else {
-      onUpdate(true)
+      redrawFor(user)
       return
     }
     personalSets[set] = [:]
     Task { [weak self] in
-      guard let emotes = await SevenTVSets.emotes(of: set, http: URLSessionHTTPClient(timeout: 15)), let self else { return }
+      guard let emotes = await SevenTVSets.emotes(of: set, http: Self.emoteHTTP), let self else { return }
       self.personalSets[set] = emotes
       // (Their messages already in chat get them too.)
-      if !emotes.isEmpty { self.onUpdate(true) }
+      if !emotes.isEmpty { self.redrawFor(user) }
     }
   }
+
+  /// A chatter's personal emotes came: chat redrawn if they've said something on screen, a few
+  /// together at most once a second. (Every one redrew all of chat at once, and in a big chat 7TV
+  /// tells of many: most of them hadn't said anything yet.)
+  private func redrawFor(_ user: String) {
+    guard messages.contains(where: { $0.userID == user }) || pending.contains(where: { $0.userID == user }) else { return }
+    guard !personalRedrawScheduled else { return }
+    personalRedrawScheduled = true
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+      guard let self else { return }
+      self.personalRedrawScheduled = false
+      if self.running { self.onUpdate(true) }
+    }
+  }
+  private var personalRedrawScheduled = false
 
   /// The channel's 7TV set (or a personal one) changed during the stream.
   private func setChanged(_ set: String, added: [String: URL], removed: [String]) {
