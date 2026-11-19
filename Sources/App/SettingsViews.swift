@@ -185,7 +185,7 @@ struct PlaybackSettingsView: View {
       Section {
         Toggle("Enhance picture", isOn: $settings.enhancePicture)
       } footer: {
-        Text("Cleans up the stream's compression artifacts (blocks, smearing, banding) and sharpens it up to the size it's shown at with Apple's MetalFX, at any quality: most for low ones, a light touch at 1080p. Uses a little more battery. Not in Picture in Picture. With Kestrel's player, iOS 17.4 or later.")
+        Text("When the stream is shown bigger than it is (a low quality, or the big screen), evens out its compression speckle and blocking and sharpens it up to the size it's shown at with Apple's MetalFX. Uses a little more battery. Not in Picture in Picture. With Kestrel's player, iOS 17.4 or later.")
       }
       Section {
         Toggle("Background audio", isOn: $settings.backgroundAudio)
