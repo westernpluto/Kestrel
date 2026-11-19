@@ -572,17 +572,23 @@ final class ChatController: ObservableObject {
 
   private func receive(_ task: URLSessionWebSocketTask) {
     task.receive { [weak self] result in
+      // Read here, off the main thread (in fast chat, dozens of lines a second), and only what
+      // they mean handed over.
+      var lines: [ParsedLine] = []
+      if case .success(let message) = result {
+        switch message {
+        case .string(let text): lines = Self.parse(text)
+        case .data(let data): lines = Self.parse(String(decoding: data, as: UTF8.self))
+        @unknown default: break
+        }
+      }
       Task { @MainActor in
         guard let self, self.socket === task else { return }
         switch result {
         case .failure(let error):
           self.reconnect(after: error)
-        case .success(let message):
-          switch message {
-          case .string(let text): self.handle(text)
-          case .data(let data): self.handle(String(decoding: data, as: UTF8.self))
-          @unknown default: break
-          }
+        case .success:
+          self.handle(lines)
           self.receive(task)
         }
       }
@@ -599,9 +605,22 @@ final class ChatController: ObservableObject {
     DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.connect() }
   }
 
-  private func handle(_ text: String) {
-    for line in text.split(whereSeparator: { $0 == "\r\n" || $0 == "\n" }) {
-      guard let irc = IRCMessage.parse(String(line)) else { continue }
+  /// A line from chat's connection, read: what it says, and the chat message it makes (if any).
+  private struct ParsedLine: @unchecked Sendable {
+    var irc: IRCMessage
+    var message: ChatMessage?
+  }
+
+  private nonisolated static func parse(_ text: String) -> [ParsedLine] {
+    text.split(whereSeparator: { $0 == "\r\n" || $0 == "\n" }).compactMap { line in
+      guard let irc = IRCMessage.parse(String(line)) else { return nil }
+      return ParsedLine(irc: irc, message: ChatMessage(irc: irc))
+    }
+  }
+
+  private func handle(_ lines: [ParsedLine]) {
+    for line in lines {
+      let irc = line.irc
       switch irc.command {
       case "PING":
         socket?.send(.string("PONG :\(irc.trailing ?? "tmi.twitch.tv")")) { _ in }
@@ -640,9 +659,9 @@ final class ChatController: ObservableObject {
         }
         // msg_emoteonly, msg_followersonly, msg_slowmode, msg_duplicate, …: your message didn't go out.
         if let id = irc.tags["msg-id"], id.hasPrefix("msg_") { refused(message) }
-        if let notice = ChatMessage(irc: irc) { enqueue(notice) }
+        if let notice = line.message { enqueue(notice) }
       default:
-        if let message = ChatMessage(irc: irc) {
+        if let message = line.message {
           if message.kind == .message || message.kind == .action { noteChatter(message.displayName) }
           enqueue(message)
         }
