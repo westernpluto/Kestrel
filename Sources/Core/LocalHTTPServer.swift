@@ -452,6 +452,11 @@ final class StreamProxy: @unchecked Sendable {
       let quality = request.query["q"].flatMap(Int.init)
       return .playlist(await session.masterPlaylist(only: quality))
     }
+    // A muted VOD segment, its original if Twitch still has it (see VODPlaylists).
+    if parts.count == 4, parts[2] == "u", parts[3].hasSuffix(".ts"), let vod = session as? VODPlaylists {
+      let result = await vod.segment(String(parts[3].dropLast(3)))
+      return LocalResponse(status: result.status, contentType: "video/mp2t", body: result.body)
+    }
     if parts.count == 4, parts[2] == "v", parts[3].hasSuffix(".m3u8"), let index = Int(parts[3].dropLast(5)) {
       let result = await session.mediaPlaylist(index)
       if result.status == 200 { return .playlist(result.body) }

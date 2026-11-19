@@ -188,6 +188,11 @@ struct PlaybackSettingsView: View {
         Text("When the stream is shown bigger than it is (a low quality, or the big screen), evens out its compression speckle and blocking and sharpens it up to the size it's shown at with Apple's MetalFX. Uses a little more battery. Not in Picture in Picture. With Kestrel's player, iOS 17.4 or later.")
       }
       Section {
+        Toggle("Unmute past broadcasts", isOn: $settings.unmuteVODs)
+      } footer: {
+        Text("Twitch mutes parts of past broadcasts for copyrighted music but keeps the original sound around for a while (often a day or two). Kestrel plays the original wherever Twitch still has it and the muted part where it doesn't. Applies from the next one you open.")
+      }
+      Section {
         Toggle("Background audio", isOn: $settings.backgroundAudio)
       } footer: {
         Text("Keeps the sound playing when you leave Kestrel or lock the phone.")

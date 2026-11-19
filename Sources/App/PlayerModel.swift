@@ -419,7 +419,7 @@ final class PlayerModel: ObservableObject {
       let resume = await saved
       guard !stopped else { return }
       await StreamProxy.shared.ensureResponsive()
-      let source = VODPlaylists(variants: vodVariants, http: URLSessionHTTPClient(timeout: 10))
+      let source = VODPlaylists(variants: vodVariants, http: URLSessionHTTPClient(timeout: 10), unmute: AppSettings.shared.unmuteVODs)
       _ = try StreamProxy.shared.register(source)
       vodSource = source
       var named = Set<String>()
@@ -1183,7 +1183,7 @@ final class PlayerModel: ObservableObject {
       }
       rewindVariants = variants.filter { !$0.isAudioOnly }
       guard !rewindVariants.isEmpty else { return }
-      let source = VODPlaylists(variants: rewindVariants, http: URLSessionHTTPClient(timeout: 10))
+      let source = VODPlaylists(variants: rewindVariants, http: URLSessionHTTPClient(timeout: 10), unmute: AppSettings.shared.unmuteVODs)
       _ = try? StreamProxy.shared.register(source)
       rewindSource = source
       Task.detached { await source.prefetch(0) }

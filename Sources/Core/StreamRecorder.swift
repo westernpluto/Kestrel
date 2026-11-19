@@ -93,6 +93,16 @@ final class SegmentShare: @unchecked Sendable {
     lastOffer["\(key)#\(height)"] = Date()
   }
 
+  /// The player's copy if it has it, and whether it's been playing that channel at that quality
+  /// lately (only then is it worth waiting for).
+  private func peek(_ key: String, date: Date, height: Int) -> (Data?, Bool) {
+    lock.lock()
+    defer { lock.unlock() }
+    let found = kept[key]?.first { abs($0.date.timeIntervalSince(date)) < 0.25 && $0.height == height }?.data
+    let playing = lastOffer["\(key)#\(height)"].map { Date().timeIntervalSince($0) < 6 } ?? false
+    return (found, playing)
+  }
+
   /// The player's copy of the segment starting at `date` at `height`, waiting a moment for it if
   /// the player's playing that channel now (its download may finish just after the recording's
   /// playlist lists it). Nil: download it.
@@ -100,11 +110,7 @@ final class SegmentShare: @unchecked Sendable {
     let key = login.lowercased()
     let until = Date().addingTimeInterval(wait)
     while true {
-      lock.lock()
-      let found = kept[key]?.first { abs($0.date.timeIntervalSince(date)) < 0.25 && $0.height == height }?.data
-      // (Waited for only while the player's been playing it at this very quality.)
-      let playing = lastOffer["\(key)#\(height)"].map { Date().timeIntervalSince($0) < 6 } ?? false
-      lock.unlock()
+      let (found, playing) = peek(key, date: date, height: height)
       if let found { return found }
       guard playing, Date() < until else { return nil }
       try? await Task.sleep(nanoseconds: 250_000_000)

@@ -1653,6 +1653,59 @@ func testVODPlaylists() {
   }
 }
 
+func testVODUnmute() {
+  let base = URL(string: "https://vod.test/abc_streamer_1/chunked/index-dvr.m3u8")!
+  let upstream = """
+    #EXTM3U
+    #EXT-X-PLAYLIST-TYPE:VOD
+    #EXTINF:10.000,
+    0.ts
+    #EXTINF:10.000,
+    1-muted.ts
+    #EXTINF:10.000,
+    2-muted.ts
+    #EXT-X-ENDLIST
+    """
+  check(VODPlaylists.original("https://x/1-muted.ts") == "https://x/1.ts", "original name")
+  // The CDN: the playlist, 1.ts's original still there, 2.ts's gone (403), both muted ones there.
+  final class CDN: HTTPClient, @unchecked Sendable {
+    let playlist: String
+    init(_ playlist: String) { self.playlist = playlist }
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+      let name = request.url!.lastPathComponent
+      let (status, body): (Int, String) =
+        switch name {
+        case "index-dvr.m3u8": (200, playlist)
+        case "1.ts": (200, "original-1")
+        case "1-muted.ts": (200, "muted-1")
+        case "2-muted.ts": (200, "muted-2")
+        default: (403, "")
+        }
+      return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: [:])!)
+    }
+  }
+  let variant = HLSVariant(
+    uri: base.absoluteString, bandwidth: 6_000_000, width: 1920, height: 1080, frameRate: 60, codecs: "avc1.64002A,mp4a.40.2",
+    name: "1080p60", isAudioOnly: false, isPortrait: false)
+  let source = VODPlaylists(variants: [variant], http: CDN(upstream), unmute: true)
+  let plain = VODPlaylists(variants: [variant], http: CDN(upstream))
+  runAsync {
+    let media = await source.mediaPlaylist(0)
+    check(media.body.contains("../u/0-1-muted.ts") && media.body.contains("../u/0-2-muted.ts"), "muted through local: \(media.body)")
+    check(media.body.contains("/chunked/0.ts"), "others straight from Twitch")
+    check(source.mutedParts.count == 1 && source.mutedParts.first.map { abs($0.lowerBound - 10) < 0.01 && abs($0.upperBound - 30) < 0.01 } == true, "muted before asking: \(source.mutedParts)")
+    let one = await source.segment("0-1-muted")
+    check(one.status == 200 && String(decoding: one.body, as: UTF8.self) == "original-1", "original restored")
+    let two = await source.segment("0-2-muted")
+    check(two.status == 200 && String(decoding: two.body, as: UTF8.self) == "muted-2", "falls back to muted")
+    check(source.mutedParts.count == 1 && source.mutedParts.first.map { abs($0.lowerBound - 20) < 0.01 && abs($0.upperBound - 30) < 0.01 } == true, "only the still-muted part marked: \(source.mutedParts)")
+    let unknown = await source.segment("nope")
+    check(unknown.status == 404, "unknown key")
+    let off = await plain.mediaPlaylist(0)
+    check(!off.body.contains("../u/") && off.body.contains("/chunked/1-muted.ts"), "off: untouched")
+  }
+}
+
 func testStreamTags() {
   let json = """
     {"id":"s1","viewersCount":1234,"previewImageURL":"https://x/{width}x{height}.jpg","createdAt":"2026-10-22T01:02:03Z",
@@ -3002,6 +3055,7 @@ testRestrictedVOD()
 testRaids()
 testAdFreeProxy()
 testVODPlaylists()
+testVODUnmute()
 testVODComments()
 testStreamTags()
 testAccountRoute()
