@@ -287,6 +287,7 @@ final class KestrelEngine: NSObject {
     setDecodeHere(true)
     // (Only while it's here for this: Picture in Picture and the background hand it back.)
     decodingHereForRescue = decodingHereByRequest
+    catchUpHere()
     if decodingHereForRescue {
       ActivityLog.shared.add("Kestrel player: decoding with VideoToolbox (\(why): the layer held the picture on this channel earlier)")
     }
@@ -1326,6 +1327,22 @@ final class KestrelEngine: NSObject {
     return true
   }
 
+  /// Decoding here from now, at once: the frames since the last keyframe decoded out of sight up
+  /// to the one playing now, so the picture moves again straight away instead of waiting up to a
+  /// segment for the next keyframe (the picture stayed held that long each time the layer gave out).
+  private func catchUpHere() {
+    guard !decodeInLayer, let first = group.first, first.keyframe, let session = decoderSession(for: first.format) else { return }
+    let showing = now
+    var fed = 0
+    for earlier in group {
+      guard let sample = earlier.sample(hidden: false) else { continue }
+      if earlier.pts < showing - frameLength { showFrom = max(showFrom, earlier.pts + 1) }
+      decode(sample, in: session)
+      fed += 1
+    }
+    if fed > 0 { waitingForKeyframe = false }
+  }
+
   /// A still of the frame a layer is showing.
   private func makeCover(of layer: AVSampleBufferDisplayLayer) -> CALayer? {
     let gravity = layer.videoGravity
@@ -1962,7 +1979,8 @@ final class KestrelEngine: NSObject {
       if let channelKey { Self.layerHeldOn.insert(channelKey) }
       setDecodeHere(true)
       decodingHereForRescue = decodingHereByRequest
-      ActivityLog.shared.add("Kestrel player: the picture held while frames came in (keyframes only); decoding with VideoToolbox from the next keyframe")
+      catchUpHere()
+      ActivityLog.shared.add("Kestrel player: the picture held while frames came in (keyframes only); decoding with VideoToolbox from here")
     } else if autoQuality, fit.tooSlow(), fit.step < renditions.count {
       applyFit()
       ActivityLog.shared.add("Kestrel player: the picture still held (decoded \(framesDecoded), shown \(framesShown), \(decodeErrors) errors); one quality lower")
