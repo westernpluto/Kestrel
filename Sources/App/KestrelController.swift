@@ -110,6 +110,7 @@ final class KestrelController {
         let result = await session.mediaPlaylist(index)
         return result.status == 200 ? result.body : nil
       }
+      engine.channelKey = login.lowercased()
       engine.onState = { [weak self] state in self?.engineState(state) }
       engine.setMuted(userMuted)
       engine.setVolume(volume)

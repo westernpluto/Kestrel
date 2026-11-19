@@ -43,7 +43,13 @@ final class KestrelEngine: NSObject {
   /// The screen's layer is in the Picture in Picture window (the kind with controls: iOS takes the
   /// layer itself, no copy). It goes on being fed in the background, and caught up in place.
   var screenInPictureInPicture = false {
-    didSet { if screenInPictureInPicture { leaveRescueDecoding("Picture in Picture opening") } }
+    didSet {
+      if screenInPictureInPicture {
+        leaveRescueDecoding("Picture in Picture opening")
+      } else {
+        resumeRemembered("back from Picture in Picture")
+      }
+    }
   }
   /// When the Picture in Picture window last went (see `holdScreenLayer`).
   private var pictureInPictureEndedAt = Date.distantPast
@@ -260,6 +266,32 @@ final class KestrelEngine: NSObject {
     screenBehind = true
     ActivityLog.shared.add("Kestrel player: back to the layer's decoding (\(why))")
   }
+  /// The channel playing (set by whoever made the player), to remember a layer that held the
+  /// picture on it.
+  var channelKey: String? {
+    didSet { resumeRemembered("as before on this channel") }
+  }
+
+  /// Channels whose picture the layer held (showing keyframes only) in this run of the app.
+  private static var layerHeldOn: Set<String> = []
+
+  /// On a channel where the layer has held the picture before, decoding goes back to VideoToolbox
+  /// as soon as it can (in the app, not in Picture in Picture or the background, where only the
+  /// layer decodes) instead of waiting for the picture to hold again. Handed back to the layer
+  /// for Picture in Picture and left there, the picture held again a minute or a few later, every
+  /// time (caseoh_, 1080p60: three times in an evening, each after coming back from the window).
+  private func resumeRemembered(_ why: String) {
+    guard decodeInLayer, let channelKey, Self.layerHeldOn.contains(channelKey), !inBackground, !screenInPictureInPicture,
+      UIApplication.shared.applicationState == .active
+    else { return }
+    setDecodeHere(true)
+    // (Only while it's here for this: Picture in Picture and the background hand it back.)
+    decodingHereForRescue = decodingHereByRequest
+    if decodingHereForRescue {
+      ActivityLog.shared.add("Kestrel player: decoding with VideoToolbox (\(why): the layer held the picture on this channel earlier)")
+    }
+  }
+
   /// Every decoded picture and when it's shown, while decoding here (multi-view's Picture in
   /// Picture with controls draws all the streams into one picture from these).
   var onPicture: ((CVImageBuffer, CMTime) -> Void)?
@@ -370,7 +402,10 @@ final class KestrelEngine: NSObject {
     lifecycleTokens.append(
       center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
         // Decoding is allowed again from here: catch up now if it couldn't before.
-        MainActor.assumeIsolated { self?.enteringForeground() }
+        MainActor.assumeIsolated {
+          self?.enteringForeground()
+          self?.resumeRemembered("back in the app")
+        }
       })
     displayLayer.videoGravity = .resizeAspect
     displayLayer.controlTimebase = videoClock
@@ -1924,6 +1959,7 @@ final class KestrelEngine: NSObject {
     shownPicture = nil
     pictureRescues += 1
     if decodeInLayer {
+      if let channelKey { Self.layerHeldOn.insert(channelKey) }
       setDecodeHere(true)
       decodingHereForRescue = decodingHereByRequest
       ActivityLog.shared.add("Kestrel player: the picture held while frames came in (keyframes only); decoding with VideoToolbox from the next keyframe")
