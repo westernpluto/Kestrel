@@ -154,6 +154,16 @@ final class AutoRecorder: ObservableObject {
     checking = true
     defer { checking = false }
     lastCheck = Date()
+    // Every scheduled channel in one request (one each, one after another, every 45 s before);
+    // one at a time only if that fails.
+    if let results = try? await TwitchAPI.shared.users(logins: rules.map(\.login)) {
+      let byLogin = Dictionary(results.map { ($0.0.login.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
+      for rule in rules {
+        guard let (channel, stream) = byLogin[rule.login.lowercased()], let stream else { continue }
+        startIfNeeded(rule, channel: channel, stream: stream)
+      }
+      return
+    }
     for rule in rules {
       guard let page = try? await TwitchAPI.shared.channelPage(login: rule.login), let stream = page.stream else { continue }
       startIfNeeded(rule, channel: page.channel, stream: stream)

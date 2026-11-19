@@ -225,6 +225,7 @@ final class SearchModel: ObservableObject {
   @Published private(set) var categories: [Category] = []
   /// The most watched streams right now (shown before anything's typed).
   @Published private(set) var top: [LiveStream] = []
+  private var topLoadedAt = Date.distantPast
   @Published private(set) var isLoading = false
   @Published private(set) var error: String?
   private var task: Task<Void, Never>?
@@ -289,6 +290,9 @@ final class SearchModel: ObservableObject {
   /// What's on before anything's typed: the first page straight away (the index for searching
   /// titles and tags fills in behind it).
   func loadTop(force: Bool = false) async {
+    // (Each time the tab came up: fetched again only once a minute old.)
+    if !force, !top.isEmpty, Date().timeIntervalSince(topLoadedAt) < 60 { return }
+    topLoadedAt = Date()
     do {
       let page = try await TwitchAPI.shared.topStreams(first: 30)
       top = page.items
@@ -601,6 +605,21 @@ final class FollowingStore: ObservableObject {
     if Date().timeIntervalSince(lastRefresh) > 60 { await refresh() }
   }
 
+  /// What the list was last loaded for (the account and hearted channels).
+  private var loadedFor: String?
+
+  /// For the Following tab: loaded again when what it's for has changed, else only once stale.
+  func refresh(for key: String) async {
+    if key != loadedFor {
+      // (The first time, one already under way will do; after a change, a fresh one.)
+      let changed = loadedFor != nil
+      loadedFor = key
+      if changed { await refresh(force: true) } else if Date().timeIntervalSince(lastRefresh) > 60 || !loaded { await refresh() }
+    } else {
+      await refreshIfStale()
+    }
+  }
+
   /// Runs one refresh at a time; a pull to refresh waits for the one already running.
   func refresh(force: Bool = false) async {
     if let current {
@@ -792,8 +811,9 @@ struct FollowingView: View {
       }
     }
     .navigationTitle("Following")
-    .task(id: refreshKey) { await store.refresh() }
-    .onAppear { Task { await store.refreshIfStale() } }
+    // (Again when the account or the hearted channels change, or the list is a minute old: each
+    // visit to the tab fetched every follow again.)
+    .task(id: refreshKey) { await store.refresh(for: refreshKey) }
     .sheet(isPresented: $showLogin) { TwitchLoginView() }
   }
 
