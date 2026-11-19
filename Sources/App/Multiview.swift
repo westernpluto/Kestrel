@@ -167,6 +167,28 @@ final class MultiviewModel: ObservableObject, Identifiable {
     applySound()
     if let selectedID { startChat(for: selectedID) }
     updatePictureInPicture()
+    refreshInfoTogether()
+  }
+
+  private var infoTask: Task<Void, Never>?
+
+  /// Every stream's title, category and viewers, a minute apart, in one request for all of them
+  /// (each stream asked on its own: nine requests a minute with nine streams).
+  private func refreshInfoTogether() {
+    infoTask?.cancel()
+    infoTask = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: 60_000_000_000)
+        guard !Task.isCancelled, let self, self.running else { return }
+        let logins = self.tiles.map(\.channel.login)
+        guard !logins.isEmpty, let results = try? await TwitchAPI.shared.users(logins: logins) else { continue }
+        let byLogin = Dictionary(results.map { ($0.0.login.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
+        for tile in self.tiles {
+          guard let (channel, stream) = byLogin[tile.channel.login.lowercased()] else { continue }
+          tile.player.applyInfo(channel: channel, stream: stream)
+        }
+      }
+    }
   }
 
   /// Stops everything but keeps the streams (another stream is being watched on its own); a tap
@@ -177,6 +199,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
     stopPictureInPicture()
     NowPlaying.shared.detach(multiview: self)
     running = false
+    infoTask?.cancel()
     paused = false
     for tile in tiles { tile.player.stop() }
     tiles = tiles.map { Tile(channel: $0.channel, player: makePlayer($0.channel, heard: heardIDs.contains($0.id))) }
@@ -396,6 +419,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
     for tile in tiles { tile.player.stop() }
     stopChats()
     running = false
+    infoTask?.cancel()
   }
 }
 

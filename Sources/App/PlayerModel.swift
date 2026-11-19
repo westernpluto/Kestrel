@@ -977,6 +977,9 @@ final class PlayerModel: ObservableObject {
     }
     smoothedAt = now
     let shown = ((smoothedLatency ?? value) * 10).rounded() / 10
+    // (Multi-view: only the stream heard shows it. Each change redrew its picture's tile, and with
+    // nine streams that was most of what moved twice a second.)
+    if isTile, userMuted { return }
     // Only when it moves by more than a tenth (no flicking between two neighbouring values).
     if let current = latency, abs(shown - current) < 0.15 { return }
     latency = shown
@@ -990,7 +993,8 @@ final class PlayerModel: ObservableObject {
     NowPlaying.shared.update(self)
     ScreenAwake.set(awakeKey, phase == .playing && !isPaused)
     // Every minute; every 15 s while Twitch's API doesn't list the stream yet (just started).
-    if isLive, now.timeIntervalSince(lastInfoRefresh) > (stream?.startedAt == nil && phase == .playing ? 15 : 60) {
+    // (Multi-view's streams: once they have their stream, multi-view asks for all of them together.)
+    if isLive, !(isTile && stream != nil), now.timeIntervalSince(lastInfoRefresh) > (stream?.startedAt == nil && phase == .playing ? 15 : 60) {
       lastInfoRefresh = now
       Task { await refreshInfo() }
     }
@@ -1556,8 +1560,14 @@ final class PlayerModel: ObservableObject {
     guard case .live(let channel) = target, let page = try? await TwitchAPI.shared.channelPage(login: channel.login) else {
       return
     }
-    self.channel = page.channel
-    stream = page.stream
+    applyInfo(channel: page.channel, stream: page.stream)
+  }
+
+  /// The channel and its stream as Twitch has them now (published only if they changed: every
+  /// view watching the player redraws on each).
+  func applyInfo(channel: Channel, stream: LiveStream?) {
+    if channel != self.channel { self.channel = channel }
+    if stream != self.stream { self.stream = stream }
   }
 
 }
