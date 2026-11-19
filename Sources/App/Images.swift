@@ -354,8 +354,12 @@ final class ImagePipeline: @unchecked Sendable {
   // 300 KB for the biggest tenth as WebP: busy chat sat on blanks. The same animation as AVIF is
   // about a quarter of the size, and every emote has a still picture of a couple of kilobytes.
 
-  /// AVIF is read here (iOS 17 and later, until one fails to decode a few times).
-  private var avifFailures = 0
+  /// AVIF is read here (iOS 17 and later, until one fails to decode a few times). Remembered for
+  /// this version of iOS: a device that can't read them had a few emotes fetched twice, slowly,
+  /// at every launch, finding out again.
+  private var avifFailures =
+    UserDefaults.standard.string(forKey: ImagePipeline.avifUnreadableKey) == UIDevice.current.systemVersion ? 3 : 0
+  private static let avifUnreadableKey = "images.avifUnreadableOn"
   private var avifReadable: Bool {
     guard #available(iOS 17, tvOS 17, *) else { return false }
     lock.lock()
@@ -430,7 +434,10 @@ final class ImagePipeline: @unchecked Sendable {
     avifFailures += 1
     let count = avifFailures
     lock.unlock()
-    if count == 3 { ActivityLog.shared.add("Images: this device couldn't read 7TV's AVIF emotes; using WebP") }
+    if count == 3 {
+      ActivityLog.shared.add("Images: this device couldn't read 7TV's AVIF emotes; using WebP")
+      UserDefaults.standard.set(UIDevice.current.systemVersion, forKey: Self.avifUnreadableKey)
+    }
   }
 
   /// Hands a picture to everyone waiting for it: `final` ends the wait (else it's a first frame,
