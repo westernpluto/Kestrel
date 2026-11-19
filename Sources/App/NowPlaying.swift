@@ -303,6 +303,9 @@ enum ScreenAwake {
 enum Haptics {
   private static let light = UIImpactFeedbackGenerator(style: .light)
   static func tap() { light.impactOccurred() }
+  /// The lightest tick (a seek bar crossing a chapter's edge).
+  private static let picker = UISelectionFeedbackGenerator()
+  static func selection() { picker.selectionChanged() }
 }
 
 /// Watches the audio route (see `NowPlaying.pauseForLostRoute`).

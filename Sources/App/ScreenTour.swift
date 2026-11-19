@@ -3,7 +3,7 @@
 // `channel`, `search`, `settings`, `following`, `emotes`, `emotes-scroll` (scrolled down through
 // them, as a finger would), `emotes-scroll-back` (down, then partway back up),
 // `emotes-pick-scroll` (the fourth section picked in the strip, then scrolled on). Without the
-// launch argument it does nothing.
+// launch argument it does nothing. `vod` opens a recent VOD (for its seek bar).
 
 import SwiftUI
 
@@ -17,6 +17,16 @@ enum ScreenTour {
     ActivityLog.shared.add("Screen tour: \(screen)")
     switch screen {
     case "following": app.tab = .following
+    case "vod":
+      // A VOD with chapters (caseoh_ changes category often), its controls up: the seek bar.
+      app.tab = .browse
+      for login in ["caseoh_", "xqc", "kaicenat"] {
+        guard let video = try? await TwitchAPI.shared.videos(login: login, first: 1).items.first else { continue }
+        app.playing = .video(video)
+        try? await Task.sleep(nanoseconds: 9_000_000_000)
+        NotificationCenter.default.post(name: pausePlayer, object: nil)
+        break
+      }
     case "browse": app.tab = .browse
     case "search": app.tab = .search
     case "settings": app.tab = .settings
@@ -123,6 +133,8 @@ enum ScreenTour {
 
   /// Asks chat's message box to open the emote picker (screen tour only).
   static let openEmotes = Notification.Name("KestrelTourOpenEmotes")
+  /// Asks the player to pause, so its controls stay up (screen tour only).
+  static let pausePlayer = Notification.Name("KestrelTourPausePlayer")
   /// Asks the emote picker to pick its fourth section, as a tap in its strip would (screen tour only).
   static let pickEmoteSection = Notification.Name("KestrelTourPickEmoteSection")
 }

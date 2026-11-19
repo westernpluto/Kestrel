@@ -116,6 +116,8 @@ struct PlayerVideoArea: View {
       }
       statusOverlay
         .padding(pictureInsets)
+        // (Screen tour: paused, so the controls stay up for the picture.)
+        .onReceive(NotificationCenter.default.publisher(for: ScreenTour.pausePlayer)) { _ in model.setPaused(true) }
         .animation(.easeInOut(duration: 0.25), value: model.phase)
         .animation(.easeInOut(duration: 0.2), value: model.coveringAd)
       if overlayAvailable, chatOverlay, chromeVisible, let chat {
@@ -925,16 +927,22 @@ struct UptimeText: View {
 
 // MARK: - Seek bar
 
-/// A Twitch-style seek bar: thin until touched, with a thumbnail of where you'd land, and the
-/// parts Twitch muted for copyright marked on it.
+/// A Twitch-style seek bar: thin until touched, with a thumbnail of where you'd land, the parts
+/// Twitch muted for copyright marked on it, and a broadcast's chapters (where its category or
+/// title changed) as segments with a small gap between them.
+///
+/// The track is one shape (redrawn only when the chapters or the size change) and the fill a
+/// gradient masked by it, so playback moving along only slides the fill.
 struct SeekBar: View {
   var position: Double
   var duration: Double
   var storyboard: Storyboard?
   /// Stretches to mark (muted parts), in seconds.
   var marks: [ClosedRange<Double>] = []
-  /// Moments to tick (where the category or title changed), in seconds.
+  /// Where chapters begin (where the category or title changed), in seconds.
   var ticks: [Double] = []
+  /// What's shown at a moment while dragging: the time, then anything else after " · " (the
+  /// chapter, "muted"), on a second line.
   var label: (Double) -> String
   var onStart: () -> Void = {}
   var onScrub: (Double) -> Void = { _ in }
@@ -942,8 +950,19 @@ struct SeekBar: View {
   @State private var dragTime: Double? = nil
   /// Where the thumb was let go, held until playback gets there (so it doesn't jump back).
   @State private var landedTime: Double? = nil
+  /// The chapter under the finger, to tick (a light tap) as each boundary is crossed.
+  @State private var dragChapter: Int?
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-  private static let bubbleWidth: CGFloat = 168
+  private static let bubbleWidth: CGFloat = 172
+
+  /// Chapter boundaries inside the video, in order (the first chapter's start isn't one).
+  private var boundaries: [Double] {
+    guard duration > 0 else { return [] }
+    return ticks.filter { $0 > 0.5 && $0 < duration - 0.5 }.sorted()
+  }
+
+  private func chapterIndex(_ time: Double) -> Int { boundaries.lastIndex { $0 <= time }.map { $0 + 1 } ?? 0 }
 
   var body: some View {
     GeometryReader { geometry in
@@ -951,34 +970,49 @@ struct SeekBar: View {
       let shown = dragTime ?? landedTime ?? position
       let fraction = duration > 0 ? min(1, max(0, shown / duration)) : 0
       let active = dragTime != nil
+      let height: CGFloat = active ? 10 : 4
+      let cuts = boundaries.map { CGFloat($0 / duration) }
+      let lifted = active ? dragChapter : nil
       ZStack(alignment: .leading) {
-        Capsule().fill(Color.white.opacity(0.28)).frame(height: active ? 8 : 4)
-        Capsule().fill(Color.accentTeal).frame(width: max(0, width * fraction), height: active ? 8 : 4)
+        // The track, the part played filled in, both in the chapters' shape.
+        ZStack(alignment: .leading) {
+          Rectangle().fill(Color.white.opacity(active ? 0.32 : 0.26))
+          LinearGradient(
+            colors: [Color.accentTeal.opacity(0.85), Color.accentTeal], startPoint: .leading, endPoint: .trailing
+          )
+          .frame(width: width * fraction)
+        }
+        .frame(width: width, height: height)
+        .mask(SeekTrackShape(cuts: cuts, lifted: lifted).frame(width: width, height: height))
         if duration > 0, !marks.isEmpty {
           MarkStrip(marks: marks, duration: duration)
-            .frame(width: width, height: active ? 8 : 4)
+            .frame(width: width, height: height)
+            .mask(SeekTrackShape(cuts: cuts, lifted: lifted).frame(width: width, height: height))
             .allowsHitTesting(false)
         }
-        if duration > 0, !ticks.isEmpty {
-          TickStrip(ticks: ticks, duration: duration)
-            .frame(width: width, height: active ? 14 : 10)
-            .allowsHitTesting(false)
-        }
-        // Big enough to see and grab (the whole bar's height takes the touch).
-        Circle().fill(Color.white)
-          .frame(width: active ? 24 : 17, height: active ? 24 : 17)
-          .shadow(color: .black.opacity(0.4), radius: 2)
-          .offset(x: width * fraction - (active ? 12 : 8.5))
+        // The thumb: small at rest, bigger with a ring while dragging.
+        Circle()
+          .fill(Color.white)
+          .frame(width: active ? 22 : 13, height: active ? 22 : 13)
+          .overlay(Circle().stroke(Color.accentTeal.opacity(active ? 0.9 : 0), lineWidth: 3))
+          .shadow(color: .black.opacity(0.35), radius: active ? 4 : 2, y: 1)
+          .offset(x: width * fraction - (active ? 11 : 6.5))
       }
       .frame(width: width, height: geometry.size.height)
-      .animation(active ? nil : .linear(duration: 0.5), value: position)
-      .animation(.easeOut(duration: 0.15), value: active)
+      .animation(active || reduceMotion ? nil : .linear(duration: 0.5), value: position)
+      .animation(.spring(response: 0.25, dampingFraction: 0.8), value: active)
       .contentShape(Rectangle())
       .gesture(
         DragGesture(minimumDistance: 0)
           .onChanged { value in
-            if dragTime == nil { onStart() }
+            if dragTime == nil {
+              onStart()
+              Haptics.selection()
+            }
             let time = min(1, max(0, value.location.x / width)) * duration
+            let chapter = chapterIndex(time)
+            if let previous = dragChapter, previous != chapter { Haptics.selection() }
+            dragChapter = chapter
             dragTime = time
             onScrub(time)
           }
@@ -989,6 +1023,7 @@ struct SeekBar: View {
               DispatchQueue.main.asyncAfter(deadline: .now() + 2) { landedTime = nil }
             }
             dragTime = nil
+            dragChapter = nil
           }
       )
       .onChange(of: position) { newValue in
@@ -1000,28 +1035,46 @@ struct SeekBar: View {
             .frame(width: Self.bubbleWidth)
             .offset(
               x: min(max(0, width * fraction - Self.bubbleWidth / 2), width - Self.bubbleWidth),
-              y: -(storyboard == nil ? 28 : 116))
-            .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .bottom)))
+              y: -(storyboard == nil ? 44 : 132))
+            .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .bottom)))
             .allowsHitTesting(false)
         }
       }
     }
     .frame(height: 46)
+    .accessibilityElement()
+    .accessibilityLabel("Playback position")
+    .accessibilityValue(label(position))
+    .accessibilityAdjustableAction { direction in
+      guard duration > 0 else { return }
+      let step: Double = direction == .increment ? 10 : -10
+      onCommit(min(duration, max(0, position + step)))
+    }
   }
 }
 
-/// Where a broadcast's category or title changed, as small ticks across a seek bar.
-struct TickStrip: View {
-  var ticks: [Double]
-  var duration: Double
+/// A seek bar's track: one rounded bar, or one per chapter with a small gap between them (the
+/// chapter being dragged over a little taller).
+struct SeekTrackShape: Shape {
+  /// Where chapters begin, as fractions of the whole (0…1, in order).
+  var cuts: [CGFloat]
+  /// The chapter drawn taller (the one under the finger).
+  var lifted: Int?
 
-  var body: some View {
-    Canvas { context, size in
-      for tick in ticks where tick > 0 && tick < duration {
-        let x = (size.width * tick / duration).rounded()
-        context.fill(Path(CGRect(x: x - 1, y: 0, width: 2, height: size.height)), with: .color(.white.opacity(0.85)))
-      }
+  func path(in rect: CGRect) -> Path {
+    var path = Path()
+    let gap: CGFloat = cuts.isEmpty ? 0 : 2
+    let edges = [0] + cuts + [1]
+    for index in 0..<(edges.count - 1) {
+      let start = rect.minX + rect.width * edges[index] + (index > 0 ? gap / 2 : 0)
+      let end = rect.minX + rect.width * edges[index + 1] - (index < edges.count - 2 ? gap / 2 : 0)
+      guard end - start > 0.5 else { continue }
+      // (Others a little lower than the one lifted, so it stands out.)
+      let height = lifted == nil || lifted == index ? rect.height : rect.height * 0.6
+      let piece = CGRect(x: start, y: rect.midY - height / 2, width: end - start, height: height)
+      path.addRoundedRect(in: piece, cornerSize: CGSize(width: height / 2, height: height / 2))
     }
+    return path
   }
 }
 
@@ -1081,19 +1134,30 @@ struct SeekPreviewBubble: View {
   var label: String
 
   var body: some View {
-    VStack(spacing: 4) {
+    // The time on top; the chapter (and "muted") under it.
+    let parts = label.components(separatedBy: " · ")
+    VStack(spacing: 6) {
       if let storyboard, let frame = storyboard.frame(at: time) {
         StoryboardThumbnail(board: storyboard, frame: frame)
           .frame(width: 160, height: 90)
-          .clipShape(RoundedRectangle(cornerRadius: 6))
-          .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.85), lineWidth: 1.5))
+          .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+          .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.white.opacity(0.9), lineWidth: 1.5))
       }
-      Text(label)
-        .font(.caption.weight(.semibold).monospacedDigit())
-        .padding(.horizontal, 7).padding(.vertical, 3)
-        .background(.black.opacity(0.7), in: Capsule())
+      VStack(spacing: 1) {
+        Text(parts.first ?? label)
+          .font(.footnote.weight(.bold).monospacedDigit())
+        if parts.count > 1 {
+          Text(parts.dropFirst().joined(separator: " · "))
+            .font(.caption2.weight(.medium))
+            .foregroundColor(.white.opacity(0.75))
+            .lineLimit(1)
+        }
+      }
+      .padding(.horizontal, 10).padding(.vertical, 5)
+      .background(Color.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
     }
-    .shadow(color: .black.opacity(0.5), radius: 6)
+    .foregroundColor(.white)
+    .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
   }
 }
 
