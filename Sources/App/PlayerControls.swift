@@ -476,7 +476,10 @@ struct PlayerControls: View {
   var interacted: (Double) -> Void
   @EnvironmentObject private var settings: AppSettings
   @EnvironmentObject private var app: AppModel
-  @ObservedObject private var recordings = RecordingStore.shared
+  /// (Only whether this channel is being recorded: the store itself changes every couple of
+  /// seconds while recording, and these controls were redrawn each time.)
+  @ObservedObject private var recording = RecordingStore.shared.activity
+  private var recordings: RecordingStore { RecordingStore.shared }
   @ObservedObject private var autoRecorder = AutoRecorder.shared
   /// While dragging the seek bar everything else steps aside for the preview.
   @State private var scrubbing = false
@@ -615,7 +618,7 @@ struct PlayerControls: View {
       selected: model.menuSelectedQuality,
       showStats: settings.showVideoStats,
       recordOptions: canRecord ? RecordQuality.options(from: model.qualities.map(\.label)) : [],
-      recording: canRecord ? recordings.isRecording(login) : nil,
+      recording: canRecord ? recording.isRecording(login) : nil,
       autoRecord: autoRecorder.rule(for: login) != nil,
       skipMuted: model.currentMutedParts.isEmpty ? nil : settings.skipMutedParts,
       select: { [model] in model.selectQuality($0) },
@@ -691,7 +694,7 @@ struct PlayerControls: View {
     HStack(spacing: 10) {
       if model.isLive {
         liveButton(latency: level < 4)
-        if let login = model.channel?.login, recordings.isRecording(login) {
+        if let login = model.channel?.login, recording.isRecording(login) {
           Label("REC", systemImage: "record.circle.fill")
             .font(.caption2.weight(.heavy)).foregroundColor(.liveRed).labelStyle(.titleAndIcon)
             .accessibilityLabel("Recording")

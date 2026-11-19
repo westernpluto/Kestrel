@@ -6,14 +6,36 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
+/// Which channels are being recorded (see `RecordingStore.activity`).
+@MainActor
+final class RecordingActivity: ObservableObject {
+  @Published fileprivate(set) var recordingLogins: Set<String> = []
+
+  func isRecording(_ login: String) -> Bool { recordingLogins.contains(login.lowercased()) }
+}
+
 @MainActor
 final class RecordingStore: ObservableObject {
   static let shared = RecordingStore()
 
   /// Newest first.
-  @Published private(set) var recordings: [RecordingInfo] = []
+  @Published private(set) var recordings: [RecordingInfo] = [] {
+    didSet { noteActivity() }
+  }
   /// Recordings being made (and VODs downloading), by id.
-  @Published private(set) var active: [String: RecorderStatus.State] = [:]
+  @Published private(set) var active: [String: RecorderStatus.State] = [:] {
+    didSet { noteActivity() }
+  }
+
+  /// Just which channels are being recorded, for views that need only that (the player's
+  /// controls): the store itself changes every couple of seconds while anything records (each
+  /// segment's length and size), and they were redrawn each time.
+  let activity = RecordingActivity()
+
+  private func noteActivity() {
+    let logins = Set(recordings.filter { $0.videoID == nil && active[$0.id] != nil }.map(\.login))
+    if logins != activity.recordingLogins { activity.recordingLogins = logins }
+  }
   /// VODs downloading: how far along (0…1), by id.
   @Published private(set) var downloadProgress: [String: Double] = [:]
   private var recorders: [String: StreamRecorder] = [:]
