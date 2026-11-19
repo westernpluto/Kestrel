@@ -93,7 +93,8 @@ final class EngineFrames: UpscaleFrameSource {
   private weak var engine: KestrelEngine?
   init(engine: KestrelEngine) { self.engine = engine }
   func isFor(_ other: KestrelEngine) -> Bool { engine === other }
-  func currentFrame() -> CVPixelBuffer? { engine?.displayedFrame() }
+  // (Asked from the view's drawing, which runs on the main thread, as the player does.)
+  func currentFrame() -> CVPixelBuffer? { MainActor.assumeIsolated { engine?.displayedFrame() } }
 }
 
 /// The frame a sample-buffer layer is showing (how the low-latency player draws), found inside
