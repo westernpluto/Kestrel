@@ -15,6 +15,7 @@ final class WatchHistory: ObservableObject {
 
   @Published private(set) var entries: [String: Entry] = [:]
   private let key = "watchHistory.v1"
+  private static let writes = DispatchQueue(label: "kestrel.watchHistory", qos: .utility)
   private var syncFailureLogged = false
 
   private init() {
@@ -31,7 +32,13 @@ final class WatchHistory: ObservableObject {
         entries.removeValue(forKey: old.key)
       }
     }
-    if let data = try? JSONEncoder().encode(entries) { UserDefaults.standard.set(data, forKey: key) }
+    // (Written off the main thread: all of it, up to 500 videos, every 15 s while one plays.)
+    let snapshot = entries
+    let key = self.key
+    // (One after another, so an older one never lands after a newer one.)
+    Self.writes.async {
+      if let data = try? JSONEncoder().encode(snapshot) { UserDefaults.standard.set(data, forKey: key) }
+    }
     guard syncToTwitch, TwitchAuth.shared.session != nil else { return }
     Task {
       do {
