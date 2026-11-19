@@ -140,6 +140,8 @@ final class PlayerModel: ObservableObject {
 
   /// VOD seek previews (VODs, and live streams that can be rewound).
   @Published private(set) var storyboard: Storyboard?
+  /// A VOD's chapters: where its category changed (empty when it has none, or for live).
+  @Published private(set) var chapters: [BroadcastChapter] = []
   private var storyboardSource: (url: URL, videoID: String, duration: Double?)?
 
   // VODs
@@ -422,6 +424,12 @@ final class PlayerModel: ObservableObject {
       play(StreamProxy.shared.mediaURL(for: source, index: 0), startAt: start)
       phase = .playing
       loadStoryboard(videoID: video.id, known: nil, duration: length > 0 ? length : nil)
+      // Where its category changed (Twitch's chapters), for the seek bar and the chapters menu.
+      Task { [weak self] in
+        let found = await TwitchAPI.shared.videoChapters(id: video.id)
+        guard let self, !self.stopped, found.count > 1 else { return }
+        self.chapters = found
+      }
     } catch {
       phase = .failed(error.localizedDescription)
     }

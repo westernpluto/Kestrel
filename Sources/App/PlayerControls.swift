@@ -675,6 +675,13 @@ struct PlayerControls: View {
         if let chatMode {
           chatMenu(chatMode)
         }
+        // A VOD's chapters (where its category changed): pick one to go there.
+        if !model.isLive, model.chapters.count > 1 {
+          ChaptersMenu(chapters: model.chapters, position: model.position) { time in
+            interacted(4)
+            model.seek(to: time)
+          }
+        }
         button(
           landscape ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
           label: landscape ? "Exit full screen" : "Full screen"
@@ -759,7 +766,11 @@ struct PlayerControls: View {
     } else if !model.isLive, model.duration > 0 {
       SeekBar(
         position: model.position, duration: model.duration, storyboard: model.storyboard, marks: model.mutedParts,
-        label: { [model] time in Format.duration(Int(time)) + (model.mutedParts.contains { $0.contains(time) } ? " · muted" : "") },
+        ticks: model.chapters.map(\.offset),
+        label: { [model] time in
+          Format.duration(Int(time)) + (BroadcastChapter.at(time, in: model.chapters).map { " · \($0.name)" } ?? "")
+            + (model.mutedParts.contains { $0.contains(time) } ? " · muted" : "")
+        },
         onStart: {
           scrubbing = true
           model.refreshStoryboardIfStale()
@@ -922,6 +933,8 @@ struct SeekBar: View {
   var storyboard: Storyboard?
   /// Stretches to mark (muted parts), in seconds.
   var marks: [ClosedRange<Double>] = []
+  /// Moments to tick (where the category or title changed), in seconds.
+  var ticks: [Double] = []
   var label: (Double) -> String
   var onStart: () -> Void = {}
   var onScrub: (Double) -> Void = { _ in }
@@ -944,6 +957,11 @@ struct SeekBar: View {
         if duration > 0, !marks.isEmpty {
           MarkStrip(marks: marks, duration: duration)
             .frame(width: width, height: active ? 8 : 4)
+            .allowsHitTesting(false)
+        }
+        if duration > 0, !ticks.isEmpty {
+          TickStrip(ticks: ticks, duration: duration)
+            .frame(width: width, height: active ? 14 : 10)
             .allowsHitTesting(false)
         }
         // Big enough to see and grab (the whole bar's height takes the touch).
@@ -989,6 +1007,54 @@ struct SeekBar: View {
       }
     }
     .frame(height: 46)
+  }
+}
+
+/// Where a broadcast's category or title changed, as small ticks across a seek bar.
+struct TickStrip: View {
+  var ticks: [Double]
+  var duration: Double
+
+  var body: some View {
+    Canvas { context, size in
+      for tick in ticks where tick > 0 && tick < duration {
+        let x = (size.width * tick / duration).rounded()
+        context.fill(Path(CGRect(x: x - 1, y: 0, width: 2, height: size.height)), with: .color(.white.opacity(0.85)))
+      }
+    }
+  }
+}
+
+/// A broadcast's chapters (where its category or title changed) as a menu: pick one to go there.
+struct ChaptersMenu: View {
+  var chapters: [BroadcastChapter]
+  /// Where playback is (seconds in), to tick the chapter playing.
+  var position: Double
+  /// Seconds in, as shown (on the stream's clock for a recording).
+  var timeLabel: (Double) -> String = { Format.duration(Int($0)) }
+  var seek: (Double) -> Void
+
+  var body: some View {
+    let playing = BroadcastChapter.at(position, in: chapters)
+    Menu {
+      ForEach(Array(chapters.enumerated()), id: \.offset) { _, chapter in
+        Button {
+          seek(chapter.offset)
+        } label: {
+          // When and the category, the title under it (the menu shows a second line that way).
+          Text("\(timeLabel(chapter.offset))  \(chapter.name)")
+          if let title = chapter.title, chapter.category != nil { Text(title) }
+          if chapter == playing { Image(systemName: "checkmark") }
+        }
+      }
+    } label: {
+      Image(systemName: "list.bullet.rectangle")
+        .font(.system(size: 18, weight: .semibold))
+        .frame(width: 40, height: 40)
+        .contentShape(Rectangle())
+    }
+    .accessibilityLabel("Chapters")
+    .accessibilityValue(playing?.name ?? "")
   }
 }
 

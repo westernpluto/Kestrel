@@ -218,7 +218,37 @@ final class RecordingStore: ObservableObject {
     recordings.insert(info, at: 0)
     keepAwake()
     Task { await recorder.start() }
+    watchStreamInfo()
     return id
+  }
+
+  private var infoWatch: Task<Void, Never>?
+
+  /// While anything records, its stream's title and category every minute, so a change is noted
+  /// where the recording has got to (shown as chapters when it's watched).
+  private func watchStreamInfo() {
+    guard infoWatch == nil else { return }
+    infoWatch = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: 60_000_000_000)
+        guard let self, !self.recorders.isEmpty else {
+          self?.infoWatch = nil
+          return
+        }
+        let watched = self.recorders.compactMap { id, recorder -> (String, StreamRecorder)? in
+          guard let info = self.recordings.first(where: { $0.id == id }), info.videoID == nil else { return nil }
+          return (info.login, recorder)
+        }
+        guard !watched.isEmpty,
+          let results = try? await TwitchAPI.shared.users(logins: watched.map(\.0))
+        else { continue }
+        let byLogin = Dictionary(results.map { ($0.0.login.lowercased(), $0.1) }, uniquingKeysWith: { first, _ in first })
+        for (login, recorder) in watched {
+          guard let stream = byLogin[login.lowercased()] ?? nil else { continue }
+          await recorder.noteStreamInfo(title: stream.title, category: stream.category?.name)
+        }
+      }
+    }
   }
 
   /// Stopped by hand.
@@ -356,6 +386,21 @@ struct RecordingGroup: Identifiable, Equatable {
     info.duration = pieces.reduce(0) { $0 + $1.duration }
     info.bytes = pieces.reduce(0) { $0 + $1.bytes }
     info.gaps = pieces.reduce(0) { $0 + $1.gaps } + pieces.count - 1
+    // Each piece's chapters where the piece sits in the whole (its own first chapter, or its title
+    // and category, at its start), a repeat of the one before left out.
+    var chapters: [BroadcastChapter] = []
+    var start = 0.0
+    for piece in pieces {
+      let own = piece.changes ?? [BroadcastChapter(offset: 0, title: piece.title, category: piece.category)]
+      for chapter in own {
+        var placed = chapter
+        placed.offset += start
+        if let last = chapters.last, last.title == placed.title, last.category == placed.category { continue }
+        chapters.append(placed)
+      }
+      start += piece.duration
+    }
+    info.changes = chapters.count > 1 ? chapters : nil
     return info
   }
 
@@ -596,6 +641,14 @@ struct RecordingPlayerScreen: View {
   /// Still being recorded (a VOD still downloading plays like a finished video, just shorter).
   private var recording: Bool { store.active[info.id] != nil && info.videoID == nil }
 
+  /// Where the stream's title or category changed while it recorded (empty if it didn't). Kept
+  /// up to date while it's still recording.
+  private var chapters: [BroadcastChapter] {
+    // (A broadcast in pieces: the whole's, each piece's changes where the piece sits in it.)
+    let latest = recording ? store.groups.first { $0.pieces.contains { $0.id == info.id } }?.combined.changes : nil
+    return latest ?? info.changes ?? []
+  }
+
   var body: some View {
     GeometryReader { geometry in
       let landscape = geometry.size.width > geometry.size.height
@@ -761,8 +814,12 @@ struct RecordingPlayerScreen: View {
           position: playback.position, duration: playback.end, storyboard: nil,
           // Where pieces join (stretches of the stream that weren't recorded).
           marks: joins.map { max(0, $0.at - 1)...($0.at + 1) },
-          label: { [recording, playback, base] time in
-            recording && playback.end - time < 15 ? "Latest" : Format.duration(Int((base ?? 0) + time))
+          // Where the title or category changed, and what it was there.
+          ticks: chapters.map(\.offset),
+          label: { [recording, playback, base, chapters] time in
+            let when = recording && playback.end - time < 15 ? "Latest" : Format.duration(Int((base ?? 0) + time))
+            guard let chapter = BroadcastChapter.at(time, in: chapters) else { return when }
+            return "\(when) · \(chapter.name)"
           },
           onStart: { hideTask?.cancel() },
           onCommit: { time in
@@ -804,6 +861,14 @@ struct RecordingPlayerScreen: View {
           }
         }
         Spacer()
+        if chapters.count > 1 {
+          ChaptersMenu(
+            chapters: chapters, position: playback.position, timeLabel: { [base] in Format.duration(Int((base ?? 0) + $0)) }
+          ) { time in
+            playback.seek(to: time)
+            scheduleHide()
+          }
+        }
         Button {
           withAnimation(.easeInOut(duration: 0.25)) { fill.toggle() }
           scheduleHide()

@@ -487,6 +487,35 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
 
   private static let globalBadges = Locked<[String: Badge]?>(nil)
 
+  /// A VOD's chapters: where its category changed (Twitch keeps those, not title changes).
+  /// Empty when it has none or they couldn't be had.
+  func videoChapters(id: String) async -> [BroadcastChapter] {
+    guard
+      let data = try? await query(
+        """
+        query null($id: ID) {
+          video(id: $id) {
+            moments(momentRequestType: VIDEO_CHAPTER_MARKERS) {
+              edges { node { description positionMilliseconds details { ... on GameChangeMomentDetails { game { displayName } } } } }
+            }
+          }
+        }
+        """, variables: ["id": id])
+    else { return [] }
+    return Self.chapters(data["video"]["moments"]["edges"])
+  }
+
+  /// Chapters from a VOD's moments, in order.
+  static func chapters(_ edges: JSONValue) -> [BroadcastChapter] {
+    edges.array.compactMap { edge -> BroadcastChapter? in
+      let node = edge["node"]
+      guard let position = node["positionMilliseconds"].double else { return nil }
+      let name = node["details"]["game"]["displayName"].string ?? node["description"].string
+      return BroadcastChapter(offset: position / 1000, title: nil, category: name)
+    }
+    .sorted { $0.offset < $1.offset }
+  }
+
   func badges(channelID: String?) async -> [String: Badge] {
     var result: [String: Badge] = [:]
     func add(_ list: [JSONValue]) {

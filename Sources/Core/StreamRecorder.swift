@@ -45,6 +45,25 @@ struct RecordingInfo: Codable, Sendable, Identifiable, Equatable {
   var firstSegmentAt: Date? = nil
   /// A downloaded VOD (not a recording of a live stream): the video's id.
   var videoID: String? = nil
+  /// The stream's title and category as they changed while it recorded (the first at 0); nil
+  /// while nothing's changed (the title and category above stand for all of it).
+  var changes: [BroadcastChapter]? = nil
+}
+
+/// A stretch of a broadcast under one title and category: from `offset` seconds in (into a
+/// recording, or into a VOD) until the next.
+struct BroadcastChapter: Codable, Sendable, Equatable {
+  var offset: Double
+  var title: String?
+  var category: String?
+
+  /// The one playing at `time` (seconds in), of chapters in order.
+  static func at(_ time: Double, in chapters: [BroadcastChapter]) -> BroadcastChapter? {
+    chapters.last { $0.offset <= time + 0.5 } ?? chapters.first
+  }
+
+  /// What a chapter is called: its category, or its title when there's no category.
+  var name: String { category ?? title ?? "" }
 }
 
 extension RecordingInfo {
@@ -371,6 +390,25 @@ actor StreamRecorder {
 
   private func writeInfo() {
     Self.save(info, in: directory)
+  }
+
+  /// The stream's title and category now: a change from what's recorded so far is noted where
+  /// the recording has got to (the app asks every minute while it records).
+  func noteStreamInfo(title: String?, category: String?) {
+    guard !finished else { return }
+    let title = title.flatMap { $0.isEmpty ? nil : $0 }
+    let current = info.changes?.last.map { ($0.title, $0.category) } ?? (info.title, info.category)
+    // (Not known now is not a change: what was known stays.)
+    let newTitle = title ?? current.0
+    let newCategory = category ?? current.1
+    guard newTitle != current.0 || newCategory != current.1 else { return }
+    var changes = info.changes ?? [BroadcastChapter(offset: 0, title: info.title, category: info.category)]
+    // (Changed again before any of the last one was recorded: that one's replaced.)
+    if let last = changes.last, info.duration - last.offset < 1, changes.count > 1 { changes.removeLast() }
+    changes.append(BroadcastChapter(offset: info.duration, title: newTitle, category: newCategory))
+    info.changes = changes
+    writeInfo()
+    publish(lastPublished?.state ?? .recording)
   }
 
   static func save(_ info: RecordingInfo, in directory: URL) {

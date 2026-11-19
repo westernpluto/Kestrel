@@ -486,6 +486,21 @@ func testPersonalEmotesAhead() {
   check(plain == ["channel-lul", "clap"], "without personal ones, the channel's (\(plain))")
 }
 
+/// A VOD's chapters from Twitch's moments (as it answered for a real one), and which is playing.
+func testVideoChapters() {
+  let edges = JSONValue([
+    ["node": ["description": "Family Feud", "positionMilliseconds": 1_169_000, "details": ["game": ["displayName": "Family Feud"]]]],
+    ["node": ["description": "Just Chatting", "positionMilliseconds": 0, "details": ["game": ["displayName": "Just Chatting"]]]],
+    ["node": ["description": "Minecraft", "positionMilliseconds": 11_796_000, "details": [:] as [String: Any]]],
+  ] as [Any])
+  let chapters = TwitchAPI.chapters(edges)
+  check(chapters.map(\.name) == ["Just Chatting", "Family Feud", "Minecraft"], "in order (\(chapters.map(\.name)))")
+  check(chapters.map(\.offset) == [0, 1169, 11796], "where each begins")
+  check(BroadcastChapter.at(1000, in: chapters)?.name == "Just Chatting", "playing at 1000 s")
+  check(BroadcastChapter.at(1169, in: chapters)?.name == "Family Feud", "from its start")
+  check(BroadcastChapter.at(20000, in: chapters)?.name == "Minecraft", "the last to the end")
+}
+
 func testMasterParsing() {
   // Damaged input (found by fuzzing): reads past the data give zeros, odd lengths are kept sane.
   check(MP4.u32(Data([1, 2]), 0) == 0 && MP4.type(Data([1]), 0) == "" && MP4.byte(Data(), 5) == 0, "MP4 reads past the end")
@@ -2951,6 +2966,7 @@ testAdCoveringScenarios()
 testEmoteListsAsTheyCome()
 testEmoteShapes()
 testPersonalEmotesAhead()
+testVideoChapters()
 testTimelineAndRender()
 testSession(lowLatency: true)
 testSession(lowLatency: false)
