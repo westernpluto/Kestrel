@@ -57,8 +57,14 @@ final class KestrelEngine: NSObject {
   /// under the still on the way back, and for 3 s after. Swapped for a fresh layer just after the
   /// window came back, the old one went black for a frame and an old still showed until the new
   /// one drew (and the window's controller was made again on top of that).
+  /// Kept too while the app isn't active (coming back, or on its way out): Picture in Picture can
+  /// start from there at any moment, and it starts on the layer its controller was made for.
+  /// Swapped then, the window opened on the old layer, no longer fed, and its picture stood still
+  /// until the app came back (it came back and left again a moment later, the catch-up in
+  /// between).
   private var holdScreenLayer: Bool {
     screenInPictureInPicture || handbackCover != nil || Date().timeIntervalSince(pictureInPictureEndedAt) < 3
+      || UIApplication.shared.applicationState != .active
   }
 
   /// The window's gone and the picture is back in the app.
