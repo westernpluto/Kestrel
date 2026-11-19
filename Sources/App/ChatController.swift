@@ -809,7 +809,11 @@ enum ChatRenderer {
     }
     // (Its shape from a first frame decoded ahead if the picture isn't in yet: no re-layout when it comes.)
     let shape = image ?? ImagePipeline.shared.still(url, maxPixels: 112)
-    let ratio = shape.map { $0.size.height > 0 ? min(4, $0.size.width / $0.size.height) : 1 } ?? 1
+    // (As the emote lists say it is, before and after the picture comes, so its room never
+    // changes: a square widened when the picture came re-laid out the message, and a picture made
+    // smaller is a hair off its list's shape, which did too.)
+    let ratio = EmoteShapes.ratio(url).map { min(4, CGFloat($0)) }
+      ?? shape.map { $0.size.height > 0 ? min(4, $0.size.width / $0.size.height) : 1 } ?? 1
     let size = CGSize(width: (height * ratio).rounded(), height: height)
     let attachment = NSTextAttachment()
     attachment.image = UIImage()

@@ -142,6 +142,11 @@ struct JSONValue {
     return nil
   }
   var bool: Bool? { (raw as? NSNumber)?.boolValue ?? (raw as? Bool) }
+  var double: Double? {
+    if let n = raw as? NSNumber { return n.doubleValue }
+    if let s = raw as? String { return Double(s) }
+    return nil
+  }
   var array: [JSONValue] { (raw as? [Any])?.map(JSONValue.init) ?? [] }
   var dictionary: [String: JSONValue] { ((raw as? [String: Any]) ?? [:]).mapValues(JSONValue.init) }
   var isNull: Bool { raw == nil }

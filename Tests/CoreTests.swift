@@ -451,6 +451,22 @@ func testEmoteListsAsTheyCome() {
   check(whole.complete && whole.byName.count == 2 && whole.global.count == 1 && whole.channel.count == 1, "put together whole")
 }
 
+/// Emote shapes from the lists: a wide 7TV emote's and an FFZ one's noted, a square one left out.
+func testEmoteShapes() {
+  let seventv = JSONValue([
+    ["name": "WIDE", "data": ["host": ["url": "//cdn.7tv.app/emote/WIDE1", "files": [
+      ["name": "1x.webp", "width": 72, "height": 32], ["name": "2x.webp", "width": 144, "height": 64],
+    ]]]],
+    ["name": "SQ", "data": ["host": ["url": "//cdn.7tv.app/emote/SQ1", "files": [["name": "2x.webp", "width": 64, "height": 64]]]]],
+  ] as [Any])
+  let map = ThirdPartyEmotes.parse7TV(seventv)
+  check(map["WIDE"].flatMap(EmoteShapes.ratio) == 2.25, "a wide 7TV emote's shape (\(String(describing: map["WIDE"].flatMap(EmoteShapes.ratio))))")
+  check(map["SQ"].flatMap(EmoteShapes.ratio) == nil, "a square one isn't kept")
+  let ffz = JSONValue(["1": ["emoticons": [["name": "LONG", "width": 96, "height": 32, "urls": ["2": "//cdn.frankerfacez.com/emote/9/2"]]]]] as [String: Any])
+  let ffzMap = ThirdPartyEmotes.parseFFZ(ffz)
+  check(ffzMap["LONG"].flatMap(EmoteShapes.ratio) == 3, "an FFZ emote's shape")
+}
+
 func testMasterParsing() {
   // Damaged input (found by fuzzing): reads past the data give zeros, odd lengths are kept sane.
   check(MP4.u32(Data([1, 2]), 0) == 0 && MP4.type(Data([1]), 0) == "" && MP4.byte(Data(), 5) == 0, "MP4 reads past the end")
@@ -2914,6 +2930,7 @@ testAdsSeenInCopies()
 testAdSeamsOnRealSegments()
 testAdCoveringScenarios()
 testEmoteListsAsTheyCome()
+testEmoteShapes()
 testTimelineAndRender()
 testSession(lowLatency: true)
 testSession(lowLatency: false)

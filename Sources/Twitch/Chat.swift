@@ -617,6 +617,61 @@ final class PartialEmoteSets: @unchecked Sendable {
   }
 }
 
+/// Emotes' shapes (width over height), from the emote lists: chat leaves an emote its exact room
+/// before its picture has come, rather than a square that the picture then widened (re-laying out
+/// the message, and chat jumping, each time one came in). Kept on disk, so they're known at once
+/// next time.
+enum EmoteShapes {
+  private static let lock = NSLock()
+  private static var ratios: [String: Double] = [:]
+  private static var loaded = false
+  private static var saveScheduled = false
+
+  private static var file: URL? {
+    FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("EmoteShapes.json")
+  }
+
+  private static func loadIfNeeded() {
+    guard !loaded else { return }
+    loaded = true
+    if let file, let data = try? Data(contentsOf: file), let stored = try? JSONDecoder().decode([String: Double].self, from: data) {
+      ratios.merge(stored) { current, _ in current }
+    }
+  }
+
+  static func note(_ url: URL, width: Double, height: Double) {
+    guard width > 0, height > 0, width.isFinite, height.isFinite else { return }
+    // (Square ones aren't worth keeping: a square is what's left anyway.)
+    let ratio = (width / height * 1000).rounded() / 1000
+    lock.lock()
+    loadIfNeeded()
+    let key = url.absoluteString
+    let changed = ratio != 1 && ratios[key] != ratio
+    if changed { ratios[key] = ratio }
+    if ratio == 1, ratios[key] != nil { ratios[key] = nil }
+    let save = changed && !saveScheduled
+    if save { saveScheduled = true }
+    lock.unlock()
+    if save {
+      DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) {
+        lock.lock()
+        saveScheduled = false
+        let snapshot = ratios
+        lock.unlock()
+        if let file, let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: file, options: .atomic) }
+      }
+    }
+  }
+
+  /// Width over height, if the lists said (nil: square, or not known).
+  static func ratio(_ url: URL) -> Double? {
+    lock.lock()
+    defer { lock.unlock() }
+    loadIfNeeded()
+    return ratios[url.absoluteString]
+  }
+}
+
 /// Emote sets fetched lately, kept in memory: the global ones once a session (half an hour),
 /// each channel's for ten minutes. Every chat opened (switching chats in multi-view, above all)
 /// fetched all six sets again and waited for the slowest before showing anything.
@@ -858,9 +913,17 @@ enum ThirdPartyEmotes {
     for emote in emotes.array {
       guard let name = emote["name"].string, let host = emote["data"]["host"]["url"].string else { continue }
       let base = host.hasPrefix("//") ? "https:" + host : host
-      let files = emote["data"]["host"]["files"].array.compactMap { $0["name"].string }
+      let fileList = emote["data"]["host"]["files"].array
+      let files = fileList.compactMap { $0["name"].string }
       let file = files.first { $0 == "2x.webp" } ?? files.first { $0.hasSuffix(".webp") } ?? "2x.webp"
-      if let url = URL(string: "\(base)/\(file)") { result[name] = url }
+      if let url = URL(string: "\(base)/\(file)") {
+        result[name] = url
+        if let info = fileList.first(where: { $0["name"].string == file }), let width = info["width"].double,
+          let height = info["height"].double
+        {
+          EmoteShapes.note(url, width: width, height: height)
+        }
+      }
     }
     return result
   }
@@ -886,7 +949,10 @@ enum ThirdPartyEmotes {
             ?? emote["urls"]["2"].string ?? emote["urls"]["1"].string
         else { continue }
         if link.hasPrefix("//") { link = "https:" + link }
-        if let url = URL(string: link) { result[name] = url }
+        if let url = URL(string: link) {
+          result[name] = url
+          if let width = emote["width"].double, let height = emote["height"].double { EmoteShapes.note(url, width: width, height: height) }
+        }
       }
     }
     return result
@@ -968,7 +1034,8 @@ enum SevenTVSlim {
     return json["data"]
   }
 
-  private static let fields = "emotes { name data { host { url } } }"
+  // (With each WebP's size: chat leaves an emote's exact room before its picture comes.)
+  private static let fields = "emotes { name data { host { url files(formats: [WEBP]) { name width height } } } }"
 
   /// A set's emotes, by name.
   static func set(_ id: String, http: HTTPClient) async -> [String: URL]? {
