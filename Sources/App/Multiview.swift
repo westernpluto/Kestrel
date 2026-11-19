@@ -21,9 +21,12 @@ final class MultiviewModel: ObservableObject, Identifiable {
     var id: String { channel.id }
   }
 
-  /// Six at most: with nine, the phone ran out of memory (the app quit, or the phone restarted its
-  /// home screen).
-  static let maxTiles = 6
+  /// Nine at most. (With nine the phone once ran out of memory: past six, chats are kept only for
+  /// the stream picked and the two picked before it, and each picture is only as sharp as its
+  /// small place in the grid.)
+  static let maxTiles = 9
+  /// Past this many streams, not every chat is kept connected (see `startChat`).
+  static let allChatsUpTo = 6
   /// Between one stream starting and the next (see `start`).
   private static let startSpacing: UInt64 = 450_000_000
   private var startTask: Task<Void, Never>?
@@ -95,6 +98,15 @@ final class MultiviewModel: ObservableObject, Identifiable {
     let heard = tiles.isEmpty
     let player = makePlayer(channel, heard: heard)
     tiles.append(Tile(channel: channel, player: player))
+    // (Past six streams, the chats kept connected come down to the last three picked.)
+    if tiles.count > Self.allChatsUpTo {
+      var keep = Set(chatOrder.suffix(3))
+      if let selectedID { keep.insert(selectedID) }
+      for (id, controller) in chats where !keep.contains(id) {
+        controller.stop()
+        chats[id] = nil
+      }
+    }
     if heard { heardIDs.insert(channel.id) }
     if selectedID == nil { select(channel.id) }
     if running { Task { await player.start() } }
@@ -197,16 +209,28 @@ final class MultiviewModel: ObservableObject, Identifiable {
   /// once, messages and emotes already in (each switch used to connect and load it from nothing).
   private var chats: [String: ChatController] = [:]
 
+  /// The chats picked lately, newest last (past `allChatsUpTo` streams, only the last three stay).
+  private var chatOrder: [String] = []
+
   private func startChat(for id: String) {
     guard let tile = tiles.first(where: { $0.id == id }), chat?.channel.id != tile.channel.id else { return }
     chat = chatController(for: tile)
+    chatOrder.removeAll { $0 == id }
+    chatOrder.append(id)
+    // Many streams: only the chat picked and the two picked before it stay connected (each keeps
+    // its messages, emote lists and pictures in memory; with nine, the phone ran out of it).
+    guard tiles.count <= Self.allChatsUpTo else {
+      for old in chatOrder.dropLast(3) { chats.removeValue(forKey: old)?.stop() }
+      chatOrder = Array(chatOrder.suffix(3))
+      return
+    }
     // The others' chats come up in the background, a moment apart, ready for a switch.
     let others = tiles.filter { $0.id != id && chats[$0.id] == nil }
     guard !others.isEmpty else { return }
     Task { [weak self] in
       for tile in others {
         try? await Task.sleep(nanoseconds: 700_000_000)
-        guard let self, self.running, self.tiles.contains(where: { $0.id == tile.id }) else { return }
+        guard let self, self.running, self.tiles.count <= Self.allChatsUpTo, self.tiles.contains(where: { $0.id == tile.id }) else { return }
         _ = self.chatController(for: tile)
       }
     }
