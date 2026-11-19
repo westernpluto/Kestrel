@@ -35,7 +35,12 @@ final class SevenTVEvents {
   }
 
   /// Live changes to this emote set (the channel's, or someone's personal one).
-  func watch(set: String) {
+  /// - Parameter essential: the channel's own set (always); chatters' personal sets only up to a
+  ///   limit (in a big chat there are thousands, each a subscription on 7TV's connection, which
+  ///   allows only so many; their emotes come with 7TV's announcement anyway, so this is only for
+  ///   a set changed while chat runs).
+  func watch(set: String, essential: Bool = false) {
+    guard essential || subscribedSets.count < 150 else { return }
     guard subscribedSets.insert(set).inserted else { return }
     send(["op": 35, "d": ["type": "emote_set.update", "condition": ["object_id": set]]])
   }
@@ -49,8 +54,9 @@ final class SevenTVEvents {
     send(["op": 35, "d": ["type": "entitlement.create", "condition": channel]])
     let sets = subscribedSets
     subscribedSets = []
+    // (The channel's own first: it's never left out.)
+    if let set = SevenTVSets.set(for: channelID) { watch(set: set, essential: true) }
     for set in sets { watch(set: set) }
-    if let set = SevenTVSets.set(for: channelID) { watch(set: set) }
     receive(task)
   }
 

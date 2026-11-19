@@ -218,7 +218,7 @@ final class ChatController: ObservableObject {
       if !emotes.complete { retryEmotes(attempt: 1) }
       keepImagesWarm()
       // (The channel's 7TV set is known now, on a first visit: its live changes from here.)
-      if let set = SevenTVSets.set(for: channel.id) { sevenTV?.watch(set: set) }
+      if let set = SevenTVSets.set(for: channel.id) { sevenTV?.watch(set: set, essential: true) }
       // The channel's own emotes' still pictures fetched ahead, so the picker shows them at once.
       // (They stay on disk, so this is mostly once per channel. A little after the chat opens, and
       // not too many: 7TV's connection is slow all told, and the emotes chat is showing come
