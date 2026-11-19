@@ -161,14 +161,17 @@ final class LiveIndex {
   private var fetchedAt = Date.distantPast
   private var loading: Task<[LiveStream], Never>?
 
-  func load(force: Bool = false) async -> [LiveStream] {
+  /// - Parameter firstPage: the first page, if it's just been fetched (Search's top streams are
+  ///   the same page: it was fetched twice).
+  func load(force: Bool = false, firstPage: Page<LiveStream>? = nil) async -> [LiveStream] {
     if !force, !streams.isEmpty, Date().timeIntervalSince(fetchedAt) < 120 { return streams }
     if let loading { return await loading.value }
     let task = Task { () -> [LiveStream] in
       // Twitch's own page size (bigger pages came back empty).
-      var all: [LiveStream] = []
-      var cursor: String?
-      for _ in 0..<7 {
+      var all: [LiveStream] = firstPage?.items ?? []
+      var cursor: String? = firstPage?.cursor
+      if let firstPage, !firstPage.hasNextPage || cursor == nil { return all }
+      for _ in 0..<(firstPage == nil ? 7 : 6) {
         guard let page = try? await TwitchAPI.shared.topStreams(after: cursor, first: 30), !page.items.isEmpty else { break }
         all += page.items
         cursor = page.cursor
@@ -293,14 +296,16 @@ final class SearchModel: ObservableObject {
     // (Each time the tab came up: fetched again only once a minute old.)
     if !force, !top.isEmpty, Date().timeIntervalSince(topLoadedAt) < 60 { return }
     topLoadedAt = Date()
+    var first: Page<LiveStream>?
     do {
       let page = try await TwitchAPI.shared.topStreams(first: 30)
+      first = page
       top = page.items
       topError = page.items.isEmpty ? "Nothing live came back from Twitch." : nil
     } catch {
       if top.isEmpty { topError = error.localizedDescription }
     }
-    Task { _ = await LiveIndex.shared.load(force: force) }
+    Task { [first] in _ = await LiveIndex.shared.load(force: force, firstPage: first) }
   }
 
   /// Back on the search after a while: fetch the results again (live or not, viewers).
