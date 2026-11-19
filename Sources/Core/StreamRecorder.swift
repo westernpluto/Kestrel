@@ -50,6 +50,68 @@ struct RecordingInfo: Codable, Sendable, Identifiable, Equatable {
   var changes: [BroadcastChapter]? = nil
 }
 
+/// Live segments the player has just downloaded, kept a little while so a recording of the same
+/// channel at the same quality takes them instead of downloading them again. (Watching a channel
+/// while it recorded fetched every segment twice, the recording's through a far ad-free server, and
+/// the player, short of bandwidth, stalled.)
+final class SegmentShare: @unchecked Sendable {
+  static let shared = SegmentShare()
+  private let lock = NSLock()
+  /// Channels being recorded (lowercased), and how many recordings of each.
+  private var wanted: [String: Int] = [:]
+  private var kept: [String: [(date: Date, height: Int, data: Data)]] = [:]
+  private var lastOffer: [String: Date] = [:]
+
+  func want(_ login: String, _ on: Bool) {
+    let key = login.lowercased()
+    lock.lock()
+    defer { lock.unlock() }
+    let count = max(0, (wanted[key] ?? 0) + (on ? 1 : -1))
+    wanted[key] = count == 0 ? nil : count
+    if count == 0 {
+      kept[key] = nil
+      lastOffer = lastOffer.filter { !$0.key.hasPrefix(key + "#") }
+    }
+  }
+
+  func wants(_ login: String) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return wanted[login.lowercased()] != nil
+  }
+
+  /// A whole segment the player downloaded: its program date and rendition's height.
+  func offer(login: String, date: Date, height: Int, data: Data) {
+    let key = login.lowercased()
+    lock.lock()
+    defer { lock.unlock() }
+    guard wanted[key] != nil else { return }
+    var list = kept[key] ?? []
+    list.append((date, height, data))
+    if list.count > 10 { list.removeFirst(list.count - 10) }
+    kept[key] = list
+    lastOffer["\(key)#\(height)"] = Date()
+  }
+
+  /// The player's copy of the segment starting at `date` at `height`, waiting a moment for it if
+  /// the player's playing that channel now (its download may finish just after the recording's
+  /// playlist lists it). Nil: download it.
+  func take(login: String, date: Date, height: Int, wait: TimeInterval = 2.5) async -> Data? {
+    let key = login.lowercased()
+    let until = Date().addingTimeInterval(wait)
+    while true {
+      lock.lock()
+      let found = kept[key]?.first { abs($0.date.timeIntervalSince(date)) < 0.25 && $0.height == height }?.data
+      // (Waited for only while the player's been playing it at this very quality.)
+      let playing = lastOffer["\(key)#\(height)"].map { Date().timeIntervalSince($0) < 6 } ?? false
+      lock.unlock()
+      if let found { return found }
+      guard playing, Date() < until else { return nil }
+      try? await Task.sleep(nanoseconds: 250_000_000)
+    }
+  }
+}
+
 /// A stretch of a broadcast under one title and category: from `offset` seconds in (into a
 /// recording, or into a VOD) until the next.
 struct BroadcastChapter: Codable, Sendable, Equatable {
@@ -113,6 +175,8 @@ actor StreamRecorder {
   }
 
   private var variantURL: URL?
+  /// The recorded rendition's height (lines), to match the player's segments (see SegmentShare).
+  private var recordedHeight: Int?
   private var lastSequence: Int?
   private var entries: [Entry] = []
   private var pendingDiscontinuity = false
@@ -152,6 +216,7 @@ actor StreamRecorder {
     guard task == nil else { return }
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     writeInfo()
+    SegmentShare.shared.want(login, true)
     task = Task { [weak self] in await self?.run() }
   }
 
@@ -241,6 +306,7 @@ actor StreamRecorder {
       }
     }
     variantURL = URL(string: uri)
+    recordedHeight = maxHeight == nil ? renditions[0].height : pick.height
     if info.quality.isEmpty || info.quality != label {
       if !info.quality.isEmpty { pendingDiscontinuity = true }
       info.quality = label
@@ -273,8 +339,14 @@ actor StreamRecorder {
       index += batch.count
       let results = await withTaskGroup(of: (Int, Data?).self) { group -> [Int: Data] in
         for (position, item) in batch.enumerated() where !item.segment.isAd {
-          group.addTask { [mediaHTTP] in
-            (position, await Self.download(item.segment.uri, http: mediaHTTP))
+          group.addTask { [mediaHTTP, login, recordedHeight] in
+            // The player's copy, if it's playing this channel at this quality (a plain TS segment).
+            if item.segment.map == nil, let date = item.segment.pdt, let height = recordedHeight,
+              let shared = await SegmentShare.shared.take(login: login, date: date, height: height), shared.first == 0x47
+            {
+              return (position, shared)
+            }
+            return (position, await Self.download(item.segment.uri, http: mediaHTTP))
           }
         }
         var out: [Int: Data] = [:]
@@ -443,6 +515,7 @@ actor StreamRecorder {
   private func finish(_ reason: String) {
     guard !finished else { return }
     finished = true
+    SegmentShare.shared.want(login, false)
     info.endedAt = Date()
     info.endReason = reason
     writePlaylist(ended: true)

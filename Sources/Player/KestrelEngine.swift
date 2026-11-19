@@ -278,6 +278,10 @@ final class KestrelEngine: NSObject {
     didSet { resumeRemembered("as before on this channel") }
   }
 
+  /// Each rendition's height (lines), by variant index (set by whoever made the player), to say
+  /// which quality a shared segment is (see SegmentShare).
+  var renditionHeights: [Int: Int] = [:]
+
   /// Channels whose picture the layer held (showing keyframes only) in this run of the app.
   private static var layerHeldOn: Set<String> = []
 
@@ -869,6 +873,9 @@ final class KestrelEngine: NSObject {
   private func begin(_ planned: LiveSegmentPlanner.Planned) {
     guard URL(string: planned.uri) != nil else { return }
     let load = SegmentLoad(planned: planned)
+    load.rendition = rendition
+    // (A recording of this channel can take it instead of downloading it again.)
+    if planned.mapURI == nil, let channelKey, SegmentShare.shared.wants(channelKey) { load.shareBytes = Data() }
     loads.append(load)
     request(load)
   }
@@ -2316,6 +2323,11 @@ final class SegmentLoad {
   var timed = false
   var dated = false
 
+  /// The rendition it's of (a variant's index).
+  var rendition = 0
+  /// Its whole bytes, kept while a recording of the channel could use them (see SegmentShare).
+  var shareBytes: Data?
+
   init(planned: LiveSegmentPlanner.Planned) {
     self.planned = planned
   }
@@ -2352,6 +2364,7 @@ extension KestrelEngine: URLSessionDataDelegate {
         }
       }
       load.received += data.count
+      load.shareBytes?.append(data)
       feed(load, data)
       pump()
     }
@@ -2374,6 +2387,13 @@ extension KestrelEngine: URLSessionDataDelegate {
         return
       } else {
         load.frames += load.demuxer?.flush() ?? []
+        // A recording of this channel at this quality takes it from here (see SegmentShare).
+        if let bytes = load.shareBytes, bytes.first == 0x47, let date = load.planned.programDate, let channelKey,
+          let height = renditionHeights[load.rendition]
+        {
+          SegmentShare.shared.offer(login: channelKey, date: date, height: height, data: bytes)
+        }
+        load.shareBytes = nil
       }
       load.finished = true
       pump()

@@ -111,6 +111,7 @@ final class KestrelController {
         return result.status == 200 ? result.body : nil
       }
       engine.channelKey = login.lowercased()
+      engine.renditionHeights = Dictionary(variants.enumerated().map { ($0.offset, $0.element.height) }, uniquingKeysWith: { a, _ in a })
       engine.onState = { [weak self] state in self?.engineState(state) }
       engine.setMuted(userMuted)
       engine.setVolume(volume)

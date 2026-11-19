@@ -501,6 +501,35 @@ func testVideoChapters() {
   check(BroadcastChapter.at(20000, in: chapters)?.name == "Minecraft", "the last to the end")
 }
 
+/// A recording takes the player's copy of a segment (same channel, start and quality), not
+/// another quality's, and doesn't wait for one the player isn't playing at that quality.
+func testSegmentShare() {
+  let share = SegmentShare()
+  let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+  let segment = Data([0x47, 1, 2, 3])
+  share.offer(login: "Caseoh_", date: t0, height: 1080, data: segment)
+  let sem = DispatchSemaphore(value: 0)
+  final class Box: @unchecked Sendable { var values: [Data?] = []; var waited: TimeInterval = 0 }
+  let box = Box()
+  check(!share.wants("caseoh_"), "nobody recording, nothing kept")
+  share.want("caseoh_", true)
+  share.offer(login: "Caseoh_", date: t0, height: 1080, data: segment)
+  Task {
+    box.values.append(await share.take(login: "caseoh_", date: t0.addingTimeInterval(0.1), height: 1080))
+    let start = Date()
+    box.values.append(await share.take(login: "caseoh_", date: t0, height: 720))
+    box.waited = Date().timeIntervalSince(start)
+    box.values.append(await share.take(login: "caseoh_", date: t0.addingTimeInterval(2), height: 1080, wait: 0.3))
+    sem.signal()
+  }
+  sem.wait()
+  check(box.values[0] == segment, "the same segment (a tenth of a second apart) taken")
+  check(box.values[1] == nil && box.waited < 0.2, "another quality: not taken, not waited for (\(box.waited) s)")
+  check(box.values[2] == nil, "a segment the player hasn't got: downloaded instead")
+  share.want("caseoh_", false)
+  check(!share.wants("caseoh_"), "recording over: let go")
+}
+
 func testMasterParsing() {
   // Damaged input (found by fuzzing): reads past the data give zeros, odd lengths are kept sane.
   check(MP4.u32(Data([1, 2]), 0) == 0 && MP4.type(Data([1]), 0) == "" && MP4.byte(Data(), 5) == 0, "MP4 reads past the end")
@@ -2967,6 +2996,7 @@ testEmoteListsAsTheyCome()
 testEmoteShapes()
 testPersonalEmotesAhead()
 testVideoChapters()
+testSegmentShare()
 testTimelineAndRender()
 testSession(lowLatency: true)
 testSession(lowLatency: false)
