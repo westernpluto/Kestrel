@@ -25,30 +25,29 @@ final class ChatController: ObservableObject {
 
   private var lastSent: (id: String, text: String, at: Date)?
   private(set) var messages: [ChatMessage] = []
-  private(set) var thirdParty: [String: URL] = [:] {
-    didSet { mergedMaps = [:] }
-  }
+  private(set) var thirdParty: [String: URL] = [:]
   /// 7TV's live events for this channel: personal emotes and changes to its set.
   private var sevenTV: SevenTVEvents?
   /// Personal 7TV emote sets (by set id), and whose they are (Twitch user id → set ids).
   private var personalSets: [String: [String: URL]] = [:] {
     didSet { mergedMaps = [:] }
   }
-  /// The channel's emotes with a chatter's personal 7TV sets on top, by set: made once, not for
-  /// every message (each copied and merged the channel's thousands of emotes; in xQc's chat, many
-  /// chatters have personal sets).
+  /// A chatter's personal 7TV sets together, by sets: made once, not for every message.
   private var mergedMaps: [String: [String: URL]] = [:]
   private var userSets: [String: Set<String>] = [:]
 
   /// The emotes a message can use: the channel's and the global ones, plus its sender's personal
   /// 7TV emotes.
-  func emoteMap(for message: ChatMessage) -> [String: URL] {
-    guard let user = message.userID, let sets = userSets[user], !sets.isEmpty else { return thirdParty }
+  /// The chatter's personal 7TV emotes, looked up ahead of the channel's (`thirdParty`). (Merged
+  /// into a copy of the channel's thousands, there was one such copy for every chatter with a
+  /// set, kept: megabytes for each chat in a big one.)
+  func personalEmotes(for message: ChatMessage) -> [String: URL] {
+    guard let user = message.userID, let sets = userSets[user], !sets.isEmpty else { return [:] }
+    if sets.count == 1, let only = sets.first { return personalSets[only] ?? [:] }
     let key = sets.sorted().joined(separator: ",")
     if let made = mergedMaps[key] { return made }
-    var map = thirdParty
-    for set in sets.sorted() { if let emotes = personalSets[set] { map.merge(emotes) { _, personal in personal } } }
-    // (Kept few: chatters' sets come and go.)
+    var map: [String: URL] = [:]
+    for set in sets.sorted() { if let emotes = personalSets[set] { map.merge(emotes) { _, new in new } } }
     if mergedMaps.count > 200 { mergedMaps = [:] }
     mergedMaps[key] = map
     return map
@@ -852,10 +851,11 @@ enum ChatRenderer {
   }()
 
   static func render(
-    _ message: ChatMessage, badges: [String: Badge], thirdParty: [String: URL], fontSize: CGFloat, me: String?,
+    _ message: ChatMessage, badges: [String: Badge], thirdParty: [String: URL], personal: [String: URL] = [:], fontSize: CGFloat,
+    me: String?,
     shadowed: Bool = false
   ) -> RenderedMessage {
-    var rendered = renderPlain(message, badges: badges, thirdParty: thirdParty, fontSize: fontSize, me: me)
+    var rendered = renderPlain(message, badges: badges, thirdParty: thirdParty, personal: personal, fontSize: fontSize, me: me)
     if shadowed {
       let text = NSMutableAttributedString(attributedString: rendered.text)
       text.addAttribute(.shadow, value: overlayShadow, range: NSRange(location: 0, length: text.length))
@@ -864,7 +864,9 @@ enum ChatRenderer {
     return rendered
   }
 
-  private static func renderPlain(_ message: ChatMessage, badges: [String: Badge], thirdParty: [String: URL], fontSize: CGFloat, me: String?)
+  private static func renderPlain(
+    _ message: ChatMessage, badges: [String: Badge], thirdParty: [String: URL], personal: [String: URL], fontSize: CGFloat, me: String?
+  )
     -> RenderedMessage
   {
     let font = UIFont.systemFont(ofSize: fontSize)
@@ -899,7 +901,7 @@ enum ChatRenderer {
     text.append(NSAttributedString(string: message.kind == .action ? " " : ": ", attributes: plain))
     var body = plain
     if message.kind == .action { body[.foregroundColor] = nameColor }
-    for fragment in message.fragments(thirdParty: thirdParty) {
+    for fragment in message.fragments(thirdParty: thirdParty, personal: personal) {
       switch fragment {
       case .text(let t): text.append(NSAttributedString(string: t, attributes: body))
       case .emote(let name, let url):
@@ -1227,7 +1229,7 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
   private func freshRender(_ message: ChatMessage) -> RenderedMessage {
     let size = AppSettings.shared.chatFontSize
     return ChatRenderer.render(
-      message, badges: chat.badges, thirdParty: chat.emoteMap(for: message), fontSize: style == .overlay ? max(12, size - 1) : size,
+      message, badges: chat.badges, thirdParty: chat.thirdParty, personal: chat.personalEmotes(for: message), fontSize: style == .overlay ? max(12, size - 1) : size,
       me: chat.ownLogin, shadowed: style == .overlay)
   }
 

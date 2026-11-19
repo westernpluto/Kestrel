@@ -327,7 +327,8 @@ struct ChatMessage: Identifiable, Equatable {
   }
 
   /// Splits the text into plain text and emotes (Twitch emotes by position, third-party by word).
-  func fragments(thirdParty: [String: URL]) -> [ChatFragment] {
+  /// - Parameter personal: the chatter's own (7TV personal) emotes, ahead of the channel's.
+  func fragments(thirdParty: [String: URL], personal: [String: URL] = [:]) -> [ChatFragment] {
     let scalars = Array(text.unicodeScalars)
     var pieces: [ChatFragment] = []
     var cursor = 0
@@ -335,7 +336,7 @@ struct ChatMessage: Identifiable, Equatable {
       guard from < to else { return }
       var s = String.UnicodeScalarView()
       s.append(contentsOf: scalars[from..<to])
-      pieces.append(contentsOf: Self.splitThirdParty(String(s), thirdParty))
+      pieces.append(contentsOf: Self.splitThirdParty(String(s), thirdParty, personal))
     }
     // Twitch emotes and GIFs, in order.
     let placed: [(range: ClosedRange<Int>, url: URL?, gif: Bool)] =
@@ -366,8 +367,8 @@ struct ChatMessage: Identifiable, Equatable {
 
   /// Third-party emotes by word. Words are cut at spaces in the bytes and looked up as they are
   /// (built a Character at a time before: most of the time it took to lay out a message).
-  private static func splitThirdParty(_ text: String, _ emotes: [String: URL]) -> [ChatFragment] {
-    guard !emotes.isEmpty else { return [.text(text)] }
+  private static func splitThirdParty(_ text: String, _ emotes: [String: URL], _ personal: [String: URL]) -> [ChatFragment] {
+    guard !emotes.isEmpty || !personal.isEmpty else { return [.text(text)] }
     var result: [ChatFragment] = []
     let bytes = text.utf8
     var bufferStart = bytes.startIndex
@@ -376,7 +377,7 @@ struct ChatMessage: Identifiable, Equatable {
     while true {
       let atEnd = i == bytes.endIndex
       if atEnd || bytes[i] == 32 {
-        if wordStart < i, let url = emotes[String(text[wordStart..<i])] {
+        if wordStart < i, let url = Self.lookUp(String(text[wordStart..<i]), emotes, personal) {
           if bufferStart < wordStart { result.append(.text(String(text[bufferStart..<wordStart]))) }
           result.append(.emote(name: String(text[wordStart..<i]), url: url))
           bufferStart = i
@@ -388,6 +389,11 @@ struct ChatMessage: Identifiable, Equatable {
     }
     if bufferStart < bytes.endIndex { result.append(.text(String(text[bufferStart..<bytes.endIndex]))) }
     return result
+  }
+
+  private static func lookUp(_ word: String, _ emotes: [String: URL], _ personal: [String: URL]) -> URL? {
+    if !personal.isEmpty, let url = personal[word] { return url }
+    return emotes[word]
   }
 
 }

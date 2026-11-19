@@ -467,6 +467,25 @@ func testEmoteShapes() {
   check(ffzMap["LONG"].flatMap(EmoteShapes.ratio) == 3, "an FFZ emote's shape")
 }
 
+/// A chatter's personal emotes win over the channel's of the same name; the rest are the channel's.
+func testPersonalEmotesAhead() {
+  let channel = ["LUL": URL(string: "https://x.test/channel-lul")!, "Clap": URL(string: "https://x.test/clap")!]
+  let personal = ["LUL": URL(string: "https://x.test/mine-lul")!, "Mine": URL(string: "https://x.test/mine")!]
+  guard let irc = IRCMessage.parse("@id=1;user-id=7;display-name=A :a!a@a.tmi.twitch.tv PRIVMSG #c :LUL Clap Mine hi"),
+    let message = ChatMessage(irc: irc)
+  else { return check(false, "message parsed") }
+  let urls = message.fragments(thirdParty: channel, personal: personal).compactMap { piece -> String? in
+    if case .emote(_, let url) = piece { return url.lastPathComponent }
+    return nil
+  }
+  check(urls == ["mine-lul", "clap", "mine"], "personal ahead of the channel's (\(urls))")
+  let plain = message.fragments(thirdParty: channel).compactMap { piece -> String? in
+    if case .emote(_, let url) = piece { return url.lastPathComponent }
+    return nil
+  }
+  check(plain == ["channel-lul", "clap"], "without personal ones, the channel's (\(plain))")
+}
+
 func testMasterParsing() {
   // Damaged input (found by fuzzing): reads past the data give zeros, odd lengths are kept sane.
   check(MP4.u32(Data([1, 2]), 0) == 0 && MP4.type(Data([1]), 0) == "" && MP4.byte(Data(), 5) == 0, "MP4 reads past the end")
@@ -2931,6 +2950,7 @@ testAdSeamsOnRealSegments()
 testAdCoveringScenarios()
 testEmoteListsAsTheyCome()
 testEmoteShapes()
+testPersonalEmotesAhead()
 testTimelineAndRender()
 testSession(lowLatency: true)
 testSession(lowLatency: false)
