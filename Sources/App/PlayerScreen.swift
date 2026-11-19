@@ -1449,6 +1449,9 @@ struct PlayerScreen: View {
           .simultaneousGesture(
             DragGesture(minimumDistance: 24, coordinateSpace: .global).onEnded { value in
               guard large, layout.landscape, layout.panelVisible, keyboard.overlap == 0 else { return }
+              // (Not a swipe in the emote picker: along its strip of sections, or its grid, it's
+              // the picker's own, and it put chat away.)
+              if let picker = EmotePickerArea.frame, picker.insetBy(dx: 0, dy: -8).contains(value.startLocation) { return }
               let dx = value.translation.width, dy = value.translation.height
               guard abs(dx) > abs(dy) * 1.5 else { return }
               let towardEdge = layout.chatOnLeft ? dx < -80 : dx > 80
