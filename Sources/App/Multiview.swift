@@ -262,6 +262,7 @@ final class MultiviewModel: ObservableObject, Identifiable {
   private func chatController(for tile: Tile) -> ChatController {
     if let existing = chats[tile.id] { return existing }
     let controller = ChatController(channel: tile.channel)
+    controller.prefetchPickerEmotes = false
     chats[tile.id] = controller
     controller.start()
     return controller

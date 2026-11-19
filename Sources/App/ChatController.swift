@@ -118,6 +118,9 @@ final class ChatController: ObservableObject {
   @Published private(set) var emotesLoaded = false
   /// Every emote you can type here, by name (autocomplete).
   private(set) var usableEmotes: [NamedEmote] = []
+  /// The channel's emote pictures fetched ahead for the picker (off for multi-view's chats: six
+  /// of them each fetching 150 over 7TV's slow connection, beside the chat being read).
+  var prefetchPickerEmotes = true
   /// (For the message box's suggestions: what they were found among has changed.)
   var usableEmoteCount: Int { usableEmotes.count }
   private var emoteURLs: [String: URL] = [:]
@@ -223,6 +226,7 @@ final class ChatController: ObservableObject {
       // (They stay on disk, so this is mostly once per channel. A little after the chat opens, and
       // not too many: 7TV's connection is slow all told, and the emotes chat is showing come
       // first.)
+      guard prefetchPickerEmotes else { return }
       let ahead = NetworkWatch.shared.kind == .cellular || NetworkWatch.shared.constrained ? 40 : 150
       let urls = emotes.channel.flatMap(\.emotes).prefix(ahead).map(\.url)
       try? await Task.sleep(nanoseconds: 12_000_000_000)
