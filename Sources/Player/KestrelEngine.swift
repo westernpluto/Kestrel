@@ -319,6 +319,12 @@ final class KestrelEngine: NSObject {
     }
   }
 
+  /// The picture on screen now (iOS 17.4 and later), for the picture enhancer to draw from.
+  func displayedFrame() -> CVPixelBuffer? {
+    guard #available(iOS 17.4, tvOS 17.4, *) else { return nil }
+    return displayLayer.sampleBufferRenderer.displayedPixelBuffer()
+  }
+
   /// The stream's clock: what's showing now.
   var clockTime: CMTime { CMTimebaseGetTime(videoClock) }
   private var layerFailures: [Date] = []

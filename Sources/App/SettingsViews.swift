@@ -183,6 +183,11 @@ struct PlaybackSettingsView: View {
         Text("Kestrel's own player downloads each piece of the stream while it's still being made and shows it as it arrives, aiming at about a second behind live. Apple's player is further behind (several seconds) but is there if a stream misbehaves. Applies from the next stream you open, multi-view included. Its audio compressor (the waveform button on the video) evens out the volume, as FrankerFaceZ's does.")
       }
       Section {
+        Toggle("Enhance picture", isOn: $settings.enhancePicture)
+      } footer: {
+        Text("Cleans up the stream's compression artifacts (blocks, smearing, banding) and sharpens it up to the size it's shown at with Apple's MetalFX, at any quality: most for low ones, a light touch at 1080p. Uses a little more battery. Not in Picture in Picture. With Kestrel's player, iOS 17.4 or later.")
+      }
+      Section {
         Toggle("Background audio", isOn: $settings.backgroundAudio)
       } footer: {
         Text("Keeps the sound playing when you leave Kestrel or lock the phone.")

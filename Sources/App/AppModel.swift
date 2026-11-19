@@ -118,6 +118,8 @@ final class AppSettings: ObservableObject {
   /// Multi-view's Picture in Picture shows every stream together (experimental) instead of the
   /// picked one.
   @Published var multiviewPiPAll: Bool { didSet { defaults.set(multiviewPiPAll, forKey: "multiviewPiPAll") } }
+  /// Clean up the picture's compression artifacts and enlarge it with MetalFX (see VideoUpscaler).
+  @Published var enhancePicture: Bool { didSet { defaults.set(enhancePicture, forKey: "enhancePicture") } }
   /// When the channel you're watching raids another: follow it (like Twitch), ask, or nothing.
   @Published var raidMode: RaidMode { didSet { defaults.set(raidMode.rawValue, forKey: "raidMode") } }
   /// A single stream's Picture in Picture: the regular window with play/pause (the picture can
@@ -158,7 +160,7 @@ final class AppSettings: ObservableObject {
   private init() {
     defaults.register(defaults: [
       "kestrelPlayer": true, "nearbyServers": true, "adBlocking": "auto", "backgroundAudio": true, "showVideoStats": false, "chatFontSize": 15.0,
-      "multiviewPiPAll": true, "raidMode": RaidMode.follow.rawValue, "pipControls": true,
+      "multiviewPiPAll": true, "enhancePicture": true, "raidMode": RaidMode.follow.rawValue, "pipControls": true,
     ])
     adBlocking = AdBlocking(stored: defaults.string(forKey: "adBlocking"))
     backgroundAudio = defaults.bool(forKey: "backgroundAudio")
@@ -168,6 +170,7 @@ final class AppSettings: ObservableObject {
     nearbyServers = defaults.bool(forKey: "nearbyServers")
     skipMutedParts = defaults.bool(forKey: "skipMutedParts")
     multiviewPiPAll = defaults.bool(forKey: "multiviewPiPAll")
+    enhancePicture = defaults.bool(forKey: "enhancePicture")
     raidMode = RaidMode(rawValue: defaults.string(forKey: "raidMode") ?? "") ?? .follow
     pipControls = defaults.bool(forKey: "pipControls")
     kestrelPlayer = defaults.bool(forKey: "kestrelPlayer")

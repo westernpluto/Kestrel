@@ -266,6 +266,11 @@ struct PlayerVideoArea: View {
           .opacity((model.isRewinding || model.rewindLinger) && model.rewindShowing ? 1 : 0)
           .animation(.easeInOut(duration: 0.25), value: model.rewindShowing)
       }
+      // The picture cleaned up and enlarged, over the regular one (see VideoUpscaler). Not in the
+      // mini player (too small to tell) or with sound only.
+      if settings.enhancePicture, model.audioOnly == nil, !minimized, let source = model.enhanceSource {
+        UpscaledVideoView(source: source, fill: fill)
+      }
     }
     .opacity(model.phase == .playing ? 1 : 0)
     .animation(.easeIn(duration: 0.3), value: model.phase)

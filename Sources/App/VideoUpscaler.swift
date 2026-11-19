@@ -1,8 +1,10 @@
-// Upscaling the picture with MetalFX: each new frame is turned into RGB, enlarged to the size
+// Enhancing the picture: each new frame is turned into RGB, cleaned of the stream's compression
+// artifacts (blocking, ringing and the shimmer around edges, smoothed by an edge-preserving
+// filter that leaves real detail alone, and dithered against banding), then enlarged to the size
 // it's shown at by MetalFX's spatial scaler (sharper edges and detail than the plain stretch the
-// system does), and drawn over the regular picture. Worth it when the stream is smaller than the
-// screen shows it (480p on iPhone Duo's inner display, say); when it isn't, the regular picture
-// shows.
+// system does), and drawn over the regular picture. The clean-up comes first so MetalFX sharpens
+// the picture, not its artifacts; it's strongest for small renditions (where Twitch's bitrate
+// shows most) and light at 1080p, and runs even when the picture needs no enlarging.
 //
 // Frames come from the Apple player through a video output. The low-latency player has no way to
 // hand them out; it draws through a sample-buffer layer, which (on iOS 17.4 and later) can say
@@ -86,6 +88,14 @@ final class PlayerItemFrames: UpscaleFrameSource {
   }
 }
 
+/// The picture Kestrel's own player is showing (whatever layer it's on just now).
+final class EngineFrames: UpscaleFrameSource {
+  private weak var engine: KestrelEngine?
+  init(engine: KestrelEngine) { self.engine = engine }
+  func isFor(_ other: KestrelEngine) -> Bool { engine === other }
+  func currentFrame() -> CVPixelBuffer? { engine?.displayedFrame() }
+}
+
 /// The frame a sample-buffer layer is showing (how the low-latency player draws), found inside
 /// the player's own layer.
 final class DisplayedFrames: UpscaleFrameSource {
@@ -133,6 +143,7 @@ final class UpscaleRenderer: NSObject, MTKViewDelegate {
   private var textureCache: CVMetalTextureCache?
   private let yuvPipeline: MTLRenderPipelineState
   private let copyPipeline: MTLRenderPipelineState
+  private let cleanPipeline: MTLRenderPipelineState
   private let presentPipeline: MTLRenderPipelineState
 
   private struct ScalerSize: Equatable {
@@ -144,6 +155,7 @@ final class UpscaleRenderer: NSObject, MTKViewDelegate {
   private var spatialScaler: MTLFXSpatialScaler?
   private var scalerSize: ScalerSize?
   private var rgbTexture: MTLTexture?
+  private var cleanTexture: MTLTexture?
   private var outputTexture: MTLTexture?
   private var lastFrame: CVPixelBuffer?
   private var lastDrawableSize = CGSize.zero
@@ -156,6 +168,7 @@ final class UpscaleRenderer: NSObject, MTKViewDelegate {
       let vertex = library.makeFunction(name: "kestrelFullscreen"),
       let yuv = library.makeFunction(name: "kestrelYUV"),
       let copy = library.makeFunction(name: "kestrelCopy"),
+      let clean = library.makeFunction(name: "kestrelClean"),
       let present = library.makeFunction(name: "kestrelPresent")
     else { return nil }
     func pipeline(_ fragment: MTLFunction, _ format: MTLPixelFormat) -> MTLRenderPipelineState? {
@@ -166,12 +179,13 @@ final class UpscaleRenderer: NSObject, MTKViewDelegate {
       return try? device.makeRenderPipelineState(descriptor: descriptor)
     }
     guard let yuvPipeline = pipeline(yuv, .bgra8Unorm), let copyPipeline = pipeline(copy, .bgra8Unorm),
-      let presentPipeline = pipeline(present, .bgra8Unorm)
+      let cleanPipeline = pipeline(clean, .bgra8Unorm), let presentPipeline = pipeline(present, .bgra8Unorm)
     else { return nil }
     self.device = device
     self.queue = queue
     self.yuvPipeline = yuvPipeline
     self.copyPipeline = copyPipeline
+    self.cleanPipeline = cleanPipeline
     self.presentPipeline = presentPipeline
     self.view = view
     super.init()
@@ -209,6 +223,7 @@ final class UpscaleRenderer: NSObject, MTKViewDelegate {
       if let displayed = source as? DisplayedFrames, !displayed.available {
         show(false, status: "not available with the low-latency player")
       }
+      if source is EngineFrames, !Self.canReadEngine { show(false, status: "needs iOS 17.4 or later") }
       return
     }
     if let lastFrame, frame === lastFrame, !needsRedraw { return }
@@ -225,16 +240,15 @@ final class UpscaleRenderer: NSObject, MTKViewDelegate {
     let drawable = view.drawableSize
     guard width > 0, height > 0, drawable.width > 0, drawable.height > 0 else { return }
     let target = Self.targetRect(video: CGSize(width: width, height: height), in: drawable, fill: fill)
-    guard target.width > CGFloat(width) * 1.1 else {
-      show(false, status: "not needed (\(width)×\(height) is already sharp at this size)")
-      return
-    }
+    // Enlarged by MetalFX when it's shown bigger than it is (and the device has it); the clean-up
+    // either way.
+    let enlarge = target.width > CGFloat(width) * 1.1
     let outputWidth = min(Int(target.width.rounded()), 8192)
     let outputHeight = min(Int(target.height.rounded()), 8192)
-    guard let scaler = makeScaler(inputWidth: width, inputHeight: height, outputWidth: outputWidth, outputHeight: outputHeight),
-      let rgb = texture(&rgbTexture, width: width, height: height, usage: scaler.colorTextureUsage.union([.renderTarget, .shaderRead])),
-      let output = texture(
-        &outputTexture, width: scaler.outputWidth, height: scaler.outputHeight, usage: scaler.outputTextureUsage.union(.shaderRead)),
+    let scaler = enlarge ? makeScaler(inputWidth: width, inputHeight: height, outputWidth: outputWidth, outputHeight: outputHeight) : nil
+    let scalerUsage = scaler?.colorTextureUsage ?? []
+    guard let rgb = texture(&rgbTexture, width: width, height: height, usage: [.renderTarget, .shaderRead]),
+      let cleaned = texture(&cleanTexture, width: width, height: height, usage: scalerUsage.union([.renderTarget, .shaderRead])),
       let commandBuffer = queue.makeCommandBuffer()
     else {
       show(false, status: "not supported on this device")
@@ -282,27 +296,66 @@ final class UpscaleRenderer: NSObject, MTKViewDelegate {
     encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     encoder.endEncoding()
 
-    // 2. MetalFX enlarges it.
-    scaler.colorTexture = rgb
-    scaler.inputContentWidth = width
-    scaler.inputContentHeight = height
-    scaler.outputTexture = output
-    scaler.encode(commandBuffer: commandBuffer)
+    // 2. Its compression artifacts cleaned up, as strongly as its size calls for.
+    let cleanPass = MTLRenderPassDescriptor()
+    cleanPass.colorAttachments[0].texture = cleaned
+    cleanPass.colorAttachments[0].loadAction = .dontCare
+    cleanPass.colorAttachments[0].storeAction = .store
+    guard let cleaner = commandBuffer.makeRenderCommandEncoder(descriptor: cleanPass) else { return }
+    var settings = Self.cleanUp(height: height, width: width)
+    cleaner.setRenderPipelineState(cleanPipeline)
+    cleaner.setFragmentTexture(rgb, index: 0)
+    cleaner.setFragmentBytes(&settings, length: MemoryLayout<SIMD4<Float>>.stride * 2, index: 0)
+    cleaner.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    cleaner.endEncoding()
 
-    // 3. Onto the screen, fitted (or filling) like the regular picture.
+    // 3. MetalFX enlarges it (when it's shown bigger and the device can).
+    var shown: MTLTexture = cleaned
+    if let scaler, let output = texture(
+      &outputTexture, width: scaler.outputWidth, height: scaler.outputHeight, usage: scaler.outputTextureUsage.union(.shaderRead))
+    {
+      scaler.colorTexture = cleaned
+      scaler.inputContentWidth = width
+      scaler.inputContentHeight = height
+      scaler.outputTexture = output
+      scaler.encode(commandBuffer: commandBuffer)
+      shown = output
+    }
+
+    // 4. Onto the screen, fitted (or filling) like the regular picture.
     guard let drawableTexture = view.currentDrawable, let screenPass = view.currentRenderPassDescriptor,
       let presenter = commandBuffer.makeRenderCommandEncoder(descriptor: screenPass)
     else { return }
     var rect = SIMD4<Float>(Float(target.minX), Float(target.minY), Float(target.width), Float(target.height))
     presenter.setRenderPipelineState(presentPipeline)
-    presenter.setFragmentTexture(output, index: 0)
+    presenter.setFragmentTexture(shown, index: 0)
     presenter.setFragmentBytes(&rect, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
     presenter.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     presenter.endEncoding()
     commandBuffer.present(drawableTexture)
     commandBuffer.addCompletedHandler { _ in _ = keep }
     commandBuffer.commit()
-    show(true, status: "\(width)×\(height) → \(scaler.outputWidth)×\(scaler.outputHeight) (MetalFX)")
+    let size = "\(width)×\(height)"
+    show(
+      true,
+      status: shown === cleaned
+        ? "\(size) cleaned up" + (enlarge ? " (no MetalFX here)" : "")
+        : "\(size) cleaned up → \(shown.width)×\(shown.height) (MetalFX)")
+  }
+
+  /// How strongly a picture's cleaned up, by its size: [strength, how far apart colours still
+  /// count as the same surface, reach in pixels, 0] and the size of one pixel. Small renditions
+  /// are where Twitch's bitrate shows most (blocks, smears); at 1080p it's a light touch.
+  static func cleanUp(height: Int, width: Int) -> (SIMD4<Float>, SIMD4<Float>) {
+    let (strength, similar, reach): (Float, Float, Float) =
+      switch height {
+      case ..<400: (0.85, 0.11, 1.5)
+      case ..<600: (0.75, 0.09, 1.25)
+      case ..<800: (0.6, 0.075, 1)
+      case ..<1200: (0.45, 0.06, 1)
+      default: (0.3, 0.05, 1)
+      }
+    return (SIMD4(strength, similar, reach, 0), SIMD4(1 / Float(width), 1 / Float(height), 0, 0))
   }
 
   /// The spatial scaler for these sizes (kept while they stay the same). Some devices only go so
@@ -361,6 +414,11 @@ final class UpscaleRenderer: NSObject, MTKViewDelegate {
     view?.alpha = visible ? 1 : 0
   }
 
+  private static var canReadEngine: Bool {
+    if #available(iOS 17.4, *) { return true }
+    return false
+  }
+
   // MARK: Geometry and colour
 
   /// Where the picture goes in the drawable (pixels): fitted, or filling it (cropped).
@@ -417,6 +475,34 @@ final class UpscaleRenderer: NSObject, MTKViewDelegate {
     fragment float4 kestrelCopy(VOut in [[stage_in]], texture2d<float> picture [[texture(0)]]) {
       constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
       return float4(picture.sample(s, in.uv).rgb, 1.0);
+    }
+
+    // An edge-preserving smoothing (each neighbour counted as much as its colour is like this
+    // pixel's: across a real edge, hardly at all), mixed in by strength, then a fraction of a level
+    // of dither so smooth gradients don't band.
+    fragment float4 kestrelClean(VOut in [[stage_in]], texture2d<float> picture [[texture(0)]],
+                                 constant float4 *settings [[buffer(0)]]) {
+      constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+      float strength = settings[0].x;
+      float similar = settings[0].y;
+      float2 step = settings[1].xy * settings[0].z;
+      float3 center = picture.sample(s, in.uv).rgb;
+      float3 sum = center;
+      float total = 1.0;
+      float spread = 2.0 * similar * similar;
+      for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+          if (x == 0 && y == 0) { continue; }
+          float3 near = picture.sample(s, in.uv + float2(x, y) * step).rgb;
+          float3 d = near - center;
+          float weight = exp(-dot(d, d) / spread) * ((x == 0 || y == 0) ? 1.0 : 0.7);
+          sum += near * weight;
+          total += weight;
+        }
+      }
+      float3 cleaned = mix(center, sum / total, strength);
+      float noise = fract(sin(dot(in.position.xy, float2(12.9898, 78.233))) * 43758.5453) - 0.5;
+      return float4(saturate(cleaned + noise / 255.0), 1.0);
     }
 
     fragment float4 kestrelPresent(VOut in [[stage_in]], texture2d<float> picture [[texture(0)]],

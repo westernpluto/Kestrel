@@ -140,6 +140,24 @@ final class PlayerModel: ObservableObject {
 
   /// VOD seek previews (VODs, and live streams that can be rewound).
   @Published private(set) var storyboard: Storyboard?
+  /// Where the picture enhancer takes the picture from (see VideoUpscaler): the VOD while
+  /// rewinding, else Kestrel's player or Apple's.
+  var enhanceSource: UpscaleFrameSource? {
+    if (isRewinding || rewindLinger) && rewindShowing { return rewindFrames }
+    if let engine = kestrelEngine {
+      if engineFrames?.isFor(engine) != true { engineFrames = EngineFrames(engine: engine) }
+      return engineFrames
+    }
+    return mainFrames
+  }
+  private var engineFrames: EngineFrames?
+  /// What the picture enhancer is doing, for the stats.
+  private var enhanceStats: [StatLine] {
+    AppSettings.shared.enhancePicture ? [StatLine(label: "Picture", value: UpscaleMonitor.status)] : []
+  }
+  private lazy var mainFrames = PlayerItemFrames(player: player)
+  private lazy var rewindFrames = PlayerItemFrames(player: rewindPlayer)
+
   /// A VOD's chapters: where its category changed (empty when it has none, or for live).
   @Published private(set) var chapters: [BroadcastChapter] = []
   private var storyboardSource: (url: URL, videoID: String, duration: Double?)?
@@ -1047,11 +1065,11 @@ final class PlayerModel: ObservableObject {
     if let kestrel {
       kestrel.tick()
       // (Published only when a line changed: every view watching the player redraws on each.)
-      if wantsStats, showing { let lines = kestrel.stats(); if lines != stats { stats = lines } }
+      if wantsStats, showing { let lines = kestrel.stats() + enhanceStats; if lines != stats { stats = lines } }
       if pictureInPictureActive != kestrel.pictureInPictureActive { pictureInPictureActive = kestrel.pictureInPictureActive }
       return
     }
-    if wantsStats, showing { let lines = appleStats(); if lines != stats { stats = lines } }
+    if wantsStats, showing { let lines = appleStats() + enhanceStats; if lines != stats { stats = lines } }
     // Only once the item is ready and not mid-start or mid-seek: before that the player reports
     // "paused" while it loads, which used to stop VODs from ever starting.
     if pendingStart == nil, !seeking, player.currentItem?.status == .readyToPlay, phase == .playing {
