@@ -69,7 +69,10 @@ enum MasterPlaylistFetch {
     http: HTTPClient, tokens: PlaybackTokenProvider, log: ActivityLog
   ) async throws -> Result {
     var token: PlaybackToken?
+    /// Subscribed to the channel (asked of Twitch apart from the playback session).
+    var subscribed = false
     if checkAccountFirst {
+      async let subscription = tokens.subscribed(to: login)
       token = try? await tokens.streamToken(login: login, playerType: playerType, platform: "web")
       if let token, let reason = token.adFreeReason {
         log.add("Twitch shows you no ads on this channel (\(reason)): playing straight from Twitch")
@@ -77,8 +80,25 @@ enum MasterPlaylistFetch {
         NearbyPlaylists.learn(fromMaster: text, base: url)
         return Result(text: text, url: url, route: .twitchAdFree(reason))
       }
+      if token?.info?.signedIn == true, await subscription == true {
+        subscribed = true
+        // Subscribed, yet the session allows ads: asked again as the website's own player (a
+        // subscriber's ad-free viewing is surely honoured there).
+        if playerType != "site", let site = try? await tokens.streamToken(login: login, playerType: "site", platform: "web"),
+          let reason = site.adFreeReason
+        {
+          log.add("Twitch shows you no ads on this channel (\(reason), as the website's player): playing straight from Twitch")
+          let (text, url) = try await usher(login: login, token: site, codecs: codecs, lowLatency: lowLatency, http: http)
+          NearbyPlaylists.learn(fromMaster: text, base: url)
+          return Result(text: text, url: url, route: .twitchAdFree(reason))
+        }
+        log.add(
+          "You're subscribed to \(login), but Twitch's session for this stream still allows ads: playing straight from Twitch (no ad-free server), any ad Twitch slips in handled here")
+      }
     }
-    if !proxies.isEmpty {
+    // (Subscribed: never through an ad-free server, a far one at that, for a channel that's
+    // yours ad-free; anything Twitch slips in is handled as usual.)
+    if !proxies.isEmpty, !subscribed {
       // Meanwhile, unless it's known already: which playlist server Twitch would use for this
       // viewer directly (asked in parallel, so it costs no time).
       let known = token

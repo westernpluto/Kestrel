@@ -252,6 +252,13 @@ struct PlaybackToken: Equatable, Sendable {
 
 protocol PlaybackTokenProvider: Sendable {
   func streamToken(login: String, playerType: String, platform: String) async throws -> PlaybackToken
+  /// Whether the signed-in account is subscribed to the channel (nil: not signed in, or it
+  /// couldn't be told).
+  func subscribed(to login: String) async -> Bool?
+}
+
+extension PlaybackTokenProvider {
+  func subscribed(to login: String) async -> Bool? { nil }
 }
 
 enum Usher {

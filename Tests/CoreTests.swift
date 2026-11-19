@@ -55,6 +55,14 @@ final class FakeTwitch: HTTPClient, PlaybackTokenProvider, @unchecked Sendable {
   var adTitle = "Amazon|5555"
   /// Tokens describe a signed-in account Twitch shows no ads (a sub).
   var subscriberAccount = false
+  /// Signed in, but the session allows ads (a sub Twitch's session doesn't show); as the website's
+  /// player ("site") it's ad-free when `siteAdFree`.
+  var signedInWithAds = false
+  var siteAdFree = false
+  /// What Twitch says, apart from the session, about the account's subscription.
+  var subscribedAnswer: Bool?
+
+  func subscribed(to login: String) async -> Bool? { subscribedAnswer }
 
   let variants = [("1080p60", "1920x1080", 60.0, 6_000_000), ("720p60", "1280x720", 60.0, 3_000_000), ("480p", "852x480", 30.0, 1_400_000)]
 
@@ -72,6 +80,12 @@ final class FakeTwitch: HTTPClient, PlaybackTokenProvider, @unchecked Sendable {
     tokenRequests.append(playerType)
     if mainToken == nil { mainToken = token }
     lock.unlock()
+    if signedInWithAds {
+      let free = playerType == "site" && siteAdFree
+      return PlaybackToken(
+        value: #"{"hide_ads":\#(free),"show_ads":\#(!free),"subscriber":\#(free),"turbo":false,"user_id":42,"k":"\#(token)"}"#,
+        signature: "sig")
+    }
     if subscriberAccount {
       return PlaybackToken(
         value: #"{"hide_ads":true,"show_ads":false,"subscriber":true,"turbo":false,"user_id":42,"k":"\#(token)"}"#,
@@ -1518,6 +1532,40 @@ func testAccountRoute() {
     check(route == .twitchAdFree("subscribed"), "sub plays direct: \(route)")
     check(!http.requested.contains("proxy.test"), "no proxy request: \(http.requested)")
     check(log.messages.contains { $0.contains("playing straight from Twitch") }, "\(log.messages)")
+  }
+  // Subscribed, but the session allows ads: asked again as the website's player, which is ad-free.
+  runAsync {
+    let twitch = FakeTwitch()
+    twitch.signedInWithAds = true
+    twitch.siteAdFree = true
+    twitch.subscribedAnswer = true
+    let http = ProxyFake(twitch)
+    var config = LowLatencyConfig()
+    config.adFreeProxies = ["proxy.test"]
+    config.checkAccountFirst = true
+    let session = LowLatencySession(login: "streamer", config: config, http: http, tokens: twitch, log: ActivityLog())
+    _ = try! await session.start()
+    let route = await session.route
+    check(route == .twitchAdFree("subscribed"), "the website player's session: \(route)")
+    check(twitch.tokenRequests == ["popout", "site"], "asked again as the website: \(twitch.tokenRequests)")
+    check(!http.requested.contains("proxy.test"), "no ad-free server: \(http.requested)")
+  }
+  // Subscribed, and ads possible either way: straight from Twitch, never through an ad-free server.
+  runAsync {
+    let twitch = FakeTwitch()
+    twitch.signedInWithAds = true
+    twitch.subscribedAnswer = true
+    let http = ProxyFake(twitch)
+    let log = ActivityLog()
+    var config = LowLatencyConfig()
+    config.adFreeProxies = ["proxy.test"]
+    config.checkAccountFirst = true
+    let session = LowLatencySession(login: "streamer", config: config, http: http, tokens: twitch, log: log)
+    _ = try! await session.start()
+    let route = await session.route
+    check(route == .twitch, "straight from Twitch: \(route)")
+    check(!http.requested.contains("proxy.test"), "no ad-free server for a sub: \(http.requested)")
+    check(log.messages.contains { $0.contains("You're subscribed") }, "said: \(log.messages)")
   }
   // Signed in without a sub: the token says ads are possible, so the server is used, and the
   // token already fetched is reused if the servers fail.

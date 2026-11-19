@@ -636,6 +636,18 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
 
   // MARK: Account
 
+  /// Whether the signed-in account is subscribed to the channel (nil: not signed in, or Twitch
+  /// didn't say). Asked apart from the playback session, which doesn't always show it.
+  func subscribed(to login: String) async -> Bool? {
+    guard TwitchAuth.shared.session != nil,
+      let data = try? await query(
+        "query null($login: String!) { user(login: $login) { self { subscriptionBenefit { id } } } }",
+        variables: ["login": login], authenticated: true),
+      !data["user"].isNull, !data["user"]["self"].isNull
+    else { return nil }
+    return !data["user"]["self"]["subscriptionBenefit"].isNull
+  }
+
   /// Whether the signed-in account has Turbo (nil if unknown).
   func currentUserHasTurbo() async -> Bool? {
     guard TwitchAuth.shared.session != nil,
