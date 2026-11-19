@@ -980,6 +980,9 @@ final class PlayerModel: ObservableObject {
     // (Multi-view: only the stream heard shows it. Each change redrew its picture's tile, and with
     // nine streams that was most of what moved twice a second.)
     if isTile, userMuted { return }
+    // (In the background, Picture in Picture included, nothing shows it: the screen's views were
+    // worked out again twice a second for nobody. The first reading back in the app shows.)
+    if UIApplication.shared.applicationState == .background { return }
     // Only when it moves by more than a tenth (no flicking between two neighbouring values).
     if let current = latency, abs(shown - current) < 0.15 { return }
     latency = shown
@@ -1031,14 +1034,16 @@ final class PlayerModel: ObservableObject {
     }
     let wantsStats = AppSettings.shared.showVideoStats
     if !wantsStats, !stats.isEmpty { stats = [] }
+    // (Not worked out in the background, Picture in Picture included: nothing shows them.)
+    let showing = UIApplication.shared.applicationState != .background
     if let kestrel {
       kestrel.tick()
       // (Published only when a line changed: every view watching the player redraws on each.)
-      if wantsStats { let lines = kestrel.stats(); if lines != stats { stats = lines } }
+      if wantsStats, showing { let lines = kestrel.stats(); if lines != stats { stats = lines } }
       if pictureInPictureActive != kestrel.pictureInPictureActive { pictureInPictureActive = kestrel.pictureInPictureActive }
       return
     }
-    if wantsStats { let lines = appleStats(); if lines != stats { stats = lines } }
+    if wantsStats, showing { let lines = appleStats(); if lines != stats { stats = lines } }
     // Only once the item is ready and not mid-start or mid-seek: before that the player reports
     // "paused" while it loads, which used to stop VODs from ever starting.
     if pendingStart == nil, !seeking, player.currentItem?.status == .readyToPlay, phase == .playing {
