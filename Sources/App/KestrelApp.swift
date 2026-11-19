@@ -47,7 +47,6 @@ struct RootView: View {
   @EnvironmentObject private var app: AppModel
   @EnvironmentObject private var favorites: FavoritesStore
   @EnvironmentObject private var settings: AppSettings
-  @ObservedObject private var following = FollowingStore.shared
   @ObservedObject private var navigation = AppModel.shared.navigation
 
   var body: some View {
@@ -80,14 +79,7 @@ struct RootView: View {
         }
         .animation(.easeInOut(duration: 0.3), value: app.multiview?.id)
       }
-      .alert(
-        "Following",
-        isPresented: Binding(get: { following.notice != nil }, set: { if !$0 { following.notice = nil } })
-      ) {
-        Button("OK", role: .cancel) {}
-      } message: {
-        Text(following.notice ?? "")
-      }
+      .background(FollowNoticeAlert())
       // The player sits over the app (not in a separate screen) so it can shrink into the mini
       // player and keep playing while you browse.
       if let target = app.playing, let key = app.playerKey {
@@ -394,5 +386,24 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
   func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
     OrientationLock.mask
+  }
+}
+
+/// A follow Twitch didn't take, told in an alert. On its own, so only it watches the follows list:
+/// the whole app was redrawn from the top each time the list refreshed (every minute, for go-live
+/// alerts, several changes each time), though only this ever read it.
+private struct FollowNoticeAlert: View {
+  @ObservedObject private var following = FollowingStore.shared
+
+  var body: some View {
+    Color.clear
+      .alert(
+        "Following",
+        isPresented: Binding(get: { following.notice != nil }, set: { if !$0 { following.notice = nil } })
+      ) {
+        Button("OK", role: .cancel) {}
+      } message: {
+        Text(following.notice ?? "")
+      }
   }
 }
