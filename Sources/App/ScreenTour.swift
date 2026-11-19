@@ -30,7 +30,10 @@ enum ScreenTour {
     case "browse": app.tab = .browse
     case "search": app.tab = .search
     case "settings": app.tab = .settings
-    case "channel", "player", "player-landscape", "mini", "emotes", "emotes-scroll", "emotes-scroll-back", "emotes-pick-scroll":
+    case "channel", "player", "player-stats", "player-landscape", "mini", "emotes", "emotes-scroll", "emotes-scroll-back",
+      "emotes-pick-scroll":
+      // (With the video stats on: what the picture enhancer is doing shows.)
+      if screen == "player-stats" { AppSettings.shared.showVideoStats = true }
       app.tab = .browse
       // The most watched stream right now (a sure one to be live).
       guard let top = try? await TwitchAPI.shared.topStreams(first: 1).items.first else { return }
