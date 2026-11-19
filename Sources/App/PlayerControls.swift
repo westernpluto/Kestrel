@@ -976,7 +976,7 @@ struct SeekBar: View {
       ZStack(alignment: .leading) {
         // The track, the part played filled in, both in the chapters' shape.
         ZStack(alignment: .leading) {
-          Rectangle().fill(Color.white.opacity(active ? 0.32 : 0.26))
+          Rectangle().fill(Color.white.opacity(active ? 0.4 : 0.34))
           LinearGradient(
             colors: [Color.accentTeal.opacity(0.85), Color.accentTeal], startPoint: .leading, endPoint: .trailing
           )
@@ -984,6 +984,13 @@ struct SeekBar: View {
         }
         .frame(width: width, height: height)
         .mask(SeekTrackShape(cuts: cuts, lifted: lifted).frame(width: width, height: height))
+        // (A soft shadow under it: over a bright, busy picture the track faded into it.)
+        .background(
+          SeekTrackShape(cuts: cuts, lifted: lifted)
+            .fill(Color.black.opacity(0.35))
+            .frame(width: width, height: height)
+            .blur(radius: 2.5)
+        )
         if duration > 0, !marks.isEmpty {
           MarkStrip(marks: marks, duration: duration)
             .frame(width: width, height: height)
