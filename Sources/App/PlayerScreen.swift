@@ -532,26 +532,6 @@ final class KeyboardObserver: ObservableObject {
 // MARK: - Layout
 
 /// The window's size and insets from the last time the app was in front (see PlayerScreen).
-/// The window's sides (left and right insets) as they were before the keyboard came up, kept
-/// while typing in portrait: typing on iPhone Duo's front screen, the window's sides changed under
-/// the keyboard, and chat and the stream moved over to the left until it went.
-final class SideHold {
-  private var leading: CGFloat?
-  private var trailing: CGFloat?
-
-  func steady(_ insets: EdgeInsets, typing: Bool) -> EdgeInsets {
-    guard typing, let leading, let trailing else {
-      leading = insets.leading
-      trailing = insets.trailing
-      return insets
-    }
-    var held = insets
-    held.leading = leading
-    held.trailing = trailing
-    return held
-  }
-}
-
 final class LayoutHold {
   private var size: CGSize?
   private var insets = EdgeInsets()
@@ -1324,7 +1304,6 @@ struct PlayerScreen: View {
   static let spring = Animation.spring(response: 0.38, dampingFraction: 0.86)
   @Environment(\.scenePhase) private var scenePhase
   @State private var hold = LayoutHold()
-  @State private var sides = SideHold()
   /// Lays the screen out again a second after the app is back (the size ignored just after coming
   /// back may have been the real one, see `LayoutHold`).
   @State private var relayout = 0
@@ -1356,8 +1335,18 @@ struct PlayerScreen: View {
       // insets of that moment, chat jumped to the other side of the strip mid-shrink. So the
       // layout keeps to the window as it is with the player open (no strip), shifted to where
       // the safe area is right now.
-      // Portrait, typing: the sides as they were before the keyboard (see `SideHold`).
-      let steadyInsets = !landscape && !large ? sides.steady(insets, typing: keyboard.overlap > 0) : insets
+      // Portrait: no room kept for iPhone Duo's status strip on one side. Typing on the front
+      // screen, the window kept an empty strip down its right side (the status bar's, though it's
+      // hidden), and chat and the stream squeezed over to the left of it. Both sides as the
+      // narrower one (nothing on most phones); the strip's area is empty.
+      let steadyInsets: EdgeInsets = {
+        guard !landscape, !large else { return insets }
+        var even = insets
+        let side = min(insets.leading, insets.trailing)
+        even.leading = side
+        even.trailing = side
+        return even
+      }()
       let layoutInsets = large && landscape ? EdgeInsets(top: 0, leading: 0, bottom: insets.bottom, trailing: 0) : steadyInsets
       let layoutSafe = CGSize(
         width: screenWidth - layoutInsets.leading - layoutInsets.trailing,
