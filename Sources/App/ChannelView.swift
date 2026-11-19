@@ -127,7 +127,6 @@ struct VideoRows: View {
 struct VideoRow: View {
   let video: Video
   @ObservedObject private var history = WatchHistory.shared
-  @ObservedObject private var recordings = RecordingStore.shared
 
   var body: some View {
     Button {
@@ -180,13 +179,21 @@ struct VideoRow: View {
     }
   }
 
-  @ViewBuilder
-  private var saveBadge: some View {
-    if let active = recordings.download(of: video.id) {
+  private var saveBadge: some View { VideoSaveBadge(videoID: video.id) }
+}
+
+/// Downloading (how far) or saved. On its own, so only it watches the recordings store: that
+/// changes every couple of seconds while anything records, and every video row was redrawn.
+private struct VideoSaveBadge: View {
+  let videoID: String
+  @ObservedObject private var recordings = RecordingStore.shared
+
+  var body: some View {
+    if let active = recordings.download(of: videoID) {
       let done = recordings.downloadProgress[active.id] ?? 0
       Label("\(Int(done * 100))%", systemImage: "arrow.down.circle.fill")
         .badgeStyle()
-    } else if recordings.downloaded(video.id) != nil {
+    } else if recordings.downloaded(videoID) != nil {
       Label("Saved", systemImage: "checkmark.circle.fill")
         .badgeStyle()
     }
