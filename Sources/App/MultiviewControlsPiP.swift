@@ -78,6 +78,8 @@ final class PictureCompositor: @unchecked Sendable {
   private let queue = DispatchQueue(label: "kestrel.multiview-pip", qos: .userInteractive)
   private var timer: DispatchSourceTimer?
   private let context = CIContext(options: [.cacheIntermediates: false])
+  /// (Made once: it was made again for every picture drawn, up to sixty a second.)
+  private let colorSpace = CGColorSpaceCreateDeviceRGB()
   private var pool: CVPixelBufferPool?
   private var format: CMVideoFormatDescription?
   private let timebase: CMTimebase
@@ -165,7 +167,7 @@ final class PictureCompositor: @unchecked Sendable {
     var buffer: CVPixelBuffer?
     CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer)
     guard let buffer else { return nil }
-    context.render(picture, to: buffer, bounds: extent, colorSpace: CGColorSpaceCreateDeviceRGB())
+    context.render(picture, to: buffer, bounds: extent, colorSpace: colorSpace)
     return buffer
   }
 
