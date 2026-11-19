@@ -532,6 +532,26 @@ final class KeyboardObserver: ObservableObject {
 // MARK: - Layout
 
 /// The window's size and insets from the last time the app was in front (see PlayerScreen).
+/// The window's sides (left and right insets) as they were before the keyboard came up, kept
+/// while typing in portrait: typing on iPhone Duo's front screen, the window's sides changed under
+/// the keyboard, and chat and the stream moved over to the left until it went.
+final class SideHold {
+  private var leading: CGFloat?
+  private var trailing: CGFloat?
+
+  func steady(_ insets: EdgeInsets, typing: Bool) -> EdgeInsets {
+    guard typing, let leading, let trailing else {
+      leading = insets.leading
+      trailing = insets.trailing
+      return insets
+    }
+    var held = insets
+    held.leading = leading
+    held.trailing = trailing
+    return held
+  }
+}
+
 final class LayoutHold {
   private var size: CGSize?
   private var insets = EdgeInsets()
@@ -1304,6 +1324,7 @@ struct PlayerScreen: View {
   static let spring = Animation.spring(response: 0.38, dampingFraction: 0.86)
   @Environment(\.scenePhase) private var scenePhase
   @State private var hold = LayoutHold()
+  @State private var sides = SideHold()
   /// Lays the screen out again a second after the app is back (the size ignored just after coming
   /// back may have been the real one, see `LayoutHold`).
   @State private var relayout = 0
@@ -1335,7 +1356,9 @@ struct PlayerScreen: View {
       // insets of that moment, chat jumped to the other side of the strip mid-shrink. So the
       // layout keeps to the window as it is with the player open (no strip), shifted to where
       // the safe area is right now.
-      let layoutInsets = large && landscape ? EdgeInsets(top: 0, leading: 0, bottom: insets.bottom, trailing: 0) : insets
+      // Portrait, typing: the sides as they were before the keyboard (see `SideHold`).
+      let steadyInsets = !landscape && !large ? sides.steady(insets, typing: keyboard.overlap > 0) : insets
+      let layoutInsets = large && landscape ? EdgeInsets(top: 0, leading: 0, bottom: insets.bottom, trailing: 0) : steadyInsets
       let layoutSafe = CGSize(
         width: screenWidth - layoutInsets.leading - layoutInsets.trailing,
         height: screenHeight - layoutInsets.top - layoutInsets.bottom)
@@ -1597,7 +1620,9 @@ struct PlayerScreen: View {
       // on iPhone Duo's inner display it runs down one side of the video. It comes back once the
       // player is actually shrinking (not while a finger is still deciding): bringing it back
       // re-lays out the window, which cut the keyboard's slide short when a swipe put it away.
-      .statusBarHidden((layout.fullScreen || layout.large) && !app.playerMinimized)
+      // Portrait too: on iPhone Duo's front screen the time and signal sat over the picture.
+      // (Elsewhere hiding it moves nothing: the camera's room stays.)
+      .statusBarHidden((layout.fullScreen || layout.large || !landscape) && !app.playerMinimized)
       .persistentSystemOverlays(layout.fullScreen && !app.playerMinimized ? .hidden : .automatic)
     }
     .ignoresSafeArea(.keyboard)

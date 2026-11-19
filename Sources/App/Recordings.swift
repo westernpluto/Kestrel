@@ -695,7 +695,10 @@ struct RecordingPlayerScreen: View {
     }
     .background(Color.black.ignoresSafeArea())
     .preferredColorScheme(.dark)
-    .statusBarHidden(!controlsShown)
+    // (Hidden the whole time: shown with the controls, iPhone Duo's status strip came and went
+    // with them and the window's width with it, so the seek bar was short as the controls faded
+    // in and full width for a moment as they faded out.)
+    .statusBarHidden(true)
     .onAppear {
       OrientationLock.playerVisible(true)
       AppModel.shared.watchingRecording = true
