@@ -173,7 +173,7 @@ final class ChatController: ObservableObject {
     let channel = self.channel
     let replay = isReplay
     Task {
-      let http = URLSessionHTTPClient(timeout: 25)
+      let http = Self.emoteHTTP
       async let history = replay ? [] : ThirdPartyEmotes.recentMessages(login: channel.login, http: http)
       // Badges as soon as they're in (they waited for the recent messages, a slow service at times).
       Task { [weak self] in
@@ -225,6 +225,11 @@ final class ChatController: ObservableObject {
     startSevenTV()
   }
 
+  /// For the emote lists and recent messages: one for every chat, so its connections to 7TV,
+  /// BTTV, FFZ and the recent-messages service are kept and used again (each chat opened made its
+  /// own, with new secure connections to each).
+  nonisolated static let emoteHTTP = URLSessionHTTPClient(timeout: 25)
+
   /// All six emote lists have come (or given up): a list arriving late from the first load (a
   /// refresh behind the cache) doesn't put back fewer.
   private var emotesFinal = false
@@ -257,7 +262,7 @@ final class ChatController: ObservableObject {
     Task { [weak self] in
       try? await Task.sleep(nanoseconds: UInt64(6 * attempt) * 1_000_000_000)
       guard let self, self.running else { return }
-      let emotes = await ThirdPartyEmotes.load(channelID: channel.id, http: URLSessionHTTPClient(timeout: 25))
+      let emotes = await ThirdPartyEmotes.load(channelID: channel.id, http: Self.emoteHTTP)
       guard self.running else { return }
       if emotes.byName.count > self.thirdParty.count {
         self.thirdPartySets = emotes

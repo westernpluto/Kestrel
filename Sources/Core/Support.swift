@@ -54,6 +54,13 @@ final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
     session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
   }
 
+  /// A session lives (and keeps its delegate) until it's invalidated: let go of here, once what's
+  /// under way has finished. Every client made (each chat opened, each try at an emote list) kept
+  /// its session, connections and all, for as long as the app ran.
+  deinit {
+    session.finishTasksAndInvalidate()
+  }
+
   func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
     let holder = CancellableTaskHolder()
     return try await withTaskCancellationHandler {
