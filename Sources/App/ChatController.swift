@@ -1353,7 +1353,12 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     let link = CADisplayLink(target: GlideTarget(self), selector: #selector(GlideTarget.step(_:)))
     // 60 a second is smooth for text sliding up; asking for ProMotion's 120 kept the screen at its
     // most power-hungry rate the whole time a busy chat moved.
-    if #available(iOS 15.0, *) { link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60) }
+    // (In Low Power Mode, 30: in busy chat this runs nearly all the time.)
+    if #available(iOS 15.0, *) {
+      link.preferredFrameRateRange =
+        ProcessInfo.processInfo.isLowPowerModeEnabled
+        ? CAFrameRateRange(minimum: 20, maximum: 30, preferred: 30) : CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+    }
     lastGlideFrame = 0
     link.add(to: .main, forMode: .common)
     glide = link
