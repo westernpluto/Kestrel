@@ -635,6 +635,10 @@ struct PlayerLayout: Equatable {
   static let stripContentBottom: CGFloat = 250
   /// Narrowest landscape chat on a phone (iPhone Duo's outer screen is short of width).
   static let minPhoneChat: CGFloat = 200
+
+  /// The narrowest chat beside the video in a large window (iPhone Duo's inner display): slim, so
+  /// the stream gets the room (it was 280, nearly a third of the window), slimmer in theater mode.
+  static func largeMinChat(theater: Bool) -> CGFloat { theater ? 200 : 220 }
   /// How far from the screen edge the Dynamic Island reaches in landscape (plus a little air).
   static let cameraClearance: CGFloat = 52
 
@@ -671,7 +675,7 @@ struct PlayerLayout: Equatable {
       info = nil
       video = CGRect(x: windowLeft, y: windowTop, width: windowRight - windowLeft, height: windowHeight)
       controls = EdgeInsets(top: insets.top + 8, leading: insets.leading + 8, bottom: insets.bottom + 4, trailing: insets.trailing + 8)
-      let chat = min(max(chatWidth, 280), (windowRight - windowLeft) * 0.45).rounded()
+      let chat = min(max(chatWidth, Self.largeMinChat(theater: theater)), (windowRight - windowLeft) * 0.45).rounded()
       chatOnLeft = landscape && stripOnRight
       panel = chatOnLeft
         ? CGRect(x: video.minX - chat - 1, y: video.minY, width: chat, height: video.height)
@@ -687,7 +691,7 @@ struct PlayerLayout: Equatable {
       // goes on that side and runs under it to the window's edge (only its controls and the text
       // below it keep clear), and chat takes the other side right up to that edge: chat beside the
       // strip would only leave an empty band, since text can't go under it.
-      let chat = min(max(chatWidth, 280), (windowRight - windowLeft) * 0.45).rounded()
+      let chat = min(max(chatWidth, Self.largeMinChat(theater: theater)), (windowRight - windowLeft) * 0.45).rounded()
       chatOnLeft = stripOnRight
       let columnLeft: CGFloat
       let columnRight: CGFloat
@@ -1279,6 +1283,9 @@ struct PlayerScreen: View {
   @AppStorage("landscapeChat") private var landscapeChat = true
   /// Landscape chat width, as a share of the screen width (drag the chat's edge to change it).
   @AppStorage("landscapeChatShare") private var chatShare = 0.32
+  /// Chat's share of a large window's width (kept apart from the phone's: a slimmer column there,
+  /// for the stream's sake).
+  @AppStorage("largeChatShare") private var largeChatShare = 0.24
   /// Large window, landscape: theater mode (just the stream and chat).
   @AppStorage("largeTheater") private var theater = false
   /// Phone landscape: chat over the video instead of beside it.
@@ -1354,7 +1361,7 @@ struct PlayerScreen: View {
       let _ = KeyboardObserver.laidOut(keyboard: keyboard.overlap, height: screenHeight)
       let layout = PlayerLayout(
         safe: layoutSafe, insets: layoutInsets, keyboard: keyboard.overlap, chatOpen: chatOpen,
-        chatWidth: resizedWidth ?? screenWidth * chatShare,
+        chatWidth: resizedWidth ?? screenWidth * (large ? largeChatShare : chatShare),
         cameraOnLeft: landscape && !large ? (InterfaceOrientationObserver.cameraOnLeftNow ?? orientation.cameraOnLeft) : nil,
         large: large, theater: theater && !folded, chatOverVideo: chatOverVideo && !folded,
         picker: pickerSpace.height
@@ -1787,10 +1794,14 @@ struct PlayerScreen: View {
             let dx = layout.chatOnLeft ? value.translation.width : -value.translation.width
             let width = (resizingFrom ?? layout.panel.width) + dx
             resizedWidth = layout.large
-              ? min(max(width, 280), screenWidth * 0.45) : min(max(width, PlayerLayout.minPhoneChat), screenWidth * 0.5)
+              ? min(max(width, PlayerLayout.largeMinChat(theater: theater)), screenWidth * 0.45)
+              : min(max(width, PlayerLayout.minPhoneChat), screenWidth * 0.5)
           }
           .onEnded { _ in
-            if let width = resizedWidth { chatShare = Double(width / max(screenWidth, 1)) }
+            if let width = resizedWidth {
+              let share = Double(width / max(screenWidth, 1))
+              if layout.large { largeChatShare = share } else { chatShare = share }
+            }
             resizingFrom = nil
             resizedWidth = nil
           }
