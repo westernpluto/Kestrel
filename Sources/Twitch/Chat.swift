@@ -669,6 +669,13 @@ enum EmoteShapes {
     }
   }
 
+  /// Read from disk ahead (off the main thread), so chat's first look doesn't wait for it.
+  static func preload() {
+    lock.lock()
+    loadIfNeeded()
+    lock.unlock()
+  }
+
   /// Width over height, if the lists said (nil: square, or not known).
   static func ratio(_ url: URL) -> Double? {
     lock.lock()
@@ -795,6 +802,8 @@ enum ThirdPartyEmotes {
     channelID: String?, http: HTTPClient, progress: (@Sendable (ThirdPartyEmoteSets) -> Void)? = nil
   ) async -> ThirdPartyEmoteSets {
     let partial = PartialEmoteSets(progress: progress)
+    // (The emotes' shapes from disk meanwhile, off the main thread.)
+    EmoteShapes.preload()
     async let globalSets = EmoteSetCache.shared.globals {
       async let seventv = partial.note(.global7TV, await fetch(URL(string: "https://7tv.io/v3/emote-sets/global")!, http) { parse7TV($0["emotes"]) })
       async let bttv = partial.note(.globalBTTV, await fetch(URL(string: "https://api.betterttv.net/3/cached/emotes/global")!, http) { parseBTTV($0.array) })
