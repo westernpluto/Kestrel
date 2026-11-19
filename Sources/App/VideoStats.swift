@@ -53,7 +53,7 @@ struct StatsOverlay: View {
 
   /// The lines worth keeping when there's no room for the rest.
   private var essentials: [StatLine] {
-    let keep: Set<String> = ["Quality", "Resolution", "Frame rate", "Bitrate", "Buffer", "Latency", "Speed", "Margin", "Frames"]
+    let keep: Set<String> = ["Quality", "Resolution", "Frame rate", "Bitrate", "Buffer", "Latency", "Speed", "Margin", "Frames", "Picture"]
     let picked = lines.filter { keep.contains($0.label) }
     return picked.isEmpty ? Array(lines.prefix(8)) : picked
   }
