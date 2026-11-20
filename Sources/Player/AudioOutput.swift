@@ -346,6 +346,9 @@ final class AudioOutput {
   private var restartTask: Task<Void, Never>?
 
   private func restartNow() {
+    // Still going (a change the mixer takes in its stride, e.g. Picture in Picture or another
+    // app's sound starting): restarting it anyway only made a gap in the sound.
+    if engine.isRunning, player.isPlaying { return }
     let wasPlaying = isPlaying || wantsPlaying
     stopPlayer()
     converter?.reset()
