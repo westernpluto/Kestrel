@@ -139,7 +139,10 @@ final class KestrelController {
           // Back on a connection (out of a tunnel, onto another network) while stuck: the
           // downloads in flight went with the old one, so straight back to live (it waited up
           // to 12 s for them before).
-          if NetworkWatch.shared.kind != .none, case .stalled = engine.state {
+          guard NetworkWatch.shared.kind != .none else { return }
+          // (New connections either way: the old went with the old network.)
+          engine.connectionMoved()
+          if case .stalled = engine.state {
             ActivityLog.shared.add("Kestrel player: connection back while stalled; starting again at live")
             engine.restart()
           }

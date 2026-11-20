@@ -959,6 +959,32 @@ final class KestrelEngine: NSObject {
 
   private var lastReconnect = Date.distantPast
 
+  /// The phone moved to another connection (Wi-Fi to cellular, onto another network): the
+  /// connections to Twitch's video server went with the old one, so new ones at once, and what's
+  /// still coming asked for again on them (the rest of it, for one part-way in). It waited for
+  /// them to go quiet for a few seconds first, the picture frozen meanwhile.
+  func connectionMoved() {
+    guard running else { return }
+    var old: URLSession?
+    if sharesConnections {
+      SegmentConnections.shared.renew()
+    } else {
+      old = urlSession
+      urlSession = makeSession()
+    }
+    let unfinished = loads.filter { !$0.finished && !$0.handedOver }
+    for load in unfinished {
+      let stale = load.task
+      request(load)
+      stale?.cancel()
+    }
+    old?.invalidateAndCancel()
+    lastReconnect = Date()
+    if !unfinished.isEmpty {
+      ActivityLog.shared.add("Kestrel player: connection changed; \(unfinished.count) downloads moved onto new connections")
+    }
+  }
+
   /// The downloads share a few connections to Twitch's video server, and one can go dead without
   /// closing (the Wi-Fi dropping packets for a moment, a router forgetting it): every segment on it
   /// then waits out the full time limit, and they failed together ten or more seconds later (20

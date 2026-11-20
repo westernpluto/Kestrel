@@ -189,6 +189,19 @@ final class ChatController: ObservableObject {
   func start() {
     guard !running else { return }
     running = true
+    if !isReplay {
+      // Onto another connection (Wi-Fi to cellular): chat's went with the old one, so a new one
+      // at once rather than when the next ping goes unanswered.
+      networkToken = NotificationCenter.default.addObserver(forName: NetworkWatch.changed, object: nil, queue: .main) {
+        [weak self] _ in
+        MainActor.assumeIsolated {
+          guard let self, self.running, NetworkWatch.shared.kind != .none, let old = self.socket else { return }
+          old.cancel(with: .goingAway, reason: nil)
+          self.socket = nil
+          self.connect()
+        }
+      }
+    }
     let channel = self.channel
     let replay = isReplay
     Task {
@@ -500,9 +513,12 @@ final class ChatController: ObservableObject {
     sevenTV = nil
     if let returnToken { NotificationCenter.default.removeObserver(returnToken) }
     returnToken = nil
+    if let networkToken { NotificationCenter.default.removeObserver(networkToken) }
+    networkToken = nil
   }
 
   private var returnToken: NSObjectProtocol?
+  private var networkToken: NSObjectProtocol?
 
   /// Messages held while in the background go on screen as soon as the app's back.
   private func watchForReturn() {
