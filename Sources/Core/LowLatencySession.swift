@@ -104,6 +104,10 @@ actor LowLatencySession: PlaylistSource {
   private var active: StreamSession.BackupMaster?
   private var backupMasters: [String: StreamSession.BackupMaster] = [:]
   private var contaminated: Set<String> = []
+  /// Other copies the last search found clean in this break, best first: switched to at once if
+  /// the one in use starts showing ads or stops answering (a new search waited out a pause of six
+  /// seconds after the last one, and took a few more: the video ran out meanwhile).
+  private var standby: [String] = []
   private var pinnedType: String?
   private var searchTask: Task<Void, Never>?
   private var searchSignal = OneShotSignal()
@@ -358,11 +362,11 @@ actor LowLatencySession: PlaylistSource {
           AdsSeenInCopies.note(backup.type)
           if pinnedType == backup.type { pinnedType = nil }
           active = nil
-          startSearchIfNeeded(target: target)
+          if !takeStandby() { startSearchIfNeeded(target: target) }
         case .failure:
           log.add("Ad-free copy (\(backup.type)) stopped responding, looking for another")
           active = nil
-          startSearchIfNeeded(target: target)
+          if !takeStandby() { startSearchIfNeeded(target: target) }
         }
       }
     }
@@ -437,6 +441,7 @@ actor LowLatencySession: PlaylistSource {
     breakID += 1
     breakStart = Date()
     contaminated = []
+    standby = []
     active = nil
     lastSearchEnd = .distantPast
     log.add("Ad stitched into \(login)'s stream, looking for an ad-free copy")
@@ -447,6 +452,7 @@ actor LowLatencySession: PlaylistSource {
     inBreak = false
     breakID += 1
     active = nil
+    standby = []
     searchTask?.cancel()
     searchTask = nil
     log.add("Stitched ad over after \(Int(Date().timeIntervalSince(breakStart).rounded()))s")
@@ -533,6 +539,19 @@ actor LowLatencySession: PlaylistSource {
     }
   }
 
+  /// The next copy found clean in this break, if there's one (see `standby`): it's checked again
+  /// on the next playlist, as every copy is.
+  private func takeStandby() -> Bool {
+    while let type = standby.first {
+      standby.removeFirst()
+      guard !contaminated.contains(type), let master = backupMasters[type] else { continue }
+      active = master
+      log.add("Switched to the next ad-free copy found (\(type)) at once")
+      return true
+    }
+    return false
+  }
+
   private func finishSearch(
     _ results: [Int: (type: String, master: StreamSession.BackupMaster?, clean: Bool, failure: String?)], types: [String],
     target: HLSVariant, breakID: Int, started: Date
@@ -541,8 +560,10 @@ actor LowLatencySession: PlaylistSource {
     lastSearchEnd = Date()
     for result in results.values { if let master = result.master { backupMasters[result.type] = master } }
     guard breakID == self.breakID, inBreak else { return }
-    if let winner = types.indices.compactMap({ results[$0] }).first(where: { $0.clean }), let master = winner.master {
+    let clean = types.indices.compactMap { results[$0] }.filter { $0.clean && $0.master != nil }
+    if let winner = clean.first, let master = winner.master {
       active = master
+      standby = clean.dropFirst().map(\.type)
       if winner.type != "autoplay" { pinnedType = winner.type }
       let label = master.master.bestMatch(for: target)?.label ?? "?"
       log.add("Switched to ad-free copy (\(winner.type), \(label)) in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
