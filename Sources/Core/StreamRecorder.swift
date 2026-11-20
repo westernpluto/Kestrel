@@ -411,12 +411,16 @@ actor StreamRecorder {
 
   private static func download(_ uri: String, http: HTTPClient) async -> Data? {
     guard let url = URL(string: uri) else { return nil }
-    for _ in 0..<2 {
-      var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
+    // Three tries of ten seconds, a moment apart (two of twenty, back to back, before: a dead
+    // connection cost forty seconds, and the segments after it had left Twitch's playlist by then,
+    // a gap in the recording). A refusal (403, 404: it's gone) isn't tried again.
+    for attempt in 0..<3 {
+      if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 500_000_000) }
+      var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
       request.setValue(Browser.userAgent, forHTTPHeaderField: "User-Agent")
-      if let (data, response) = try? await http.data(for: request), response.statusCode == 200, !data.isEmpty {
-        return data
-      }
+      guard let (data, response) = try? await http.data(for: request) else { continue }
+      if response.statusCode == 200, !data.isEmpty { return data }
+      if (400..<500).contains(response.statusCode), response.statusCode != 429 { return nil }
     }
     return nil
   }
