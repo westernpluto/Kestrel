@@ -851,6 +851,35 @@ final class KestrelEngine: NSObject {
   private var playlistsWithoutPrefetch = 0
   /// One segment's worth (Twitch's are two seconds).
   static let segmentLength = 2.0
+
+  /// When new segments last showed up in the playlist, and how far apart they come (learned).
+  private var lastNewSegmentAt: Date?
+  private var segmentInterval: Double?
+
+  private func noteNewSegments() {
+    let now = Date()
+    if let last = lastNewSegmentAt {
+      let gap = now.timeIntervalSince(last)
+      // (Not across a pause: an ad break, the app away.)
+      if gap > 0.3, gap < 8 { segmentInterval = segmentInterval.map { $0 * 0.8 + gap * 0.2 } ?? gap }
+    }
+    lastNewSegmentAt = now
+  }
+
+  /// How long until the playlist is asked for again. With Twitch's low latency the next two
+  /// segments are listed ahead, so the playlist only needs reading about three times a segment.
+  /// Without it (a channel not on low latency, or Twitch leaving the hints out around an ad), a
+  /// new segment can only be started once it's listed: then it's asked for again just before the
+  /// next one is due, by how far apart they've been coming, and often once it's overdue (a fixed
+  /// 0.7 s found each one up to 0.7 s late, video the player then didn't have).
+  private func nextPollDelay() -> Double {
+    let interval = segmentInterval ?? Self.segmentLength
+    guard wholeSegments || !latestHasPrefetch, let last = lastNewSegmentAt else {
+      return min(1, max(0.4, interval / 3))
+    }
+    let due = interval - Date().timeIntervalSince(last)
+    return due > 0.6 ? min(1, due - 0.3) : 0.25
+  }
   private var aheadHistory: [(at: Date, ahead: Double)] = []
 
   /// The least in hand over the last few seconds (longer than the gap between segments).
@@ -891,10 +920,9 @@ final class KestrelEngine: NSObject {
         }
         let planned = planner.plan(text)
         for segment in planned { begin(segment) }
+        if !planned.isEmpty { noteNewSegments() }
       }
-      // Twitch's low-latency playlists move every couple of seconds, and list the next two
-      // segments ahead: often enough to start each one as soon as it's listed.
-      try? await Task.sleep(nanoseconds: 700_000_000)
+      try? await Task.sleep(nanoseconds: UInt64(nextPollDelay() * 1e9))
     }
   }
 
