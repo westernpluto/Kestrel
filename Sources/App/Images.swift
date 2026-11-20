@@ -505,10 +505,11 @@ final class ImagePipeline: @unchecked Sendable {
     let small = (maxPixels ?? .infinity) <= 160
     var request = URLRequest(url: url)
     if Self.isUnchanging(url) { request.cachePolicy = .returnCacheDataElseLoad }
-    var made: URLSessionTask?
+    // (Set before the task starts, read once it ends: the slot it held in the queue.)
+    let made = MadeTask()
     let task = session.dataTask(with: request) { [weak self] data, response, error in
       guard let self else { return }
-      if small, let made { self.downloadEnded(key, made) }
+      if small, let started = made.task { self.downloadEnded(key, started) }
       if (error as? URLError)?.code == .cancelled { return }
       let status = (response as? HTTPURLResponse)?.statusCode ?? 0
       if let data, (200..<300).contains(status) {
@@ -538,7 +539,7 @@ final class ImagePipeline: @unchecked Sendable {
       // time it shows, not its name for the rest of the session.)
       self.deliver(key, nil, final: true, permanent: status != 0 && status != 429 && status < 500)
     }
-    made = task
+    made.task = task
     // Small pictures (emotes, badges) first: they're what chat is waiting on.
     if small {
       task.priority = URLSessionTask.highPriority
@@ -1023,4 +1024,9 @@ struct PickerEmoteImage: View {
     guard let full = ImagePipeline.shared.cached(url, maxPixels: 112), !ImagePipeline.shared.isUpgrading(url, maxPixels: 112) else { return false }
     return (full.images?.count ?? 0) > 1
   }
+}
+
+/// A download task, known to its own completion (see `fetch`).
+private final class MadeTask: @unchecked Sendable {
+  var task: URLSessionTask?
 }

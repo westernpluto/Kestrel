@@ -179,6 +179,8 @@ final class AudioOutput {
   /// Starts (or resumes) the sound at the current speed.
   func play() {
     wantsPlaying = true
+    idleTask?.cancel()
+    idleTask = nil
     guard outputFormat != nil else { return }
     activateSession()
     if !engine.isRunning {
@@ -235,7 +237,19 @@ final class AudioOutput {
     startRetries = 0
     player.pause()
     isPlaying = false
+    // The engine too, once it's stayed paused a few seconds (not for a stall's moment): left
+    // running while paused (minutes, in a paused Picture in Picture window) it went on working out
+    // silence the whole time, and the system kept stopping it and it was started again every few
+    // seconds. What's queued stays; `play` starts it again.
+    idleTask?.cancel()
+    idleTask = Task { @MainActor [weak self] in
+      try? await Task.sleep(nanoseconds: 3_000_000_000)
+      guard let self, !Task.isCancelled, !self.wantsPlaying, self.engine.isRunning else { return }
+      self.engine.pause()
+    }
   }
+
+  private var idleTask: Task<Void, Never>?
 
   /// The speed (pitch kept): changes smoothly while it plays.
   func setSpeed(_ rate: Float) {
@@ -259,6 +273,7 @@ final class AudioOutput {
 
   func shutDown() {
     wantsPlaying = false
+    idleTask?.cancel()
     retryTask?.cancel()
     retryTask = nil
     restartTask?.cancel()
@@ -361,7 +376,8 @@ final class AudioOutput {
       engine.connect(pitch, to: compressor, format: format)
       engine.connect(compressor, to: engine.mainMixerNode, format: format)
     }
-    ActivityLog.shared.add("Kestrel player: the sound was stopped by the system; started again")
+    // (Paused: only set up again, quietly; it starts with the next play.)
+    if wasPlaying { ActivityLog.shared.add("Kestrel player: the sound was stopped by the system; started again") }
     onReset?()
     if wasPlaying { play() }
   }
