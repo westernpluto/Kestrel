@@ -1725,6 +1725,15 @@ func testResponseTimer() {
   check(timer.late(floor: 0.35, ceiling: 2, initial: 1) == 2, "never over the ceiling")
 }
 
+func testSegmentInfoAd() {
+  let ad = TwitchSegmentInfo(metadata: Data(#"{"cmd":"x","ingest_r":0,"broadc_r":0,"stream_offset":0}"#.utf8))
+  check(ad?.isAd == true, "stitched ad")
+  let ending = TwitchSegmentInfo(metadata: Data(#"{"cmd":"x","ingest_r":0,"broadc_r":0,"stream_offset":44332.5}"#.utf8))
+  check(ending?.isAd == false && ending?.ingested == false, "stream ending isn't an ad")
+  let live = TwitchSegmentInfo(metadata: Data(#"{"cmd":"x","ingest_r":1.7e9,"stream_offset":120}"#.utf8))
+  check(live?.isAd == false, "broadcast")
+}
+
 func testStreamTags() {
   let json = """
     {"id":"s1","viewersCount":1234,"previewImageURL":"https://x/{width}x{height}.jpg","createdAt":"2026-10-22T01:02:03Z",
@@ -3077,6 +3086,7 @@ testVODPlaylists()
 testVODUnmute()
 testTokenExpiry()
 testResponseTimer()
+testSegmentInfoAd()
 testVODComments()
 testStreamTags()
 testAccountRoute()

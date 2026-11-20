@@ -63,6 +63,11 @@ struct TwitchSegmentInfo: Equatable, Sendable {
   /// Seconds into the broadcast.
   var streamOffset: Double?
 
+  /// An ad Twitch stitched in: not from the streamer, and at no point in the broadcast (an ad's
+  /// metadata says 0 s in). What Twitch shows as a stream ends isn't from the streamer either, but
+  /// still says where in the broadcast it is (hours in): taken for an ad, it was covered as one.
+  var isAd: Bool { !ingested && (streamOffset ?? 0) < 1 }
+
   /// From a metadata PES packet (or any bytes holding its JSON); nil without Twitch's.
   init?(metadata: Data) {
     let bytes = [UInt8](metadata)

@@ -1195,7 +1195,7 @@ final class KestrelEngine: NSObject {
       timeline.beginSegment(firstPTS: frame.pts, isVideo: isVideo, discontinuity: load.planned.discontinuity)
       if load.planned.discontinuity { waitingForKeyframe = true }
       // What the segment itself says, every segment (see `inBandAdCovers`).
-      if let info = load.demuxer?.twitchInfo { segmentIsAd = !info.ingested }
+      if let info = load.demuxer?.twitchInfo { segmentIsAd = info.isAd }
       // The live segment being made jumped in time without a word from the playlist, not just
       // after a switch to or from an ad-free copy: most likely an ad stitched in. Said at once,
       // so it's covered from its first frame (the playlist marks it two seconds later, and those
@@ -1210,7 +1210,7 @@ final class KestrelEngine: NSObject {
         let time = timeline.lastUnmarkedSeam, let anchor
       {
         let info = load.demuxer?.twitchInfo
-        if let info, !info.ingested {
+        if let info, info.isAd {
           let date = anchor.date.addingTimeInterval(Double(time - anchor.time) / Double(Self.clock))
           unannouncedSeam = (date, Date())
           ActivityLog.shared.add(
