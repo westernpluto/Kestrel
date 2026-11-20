@@ -786,9 +786,25 @@ final class ChatController: ObservableObject {
       return
     }
     pending.append(message)
+    let now = Date()
+    if let last = lastEnqueued { messageGap = messageGap * 0.9 + min(5, now.timeIntervalSince(last)) * 0.1 }
+    lastEnqueued = now
     guard !flushScheduled else { return }
     flushScheduled = true
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.flush() }
+    DispatchQueue.main.asyncAfter(deadline: .now() + flushDelay) { [weak self] in self?.flush() }
+  }
+
+  /// How far apart messages have been coming (seconds, evened out), and when the last one did.
+  private var messageGap = 1.0
+  private var lastEnqueued: Date?
+
+  /// Messages go on screen in batches, by how fast chat is going: a quiet chat's at once (a
+  /// thirtieth of a second), a busy one's a few times a second (each batch is one layout pass:
+  /// fifty a second laid out one by one kept the main thread busy). A fixed 0.15 s held up every
+  /// message in a quiet chat and was still often in a fast one.
+  private var flushDelay: TimeInterval {
+    let perSecond = 1 / max(0.005, messageGap)
+    return min(0.25, max(1.0 / 30, perSecond * 0.008))
   }
 
   private func flush() {
