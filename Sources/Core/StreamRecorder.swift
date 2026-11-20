@@ -361,7 +361,9 @@ actor StreamRecorder {
       }
       for (position, item) in batch.enumerated() {
         lastSequence = item.sequence
-        guard !item.segment.isAd, let data = results[position] else {
+        // (An ad the playlist didn't mark, told by the segment's own metadata at its start: kept
+        // out as well, as the player covers it.)
+        guard !item.segment.isAd, let data = results[position], !Self.saysAd(data) else {
           // An ad (skipped) or a segment that couldn't be fetched: a jump in the recording.
           if !pendingDiscontinuity, !entries.isEmpty { info.gaps += 1 }
           pendingDiscontinuity = true
@@ -407,6 +409,12 @@ actor StreamRecorder {
     guard (try? data.write(to: directory.appendingPathComponent(file))) != nil else { return nil }
     maps[remote] = file
     return file
+  }
+
+  /// A segment whose own metadata (in its first few kilobytes, either format) says it's an ad.
+  static func saysAd(_ data: Data) -> Bool {
+    let head = data.prefix(8192)
+    return TwitchSegmentInfo.marksAd(head) || (TwitchSegmentInfo(metadata: head)?.isAd ?? false)
   }
 
   private static func download(_ uri: String, http: HTTPClient) async -> Data? {

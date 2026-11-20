@@ -13,6 +13,9 @@ import Foundation
 
 struct LowLatencyConfig: Sendable {
   var codecs = "h264"
+  /// A late playlist asked for a second time beside it (see `fetch`). (Off where requests are
+  /// counted exactly, as in the tests.)
+  var hedgePlaylists = true
   var backupStreams = true
   var allowLowQualityBackup = true
   var mainPlayerType = "popout"
@@ -713,6 +716,7 @@ actor LowLatencySession: PlaylistSource {
     let client = throughProxy ? http : mediaHTTP
     let times = playlistTimes
     let hedgeAfter = times.late(floor: 0.35, ceiling: 2, initial: 1)
+    guard config.hedgePlaylists else { return await Self.load(url, timeout: timeout, client: client, times: times) }
     return await withTaskGroup(of: FetchResult?.self) { group in
       group.addTask { await Self.load(url, timeout: timeout, client: client, times: times) }
       group.addTask {

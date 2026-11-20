@@ -361,6 +361,11 @@ func testAdSeamsOnRealSegments() {
   check(liveInfo?.ingested == true && liveInfo?.streamOffset == 21130, "the stream says it did (\(String(describing: liveInfo)))")
   check(nextInfo?.ingested == true && nextInfo?.streamOffset == 21132, "and its next segment two seconds on (\(String(describing: nextInfo)))")
   check(adInfo?.markedAd == true && adInfo?.isAd == true, "the ad is tagged as one (30 s into it)")
+  if let adData = try? Data(contentsOf: dir.appendingPathComponent("twitch_ad_tail.ts")),
+    let liveData = try? Data(contentsOf: dir.appendingPathComponent("twitch_live_after_ad.ts"))
+  {
+    check(StreamRecorder.saysAd(adData) && !StreamRecorder.saysAd(liveData), "recordings tell the ad segment by itself")
+  }
   check(liveInfo?.isAd == false && nextInfo?.isAd == false, "the broadcast isn't")
   check(TwitchSegmentInfo(metadata: Data("no metadata here".utf8)) == nil, "no metadata, no info")
   check(TwitchSegmentInfo(metadata: Data(#"xx{"cmd":"ld_lat_data","broadc_r":0}"#.utf8)) == nil, "without ingest_r, no verdict")
@@ -1299,6 +1304,8 @@ func testProxyDuringAds() {
     var config = LowLatencyConfig()
     config.proxyPlaylistsDuringAds = true
     config.lowLatencyThroughAds = true
+    // (Requests counted exactly: no second request beside a slow one on a busy test machine.)
+    config.hedgePlaylists = false
     let session = LowLatencySession(login: "streamer", config: config, http: proxy, mediaHTTP: direct, tokens: fake, log: ActivityLog())
     _ = try! await session.start()
     let atStart = (proxy.count, direct.count)
