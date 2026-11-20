@@ -544,8 +544,28 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
   // MARK: Playback tokens
 
   func streamToken(login: String, playerType: String, platform: String) async throws -> PlaybackToken {
-    try await playbackToken(login: login, vodID: nil, playerType: playerType, platform: platform)
+    // The same stream opened again within a few minutes (a restart, back from another channel,
+    // audio only and back): the token from a moment ago, not another round trip to Twitch before
+    // the first picture. (For the same account; well before Twitch's own expiry.)
+    let key = [login.lowercased(), playerType, platform, TwitchAuth.shared.session?.login ?? "", playbackHTTP == nil ? "" : "proxy"]
+      .joined(separator: "|")
+    tokenLock.lock()
+    let cached = recentTokens[key]
+    tokenLock.unlock()
+    if let cached, cached.until > Date() { return cached.token }
+    let token = try await playbackToken(login: login, vodID: nil, playerType: playerType, platform: platform)
+    let until = min(token.expires?.addingTimeInterval(-120) ?? .distantFuture, Date().addingTimeInterval(Self.tokenReuse))
+    tokenLock.lock()
+    recentTokens = recentTokens.filter { $0.value.until > Date() }
+    recentTokens[key] = (token, until)
+    tokenLock.unlock()
+    return token
   }
+
+  /// How long a stream's token is used again for the same stream.
+  static let tokenReuse: TimeInterval = 300
+  private let tokenLock = NSLock()
+  private var recentTokens: [String: (token: PlaybackToken, until: Date)] = [:]
 
   /// A token asked for anonymously through `client` (nil: straight, without the user's proxy): for
   /// checking what Twitch sees through a proxy (the address it came from, whether ads would show).

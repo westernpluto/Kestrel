@@ -1706,6 +1706,12 @@ func testVODUnmute() {
   }
 }
 
+func testTokenExpiry() {
+  let token = PlaybackToken(value: #"{"expires":1800000000,"show_ads":true}"#, signature: "x")
+  check(token.expires == Date(timeIntervalSince1970: 1_800_000_000), "expiry read")
+  check(PlaybackToken(value: "{}", signature: "x").expires == nil, "no expiry")
+}
+
 func testStreamTags() {
   let json = """
     {"id":"s1","viewersCount":1234,"previewImageURL":"https://x/{width}x{height}.jpg","createdAt":"2026-10-22T01:02:03Z",
@@ -3056,6 +3062,7 @@ testRaids()
 testAdFreeProxy()
 testVODPlaylists()
 testVODUnmute()
+testTokenExpiry()
 testVODComments()
 testStreamTags()
 testAccountRoute()

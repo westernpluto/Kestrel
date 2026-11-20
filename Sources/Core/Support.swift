@@ -241,6 +241,14 @@ struct PlaybackToken: Equatable, Sendable {
       userIP: (object["user_ip"] as? String).flatMap { $0.isEmpty ? nil : $0 })
   }
 
+  /// When Twitch stops accepting it (the token value says), if it says.
+  var expires: Date? {
+    guard let object = try? JSONSerialization.jsonObject(with: Data(value.utf8)) as? [String: Any],
+      let seconds = (object["expires"] as? NSNumber)?.doubleValue, seconds > 0
+    else { return nil }
+    return Date(timeIntervalSince1970: seconds)
+  }
+
   /// One line for the activity log.
   var summary: String {
     guard let info else { return "Twitch session details unavailable" }
