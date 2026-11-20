@@ -172,6 +172,8 @@ final class KestrelEngine: NSObject {
   private(set) var audioAutoFlushes = 0
   /// Times the sound was put back on the picture (see `syncClock`).
   private(set) var audioResyncs = 0
+  /// How far the sound is ahead of the picture (seconds, evened out), while both play.
+  private(set) var syncOffset: Double?
   private var lastAudioResync = Date.distantPast
   private var lastHeard: Int64?
   private var playingSince: Date?
@@ -285,21 +287,33 @@ final class KestrelEngine: NSObject {
   /// Channels whose picture the layer held (showing keyframes only) in this run of the app.
   private static var layerHeldOn: Set<String> = []
 
+  /// In the app, every frame is decoded here with VideoToolbox, in order, and the pictures handed
+  /// to the screen's layer: the layer's own decoding, left to itself, held the picture (keyframes
+  /// only) after a skip in the broadcast or a return from Picture in Picture, and it was only seen
+  /// and worked around once frozen. Here a frame that can't be decoded is known at once (and the
+  /// next keyframe starts it again). Only Picture in Picture and the background, where the system
+  /// lets only the layer decode, go back to the layer's decoding. Set by whoever made the player
+  /// (the main player; multi-view's tiles leave it to the layer).
+  var decodesHereInApp = false {
+    didSet { resumeRemembered("in the app") }
+  }
+
   /// On a channel where the layer has held the picture before, decoding goes back to VideoToolbox
   /// as soon as it can (in the app, not in Picture in Picture or the background, where only the
   /// layer decodes) instead of waiting for the picture to hold again. Handed back to the layer
   /// for Picture in Picture and left there, the picture held again a minute or a few later, every
   /// time (caseoh_, 1080p60: three times in an evening, each after coming back from the window).
   private func resumeRemembered(_ why: String) {
-    guard decodeInLayer, let channelKey, Self.layerHeldOn.contains(channelKey), !inBackground, !screenInPictureInPicture,
-      UIApplication.shared.applicationState == .active
+    guard decodeInLayer, let channelKey, decodesHereInApp || Self.layerHeldOn.contains(channelKey), !inBackground,
+      !screenInPictureInPicture, UIApplication.shared.applicationState == .active
     else { return }
     setDecodeHere(true)
     // (Only while it's here for this: Picture in Picture and the background hand it back.)
     decodingHereForRescue = decodingHereByRequest
     catchUpHere()
     if decodingHereForRescue {
-      ActivityLog.shared.add("Kestrel player: decoding with VideoToolbox (\(why): the layer held the picture on this channel earlier)")
+      ActivityLog.shared.add(
+        "Kestrel player: decoding with VideoToolbox (\(why)\(decodesHereInApp ? "" : ": the layer held the picture on this channel earlier"))")
     }
   }
 
@@ -1676,6 +1690,8 @@ final class KestrelEngine: NSObject {
     }
     let stuck = Date().timeIntervalSince(lastHeardMoved) > 0.6
     let drift = Double(heard - now) / Double(Self.clock)
+    // (For the stats: how far the picture is from the sound, evened out over a few looks.)
+    if !stuck { syncOffset = syncOffset.map { $0 * 0.8 + drift * 0.2 } ?? drift }
     if !stuck, abs(drift) <= 0.08 {
       let trim = max(-0.02, min(0.02, drift * 0.5))
       CMTimebaseSetRate(videoClock, rate: Float64(speed) * (1 + trim))

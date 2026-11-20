@@ -110,6 +110,8 @@ final class KestrelController {
         let result = await session.mediaPlaylist(index)
         return result.status == 200 ? result.body : nil
       }
+      // (Decoded here in the app, every frame in order; multi-view's tiles leave it to the layer.)
+      engine.decodesHereInApp = model?.isTile != true
       engine.channelKey = login.lowercased()
       engine.renditionHeights = Dictionary(variants.enumerated().map { ($0.offset, $0.element.height) }, uniquingKeysWith: { a, _ in a })
       engine.onState = { [weak self] state in self?.engineState(state) }
@@ -544,6 +546,10 @@ final class KestrelController {
         value: String(format: "%.1f s", engine.catchUp.targetBuffer)
           + (engine.wholeSegments ? " (channel not on low latency: video in 2 s pieces)" : "")))
     lines.append(StatLine(label: "Stalls", value: "\(engine.stalls)"))
+    lines.append(
+      StatLine(
+        label: "Sync",
+        value: engine.syncOffset.map { String(format: "picture %.0f ms %@ the sound (as heard)", abs($0 * 1000), $0 > 0 ? "behind" : "ahead of") } ?? "–"))
     lines.append(
       StatLine(
         label: "Sound",
