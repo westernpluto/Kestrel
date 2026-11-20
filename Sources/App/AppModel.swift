@@ -223,7 +223,7 @@ final class AppSettings: ObservableObject {
   var proxyPlaylistsDuringAds: Bool { playbackProxy != nil && proxyPlaylists == .duringAds }
 
   /// Straight to Twitch, never through a proxy (one for all: its connections stay open).
-  private static let direct = URLSessionHTTPClient(timeout: 10)
+  private static let direct = URLSessionHTTPClient(timeout: 10, liveVideo: true)
 
   private let sharedLock = NSLock()
   private var sharedPlayback: (proxy: HTTPProxy?, client: HTTPClient)?
@@ -237,7 +237,7 @@ final class AppSettings: ObservableObject {
     sharedLock.lock()
     defer { sharedLock.unlock() }
     if let sharedPlayback, sharedPlayback.proxy == proxy { return sharedPlayback.client }
-    let client = URLSessionHTTPClient(timeout: 8, proxy: proxy)
+    let client = URLSessionHTTPClient(timeout: 8, proxy: proxy, liveVideo: true)
     sharedPlayback = (proxy, client)
     return client
   }

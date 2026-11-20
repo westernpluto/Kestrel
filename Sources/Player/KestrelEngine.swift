@@ -141,13 +141,27 @@ final class KestrelEngine: NSObject {
   private lazy var urlSession: URLSession = makeSession()
   private(set) var reconnects = 0
 
-  private func makeSession() -> URLSession {
+  private func makeSession() -> URLSession { Self.makeSegmentSession(delegate: self) }
+
+  /// The video downloads' session: live video (iOS gives it the Wi-Fi's video priority), nothing
+  /// kept on disk (each segment is played once; they went into the app's web cache), no cookies.
+  static func makeSegmentSession(delegate: URLSessionDataDelegate) -> URLSession {
     let configuration = URLSessionConfiguration.default
     configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+    configuration.urlCache = nil
+    configuration.httpShouldSetCookies = false
+    configuration.httpCookieAcceptPolicy = .never
+    configuration.networkServiceType = .responsiveAV
     configuration.timeoutIntervalForRequest = 10
     configuration.httpMaximumConnectionsPerHost = 6
-    return URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
+    return URLSession(configuration: configuration, delegate: delegate, delegateQueue: .main)
   }
+
+  /// The main player's downloads go over connections kept open from one stream to the next (see
+  /// SegmentConnections): a new stream, a channel switch, a restart, didn't pay for new ones
+  /// (name lookup, TCP, TLS) before its first video. Set by whoever made the player; multi-view's
+  /// tiles keep their own.
+  var sharesConnections = false
   private var pollTask: Task<Void, Never>?
   private var ticker: Timer?
   private var running = false
@@ -496,7 +510,7 @@ final class KestrelEngine: NSObject {
     }
     if let transfer { VTPixelTransferSessionInvalidate(transfer) }
     transfer = nil
-    urlSession.invalidateAndCancel()
+    if !sharesConnections { urlSession.invalidateAndCancel() }
     describeScreen = nil
     refitScreen = nil
     onScreenLayers = nil
@@ -903,7 +917,7 @@ final class KestrelEngine: NSObject {
       request.setValue("bytes=\(load.received)-", forHTTPHeaderField: "Range")
       load.skip = load.received
     }
-    let task = urlSession.dataTask(with: request)
+    let task = sharesConnections ? SegmentConnections.shared.dataTask(request, for: self) : urlSession.dataTask(with: request)
     // (First on the connection: before a recording downloading at the same time, say.)
     task.priority = URLSessionTask.highPriority
     load.task = task
@@ -963,8 +977,14 @@ final class KestrelEngine: NSObject {
     guard quietFor > 3, due, !waiting.isEmpty else { return }
     lastReconnect = now
     reconnects += 1
-    let old = urlSession
-    urlSession = makeSession()
+    // (Shared: the shared ones are made again; the old close once what's on them is done.)
+    var old: URLSession?
+    if sharesConnections {
+      SegmentConnections.shared.renew()
+    } else {
+      old = urlSession
+      urlSession = makeSession()
+    }
     for load in waiting {
       // Not started yet: asked for again on the new connections.
       let stale = load.task
@@ -973,7 +993,7 @@ final class KestrelEngine: NSObject {
     }
     // One part-way in carries on where it is (the stream itself may have paused: dropping it would
     // lose the rest); the old connections close once it's done.
-    old.finishTasksAndInvalidate()
+    old?.finishTasksAndInvalidate()
     ActivityLog.shared.add(String(format: "Kestrel player: nothing came in for %.0f s; new connection (%d segments asked for again)", quietFor, waiting.count))
     pump()
   }
@@ -2466,6 +2486,48 @@ extension KestrelEngine: URLSessionDataDelegate {
       }
       load.finished = true
       pump()
+    }
+  }
+}
+
+/// Connections to Twitch's video servers kept open for the main player from one stream to the
+/// next (see `KestrelEngine.sharesConnections`): each download is handed to the player that asked
+/// for it.
+final class SegmentConnections: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+  @MainActor static let shared = SegmentConnections()
+
+  private final class Owner {
+    weak var engine: KestrelEngine?
+    init(_ engine: KestrelEngine) { self.engine = engine }
+  }
+
+  // (All on the main thread: the session's delegate queue is the main queue.)
+  @MainActor private var owners: [ObjectIdentifier: Owner] = [:]
+  @MainActor private lazy var session: URLSession = KestrelEngine.makeSegmentSession(delegate: self)
+
+  @MainActor func dataTask(_ request: URLRequest, for engine: KestrelEngine) -> URLSessionDataTask {
+    let task = session.dataTask(with: request)
+    owners[ObjectIdentifier(task)] = Owner(engine)
+    return task
+  }
+
+  /// New connections (the old ones went quiet): the old close once what's on them is done.
+  @MainActor func renew() {
+    let old = session
+    session = KestrelEngine.makeSegmentSession(delegate: self)
+    old.finishTasksAndInvalidate()
+  }
+
+  nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+    MainActor.assumeIsolated {
+      owners[ObjectIdentifier(dataTask)]?.engine?.urlSession(session, dataTask: dataTask, didReceive: data)
+    }
+  }
+
+  nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+    MainActor.assumeIsolated {
+      let owner = owners.removeValue(forKey: ObjectIdentifier(task))
+      owner?.engine?.urlSession(session, task: task, didCompleteWithError: error)
     }
   }
 }

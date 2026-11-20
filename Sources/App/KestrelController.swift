@@ -112,6 +112,7 @@ final class KestrelController {
       }
       // (Decoded here in the app, every frame in order; multi-view's tiles leave it to the layer.)
       engine.decodesHereInApp = model?.isTile != true
+      engine.sharesConnections = model?.isTile != true
       engine.channelKey = login.lowercased()
       engine.renditionHeights = Dictionary(variants.enumerated().map { ($0.offset, $0.element.height) }, uniquingKeysWith: { a, _ in a })
       engine.onState = { [weak self] state in self?.engineState(state) }

@@ -33,10 +33,14 @@ final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
 
   /// - Parameter givesWay: downloads that give way to others on a busy connection (iOS's
   ///   background network class): a recording, beside the stream being watched.
-  init(timeout: TimeInterval = 10, proxy: HTTPProxy? = nil, givesWay: Bool = false) {
+  /// - Parameter liveVideo: a live stream's playlists (iOS gives them the Wi-Fi's video priority).
+  init(timeout: TimeInterval = 10, proxy: HTTPProxy? = nil, givesWay: Bool = false, liveVideo: Bool = false) {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.timeoutIntervalForRequest = timeout
     if givesWay { configuration.networkServiceType = .background }
+    #if canImport(Darwin)
+      if liveVideo, !givesWay { configuration.networkServiceType = .responsiveAV }
+    #endif
     configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
     configuration.urlCache = nil
     configuration.httpMaximumConnectionsPerHost = 6
