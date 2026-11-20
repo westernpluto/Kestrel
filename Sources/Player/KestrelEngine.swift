@@ -1928,6 +1928,14 @@ final class KestrelEngine: NSObject {
   private func checkPace(ahead: Double) {
     guard !audioOnly, let newest = newestPlayable, speed > 0 else { return }
     let at = Date()
+    // Just after the video switched to or from an ad-free copy (or during an ad break, when Twitch
+    // sends whole segments): the gap at the switch isn't the connection's. Judged across it, a
+    // switch to a copy stepped the quality down ("70% of real time") on a connection that was fine.
+    if inAdBreak || at.timeIntervalSince(sourceChangedAt) < Self.sourceChangeGrace {
+      paceHistory = []
+      slowSince = nil
+      return
+    }
     paceHistory.append((at, newest))
     paceHistory.removeAll { at.timeIntervalSince($0.at) > 8 }
     guard let first = paceHistory.first, at.timeIntervalSince(first.at) >= 6 else { return }
