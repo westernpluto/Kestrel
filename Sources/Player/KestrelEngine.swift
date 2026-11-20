@@ -1662,9 +1662,14 @@ final class KestrelEngine: NSObject {
     }
     let time = Int64(pts.convertScale(Self.clock, method: .default).value)
     guard time >= showFrom else { return }
-    var format: CMVideoFormatDescription?
-    CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: image, formatDescriptionOut: &format)
-    guard let format else { return }
+    // (The same description for every picture until the size or kind changes: made sixty times
+    // a second otherwise.)
+    if pictureFormat.map({ !CMVideoFormatDescriptionMatchesImageBuffer($0, imageBuffer: image) }) ?? true {
+      var made: CMVideoFormatDescription?
+      CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: image, formatDescriptionOut: &made)
+      pictureFormat = made
+    }
+    guard let format = pictureFormat else { return }
     var timing = CMSampleTimingInfo(duration: duration, presentationTimeStamp: pts, decodeTimeStamp: .invalid)
     var sample: CMSampleBuffer?
     CMSampleBufferCreateReadyWithImageBuffer(
@@ -1678,6 +1683,9 @@ final class KestrelEngine: NSObject {
     }
     framesShown += 1
   }
+
+  /// The description of the decoded pictures (see `decoded`).
+  private var pictureFormat: CMVideoFormatDescription?
 
   /// Frames in a row that didn't decode, and since when (said in the log once the picture moves).
   private var failedRun = 0
