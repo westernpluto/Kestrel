@@ -63,9 +63,14 @@ final class NetworkWatch: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     // (Each 0.4 s more than it was, as on Wi-Fi: see LiveCatchUp's top.)
-    if current.constrained { return 1.6 }
-    return current.kind == .cellular ? 1.3 : LiveCatchUp.standardFloor
+    let connection = current.constrained ? 1.6 : current.kind == .cellular ? 1.3 : LiveCatchUp.standardFloor
+    // Smooth over lowest latency (Settings): about as much in hand as Twitch's website keeps,
+    // enough to ride out the usual second-or-so gaps in delivery without a stall.
+    return UserDefaults.standard.bool(forKey: "smoothLive") ? max(connection, Self.smoothFloor) : connection
   }
+
+  /// The least kept in hand with "Smooth" picked (Settings).
+  static let smoothFloor = 2.2
 
   /// A short name for remembering what each channel needed on this kind of connection.
   var memoryKey: String { kind == .cellular ? "cell" : "wifi" }

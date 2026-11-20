@@ -120,6 +120,9 @@ final class AppSettings: ObservableObject {
   @Published var multiviewPiPAll: Bool { didSet { defaults.set(multiviewPiPAll, forKey: "multiviewPiPAll") } }
   /// Clean up the picture's compression artifacts and enlarge it with MetalFX (see VideoUpscaler).
   @Published var enhancePicture: Bool { didSet { defaults.set(enhancePicture, forKey: "enhancePicture") } }
+  /// Live streams: a little further behind live (as far as Twitch's website), for no stalls when
+  /// the stream's delivery pauses for a second, instead of as close to live as possible.
+  @Published var smoothLive: Bool { didSet { defaults.set(smoothLive, forKey: "smoothLive") } }
   /// Past broadcasts: plays the original sound of the parts Twitch muted, while it still has it.
   @Published var unmuteVODs: Bool { didSet { defaults.set(unmuteVODs, forKey: "unmuteVODs") } }
   /// When the channel you're watching raids another: follow it (like Twitch), ask, or nothing.
@@ -174,6 +177,7 @@ final class AppSettings: ObservableObject {
     multiviewPiPAll = defaults.bool(forKey: "multiviewPiPAll")
     enhancePicture = defaults.bool(forKey: "enhancePicture")
     unmuteVODs = defaults.bool(forKey: "unmuteVODs")
+    smoothLive = defaults.bool(forKey: "smoothLive")
     raidMode = RaidMode(rawValue: defaults.string(forKey: "raidMode") ?? "") ?? .follow
     pipControls = defaults.bool(forKey: "pipControls")
     kestrelPlayer = defaults.bool(forKey: "kestrelPlayer")

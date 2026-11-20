@@ -179,8 +179,14 @@ struct PlaybackSettingsView: View {
           Text("Kestrel").tag(true)
           Text("Apple").tag(false)
         }
+        if settings.kestrelPlayer {
+          Picker("Live delay", selection: $settings.smoothLive) {
+            Text("Lowest").tag(false)
+            Text("Smooth").tag(true)
+          }
+        }
       } footer: {
-        Text("Kestrel's own player downloads each piece of the stream while it's still being made and shows it as it arrives, aiming at about a second behind live. Apple's player is further behind (several seconds) but is there if a stream misbehaves. Applies from the next stream you open, multi-view included. Its audio compressor (the waveform button on the video) evens out the volume, as FrankerFaceZ's does.")
+        Text("Kestrel's own player downloads each piece of the stream while it's still being made and shows it as it arrives, aiming at about a second behind live. Apple's player is further behind (several seconds) but is there if a stream misbehaves. Applies from the next stream you open, multi-view included. Its audio compressor (the waveform button on the video) evens out the volume, as FrankerFaceZ's does.\n\nLive delay: Lowest keeps about a second of video in hand, as close to live as the stream allows; when Twitch's delivery pauses for longer than that, the picture waits a moment. Smooth keeps a little over two seconds, as Twitch's website does, and rides those pauses out. It still learns more when a stream needs it.")
       }
       Section {
         Toggle("Enhance picture", isOn: $settings.enhancePicture)
