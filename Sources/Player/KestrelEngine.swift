@@ -1088,6 +1088,7 @@ final class KestrelEngine: NSObject {
         } else {
           ActivityLog.shared.add(
             "Kestrel player: the stream jumped in time, \(info == nil ? "with nothing in it saying it's an ad" : "still the streamer's broadcast") (not covered)")
+          streamSkipped()
         }
       }
     }
@@ -1157,6 +1158,7 @@ final class KestrelEngine: NSObject {
       if firstVideoTime == nil { firstVideoTime = time }
       if lastVideoTime.map({ time > $0 }) ?? true { lastVideoTime = time }
     }
+    if frame.isKeyframe { switchHereIfSkipped() }
     if waitingForKeyframe, !frame.isKeyframe {
       // A frame left out: what's kept since the last keyframe no longer leads up to the frames
       // that follow, so nothing is caught up from it (that decoded the rest of the segment as
@@ -1588,6 +1590,7 @@ final class KestrelEngine: NSObject {
             inAudioOverlap = true
             audioOverlaps += 1
             noteAudioJump(ms: Double(off) / 90)
+            streamSkipped()
           }
           return
         }
@@ -1596,6 +1599,7 @@ final class KestrelEngine: NSObject {
           audioGaps += 1
           largestAudioGap = max(largestAudioGap, Double(off) / 90)
           noteAudioJump(ms: Double(off) / 90)
+          streamSkipped()
         }
       }
       lastAudioTime = time
@@ -1604,6 +1608,30 @@ final class KestrelEngine: NSObject {
     }
     audio.enqueue(frame, pts: time)
     audioFramesQueued += 1
+  }
+
+  /// The broadcast itself skipped (the streamer's upload dropped frames or reconnected): the frames
+  /// after it can lean on ones that never came, and the display layer then holds the picture,
+  /// showing keyframes only, until it's noticed a second or two later (caseoh_: each hold came 2 to
+  /// 3 s after such a skip). So decoding moves here from the next keyframe, before the skip is on
+  /// screen: VideoToolbox decodes every frame it can and goes on normally after.
+  private var decodeHereAtKeyframe = false
+
+  private func streamSkipped() {
+    guard decodeInLayer, !decodingHereByRequest else { return }
+    decodeHereAtKeyframe = true
+  }
+
+  /// At a keyframe after the broadcast skipped (see `streamSkipped`).
+  private func switchHereIfSkipped() {
+    guard decodeHereAtKeyframe else { return }
+    decodeHereAtKeyframe = false
+    guard decodeInLayer, !inBackground, !screenInPictureInPicture, UIApplication.shared.applicationState == .active else { return }
+    if let channelKey { Self.layerHeldOn.insert(channelKey) }
+    setDecodeHere(true)
+    // (Only while in the app, as when the picture held: Picture in Picture and the background hand it back.)
+    decodingHereForRescue = decodingHereByRequest
+    ActivityLog.shared.add("Kestrel player: the broadcast skipped; decoding with VideoToolbox from the next keyframe (the layer held the picture after skips)")
   }
 
   /// A jump in the sound's times, in the activity log (a few a minute at most) with what was
