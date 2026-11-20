@@ -63,10 +63,22 @@ struct TwitchSegmentInfo: Equatable, Sendable {
   /// Seconds into the broadcast.
   var streamOffset: Double?
 
-  /// An ad Twitch stitched in: not from the streamer, and at no point in the broadcast (an ad's
-  /// metadata says 0 s in). What Twitch shows as a stream ends isn't from the streamer either, but
-  /// still says where in the broadcast it is (hours in): taken for an ad, it was covered as one.
-  var isAd: Bool { !ingested && (streamOffset ?? 0) < 1 }
+  /// Twitch tagged the segment as an ad outright (a second metadata frame, "content: ad").
+  var markedAd = false
+
+  /// An ad Twitch stitched in: tagged as one, or not from the streamer and only seconds into what
+  /// it is (an ad's "stream offset" counts from the ad's own start: 0, 2, 4…). What Twitch shows as
+  /// a stream ends isn't from the streamer either, but still says where in the broadcast it is
+  /// (hours in): taken for an ad, it was covered as one.
+  var isAd: Bool { markedAd || (!ingested && (streamOffset ?? 0) < Self.adOffsetLimit) }
+
+  /// Longer than any ad break (in seconds of its own offset).
+  static let adOffsetLimit: Double = 600
+
+  /// Whether metadata bytes hold Twitch's "content: ad" tag.
+  static func marksAd(_ metadata: Data) -> Bool {
+    metadata.range(of: Data("content\u{0}ad".utf8)) != nil
+  }
 
   /// From a metadata PES packet (or any bytes holding its JSON); nil without Twitch's.
   init?(metadata: Data) {
@@ -234,8 +246,9 @@ struct TSDemuxer {
     }
     guard let kind = streams[pid] else { return }
     if kind == .id3 {
-      // Only the first metadata in a segment is wanted (it says where the segment came from).
-      guard twitchInfo == nil else { return }
+      // Only until the segment has said it's an ad (its first metadata says where it came from; a
+      // later one can tag it as an ad).
+      guard twitchInfo?.markedAd != true else { return }
       if unitStart {
         pending[pid] = Data(payload)
       } else if pending[pid] != nil {
@@ -274,7 +287,14 @@ struct TSDemuxer {
 
   private mutating func readMetadata(_ pes: Data) {
     if twitchInfo == nil { twitchInfo = TwitchSegmentInfo(metadata: pes) }
+    if TwitchSegmentInfo.marksAd(pes) {
+      if twitchInfo != nil { twitchInfo?.markedAd = true } else { adMarkSeen = true }
+    }
+    if adMarkSeen, twitchInfo != nil { twitchInfo?.markedAd = true }
   }
+
+  /// The "content: ad" tag came before the segment's main metadata.
+  private var adMarkSeen = false
 
   /// A PSI section's bytes, past its pointer field.
   private static func section(_ payload: Data.SubSequence) -> Data.SubSequence? {

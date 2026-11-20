@@ -167,6 +167,10 @@ struct FMP4Demuxer {
   private var consumed = 0
   /// The current fragment's samples (from its moof), waiting for its mdat.
   private var pending: [Sample] = []
+  /// What Twitch wrote into the segment about itself (its emsg box, the same metadata as in a
+  /// transport stream's ID3), once read: it comes first, ahead of the first frame.
+  private(set) var twitchInfo: TwitchSegmentInfo?
+  private var adMarkSeen = false
 
   private struct Sample {
     var track: FMP4Init.Track
@@ -203,7 +207,13 @@ struct FMP4Demuxer {
       guard d.count >= size else { break }
       let box = Data(d.prefix(size))
       let start = consumed
-      if type == "moof" {
+      if type == "emsg" {
+        if twitchInfo == nil { twitchInfo = TwitchSegmentInfo(metadata: box) }
+        if TwitchSegmentInfo.marksAd(box) {
+          if twitchInfo != nil { twitchInfo?.markedAd = true } else { adMarkSeen = true }
+        }
+        if adMarkSeen, twitchInfo != nil { twitchInfo?.markedAd = true }
+      } else if type == "moof" {
         pending = parseMoof(box, streamStart: start)
       } else if type == "mdat" {
         out += frames(fromMdat: box, streamStart: start, header: header)
@@ -473,10 +483,12 @@ enum SegmentDemuxer {
     return nil
   }
 
-  /// MPEG-TS from Twitch: what the segment says about itself (see TwitchSegmentInfo).
+  /// What a Twitch segment says about itself (see TwitchSegmentInfo), in either format.
   var twitchInfo: TwitchSegmentInfo? {
-    if case .ts(let demuxer) = self { return demuxer.twitchInfo }
-    return nil
+    switch self {
+    case .ts(let demuxer): return demuxer.twitchInfo
+    case .mp4(let demuxer): return demuxer.twitchInfo
+    }
   }
 
   var transportStart: (video: Int64?, audio: Int64?)? {

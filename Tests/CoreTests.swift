@@ -360,6 +360,8 @@ func testAdSeamsOnRealSegments() {
   check(adInfo?.ingested == false && adInfo?.streamOffset == 30, "the ad says it never came from the streamer (\(String(describing: adInfo)))")
   check(liveInfo?.ingested == true && liveInfo?.streamOffset == 21130, "the stream says it did (\(String(describing: liveInfo)))")
   check(nextInfo?.ingested == true && nextInfo?.streamOffset == 21132, "and its next segment two seconds on (\(String(describing: nextInfo)))")
+  check(adInfo?.markedAd == true && adInfo?.isAd == true, "the ad is tagged as one (30 s into it)")
+  check(liveInfo?.isAd == false && nextInfo?.isAd == false, "the broadcast isn't")
   check(TwitchSegmentInfo(metadata: Data("no metadata here".utf8)) == nil, "no metadata, no info")
   check(TwitchSegmentInfo(metadata: Data(#"xx{"cmd":"ld_lat_data","broadc_r":0}"#.utf8)) == nil, "without ingest_r, no verdict")
   // Damaged copies of the real segments, fed in random pieces: unpacked without a crash.
@@ -1728,6 +1730,9 @@ func testResponseTimer() {
 func testSegmentInfoAd() {
   let ad = TwitchSegmentInfo(metadata: Data(#"{"cmd":"x","ingest_r":0,"broadc_r":0,"stream_offset":0}"#.utf8))
   check(ad?.isAd == true, "stitched ad")
+  let later = TwitchSegmentInfo(metadata: Data(#"{"cmd":"x","ingest_r":0,"broadc_r":0,"stream_offset":30}"#.utf8))
+  check(later?.isAd == true, "30 s into an ad")
+  check(TwitchSegmentInfo.marksAd(Data("TXXX\u{0}content\u{0}ad".utf8)), "content: ad tag")
   let ending = TwitchSegmentInfo(metadata: Data(#"{"cmd":"x","ingest_r":0,"broadc_r":0,"stream_offset":44332.5}"#.utf8))
   check(ending?.isAd == false && ending?.ingested == false, "stream ending isn't an ad")
   let live = TwitchSegmentInfo(metadata: Data(#"{"cmd":"x","ingest_r":1.7e9,"stream_offset":120}"#.utf8))
@@ -3035,6 +3040,9 @@ func testFMP4Demux() {
   // A real segment: whole, then in awkward pieces.
   var whole = FMP4Demuxer(initSegment: initSegment)
   let all = whole.feed(segment)
+  // Twitch's metadata about the segment, in its emsg box ahead of the first fragment.
+  // (This one's an ad: not ingested, 6 s into the ad, and tagged "content: ad".)
+  check(whole.twitchInfo?.markedAd == true && whole.twitchInfo?.isAd == true, "fMP4 segment's own metadata: an ad")
   let frames = all.compactMap { if case .video(let f) = $0 { return f } else { return nil } }
   let sounds = all.compactMap { if case .audio(let f) = $0 { return f } else { return nil } }
   check(frames.count >= 10, "fMP4 video frames \(frames.count)")
