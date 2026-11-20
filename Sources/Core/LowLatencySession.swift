@@ -362,6 +362,12 @@ actor LowLatencySession: PlaylistSource {
           let lined = lineUp(copy, with: main.playlist, copyType: backup.type)
           ads.cover(HLSMediaPlaylist.parse(lined, base: copy.url).segments.filter(\.isAd))
           contaminated.insert(backup.type)
+          // One of Twitch's own players with the ad: the others (site, popout, embed, mobile web)
+          // get the same break at the same moment; trying each in turn only showed it again and
+          // again. Straight on to an ad-free server's copy or autoplay (served differently).
+          if !backup.type.hasPrefix(Self.proxyPrefix) {
+            standby.removeAll { !$0.hasPrefix(Self.proxyPrefix) && $0 != "autoplay" }
+          }
           // Tried last for a while, by every stream (pinned, it was tried first in every break:
           // ads within seconds, another switch, a stall each time).
           AdsSeenInCopies.note(backup.type)
