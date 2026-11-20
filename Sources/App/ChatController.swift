@@ -157,6 +157,8 @@ final class ChatController: ObservableObject {
   private var flushScheduled = false
   private var running = false
   private var attempt = 0
+  /// Checks the connection is alive (see `keepAlive`).
+  private var keepAliveTask: Task<Void, Never>?
   private let maxMessages = 250
   private var userState: [String: String] = [:]
   private var room: [String: String] = [:]
@@ -490,6 +492,8 @@ final class ChatController: ObservableObject {
 
   func stop() {
     running = false
+    keepAliveTask?.cancel()
+    keepAliveTask = nil
     socket?.cancel(with: .goingAway, reason: nil)
     socket = nil
     sevenTV?.stop()
@@ -591,6 +595,36 @@ final class ChatController: ObservableObject {
     lines.append("JOIN #\(channel.login.lowercased())")
     for line in lines { task.send(.string(line)) { _ in } }
     receive(task)
+    keepAlive(task)
+  }
+
+  /// A connection can die without closing (Wi-Fi to cellular, a router forgetting it): chat just
+  /// stopped, nothing more came in, until Twitch's own ping five minutes later found it. Every
+  /// 30 s the connection is pinged; no answer in 8 s, a new one at once.
+  private func keepAlive(_ task: URLSessionWebSocketTask) {
+    keepAliveTask?.cancel()
+    keepAliveTask = Task { @MainActor [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: 30_000_000_000)
+        guard !Task.isCancelled, let self, self.socket === task else { return }
+        // (Whichever comes first: the answer, or 8 s. A dead connection may never answer.)
+        let answered: Bool = await withCheckedContinuation { continuation in
+          let once = ResumeOnce()
+          task.sendPing { error in once.run { continuation.resume(returning: error == nil) } }
+          DispatchQueue.main.asyncAfter(deadline: .now() + 8) { once.run { continuation.resume(returning: false) } }
+        }
+        guard !Task.isCancelled, self.socket === task else { return }
+        if !answered {
+          ActivityLog.shared.add("Chat: connection to #\(self.channel.login) stopped answering; connecting again")
+          task.cancel(with: .goingAway, reason: nil)
+          self.socket = nil
+          self.canSend = false
+          self.status = .disconnected("Reconnecting…")
+          self.connect()
+          return
+        }
+      }
+    }
   }
 
   private func receive(_ task: URLSessionWebSocketTask) {
@@ -666,7 +700,12 @@ final class ChatController: ObservableObject {
           markDeleted { $0.login.lowercased() == login }
         }
       case "RECONNECT":
+        // Twitch moving chat to another server: straight onto a new connection (through the
+        // failure path it waited a couple of seconds, messages lost meanwhile).
         socket?.cancel(with: .goingAway, reason: nil)
+        socket = nil
+        connect()
+        return
       case "NOTICE":
         let message = irc.trailing ?? ""
         if message.localizedCaseInsensitiveContains("authentication failed")
@@ -2513,3 +2552,16 @@ enum TwitchEmoteStore {
   }
 }
 
+
+/// Runs only the first of the closures handed to it (from any thread).
+private final class ResumeOnce: @unchecked Sendable {
+  private let lock = NSLock()
+  private var done = false
+  func run(_ body: () -> Void) {
+    lock.lock()
+    let first = !done
+    done = true
+    lock.unlock()
+    if first { body() }
+  }
+}

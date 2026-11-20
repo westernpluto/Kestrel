@@ -17,6 +17,11 @@ final class SevenTVEvents {
   private var running = false
   private var failures = 0
   private var subscribedSets: Set<String> = []
+  /// 7TV's heartbeat (it says how often in its hello) and when anything last came: silence for
+  /// a few beats means the connection died without closing, and a new one is made.
+  private var heartbeat: TimeInterval = 25
+  private var lastHeard = Date()
+  private var watchdog: Task<Void, Never>?
 
   init(channelID: String) {
     self.channelID = channelID
@@ -26,9 +31,22 @@ final class SevenTVEvents {
     guard !running, !channelID.isEmpty else { return }
     running = true
     connect()
+    watchdog = Task { @MainActor [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: 15_000_000_000)
+        guard let self, self.running else { return }
+        if let socket = self.socket, Date().timeIntervalSince(self.lastHeard) > self.heartbeat * 2 + 10 {
+          socket.cancel(with: .goingAway, reason: nil)
+          self.socket = nil
+          self.connect()
+        }
+      }
+    }
   }
 
   func stop() {
+    watchdog?.cancel()
+    watchdog = nil
     running = false
     socket?.cancel(with: .goingAway, reason: nil)
     socket = nil
@@ -49,6 +67,7 @@ final class SevenTVEvents {
     guard running, let url = URL(string: "wss://events.7tv.io/v3") else { return }
     let task = URLSession.shared.webSocketTask(with: url)
     socket = task
+    lastHeard = Date()
     task.resume()
     let channel: [String: Any] = ["ctx": "channel", "platform": "TWITCH", "id": channelID]
     send(["op": 35, "d": ["type": "entitlement.create", "condition": channel]])
@@ -76,6 +95,7 @@ final class SevenTVEvents {
           self.reconnectLater()
         case .success(let message):
           self.failures = 0
+          self.lastHeard = Date()
           if case .string(let text) = message { self.handle(text) }
           self.receive(task)
         }
@@ -85,9 +105,11 @@ final class SevenTVEvents {
 
   private func reconnectLater() {
     socket = nil
-    guard running, failures < 8 else { return }
+    // (Never given up on: after a long outage, once a minute. It stopped for good after eight
+    // tries, and emote changes and personal emotes were plain words for the rest of the stream.)
+    guard running else { return }
     failures += 1
-    let wait = min(60, 2 * pow(2, Double(failures - 1)))
+    let wait = min(60, 2 * pow(2, Double(min(failures, 6) - 1)))
     DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
       MainActor.assumeIsolated { self?.connect() }
     }
@@ -97,6 +119,8 @@ final class SevenTVEvents {
     guard let data = text.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) else { return }
     let message = JSONValue(object)
     switch message["op"].int {
+    case 1:  // hello: how often it beats
+      if let ms = message["d"]["heartbeat_interval"].int, ms > 0 { heartbeat = max(5, Double(ms) / 1000) }
     case 0:  // dispatch
       let body = message["d"]["body"]
       switch message["d"]["type"].string {
