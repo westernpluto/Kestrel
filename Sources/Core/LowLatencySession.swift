@@ -539,6 +539,32 @@ actor LowLatencySession: PlaylistSource {
     }
   }
 
+  private func fillStandby(_ types: [String], target: HLSVariant, breakID: Int) {
+    let cached = backupMasters
+    Task { [weak self] in
+      guard let self else { return }
+      let found = await withTaskGroup(of: (type: String, master: StreamSession.BackupMaster?, clean: Bool, failure: String?).self) {
+        group in
+        for type in types { group.addTask { await self.probe(type: type, target: target, cached: cached[type]) } }
+        var all: [(type: String, master: StreamSession.BackupMaster?, clean: Bool, failure: String?)] = []
+        for await result in group { all.append(result) }
+        return all
+      }
+      await self.addStandby(found, order: types, breakID: breakID)
+    }
+  }
+
+  private func addStandby(
+    _ found: [(type: String, master: StreamSession.BackupMaster?, clean: Bool, failure: String?)], order: [String], breakID: Int
+  ) {
+    guard breakID == self.breakID, inBreak else { return }
+    for type in order {
+      guard let result = found.first(where: { $0.type == type }), result.clean, let master = result.master else { continue }
+      backupMasters[type] = master
+      if !standby.contains(type) { standby.append(type) }
+    }
+  }
+
   /// The next copy found clean in this break, if there's one (see `standby`): it's checked again
   /// on the next playlist, as every copy is.
   private func takeStandby() -> Bool {
@@ -564,6 +590,10 @@ actor LowLatencySession: PlaylistSource {
     if let winner = clean.first, let master = winner.master {
       active = master
       standby = clean.dropFirst().map(\.type)
+      // The search stops at the first clean copy; the ones it didn't hear back from are tried
+      // meanwhile, so there's a standby ready if this one fails.
+      let untried = types.indices.filter { results[$0] == nil }.map { types[$0] }.filter { !contaminated.contains($0) }
+      if !untried.isEmpty { fillStandby(untried, target: target, breakID: breakID) }
       if winner.type != "autoplay" { pinnedType = winner.type }
       let label = master.master.bestMatch(for: target)?.label ?? "?"
       log.add("Switched to ad-free copy (\(winner.type), \(label)) in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
