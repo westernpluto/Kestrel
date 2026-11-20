@@ -273,12 +273,25 @@ final class KestrelController {
     let playing = engine.shownDate ?? latency.map { Date().addingTimeInterval(-$0) }
     // An ad's marked times, or an unmarked jump in the stream (most likely an ad starting) until
     // the playlist has had time to say (see AdCovering).
-    let inAd = AdCovering.covered(playing: playing, now: Date(), ads: adTimeline, seam: accountAdFree ? nil : engine.unannouncedSeam)
+    // Looked at twice a second, so the cover goes up for what will be on screen by the next look,
+    // not just what is now: the first half second of an ad showed (and was heard) before, and more
+    // while the cover faded in. It comes down once the ad's actually over.
+    let seam = accountAdFree ? nil : engine.unannouncedSeam
+    let soon = playing.map { $0.addingTimeInterval(Self.coverAhead) }
+    let inAd = AdCovering.covered(playing: playing, now: Date(), ads: adTimeline, seam: seam)
+      || (soon != nil && AdCovering.covered(playing: soon, now: Date(), ads: adTimeline, seam: seam))
     if !inAd { engine.noteCleanPicture() }
     if inAd != model.coveringAd {
-      // The cover goes up over the stream's last frame.
-      if inAd { model.adStill = engine.cleanStill }
-      withAnimation(.easeInOut(duration: 0.35)) { model.coveringAd = inAd }
+      // The cover goes up over the stream's last frame: at once (fading in, the ad showed through),
+      // and fades away when it's over.
+      if inAd {
+        model.adStill = engine.cleanStill
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { model.coveringAd = true }
+      } else {
+        withAnimation(.easeInOut(duration: 0.35)) { model.coveringAd = false }
+      }
       // Into or out of a covered ad: the switch between the stream and the ad (and back) isn't
       // the connection's, so a hiccup there doesn't lower the quality or raise the margin (the
       // stream came back with a stall and a restart after ads). (Not a switch of copies: the
@@ -296,6 +309,9 @@ final class KestrelController {
   }
 
   private var pendingMaxHeight: Int?
+
+  /// How far ahead the ad cover looks (`tick`): the time between looks and a little more.
+  static let coverAhead: TimeInterval = 0.65
 
   /// Multi-view sizes each tile's quality to its picture (and lower while it's out of sight): the
   /// best that's no taller than this; nil, the best that plays smoothly again.
