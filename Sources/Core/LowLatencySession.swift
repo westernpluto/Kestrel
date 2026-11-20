@@ -638,10 +638,41 @@ actor LowLatencySession: PlaylistSource {
     case failure(Int)
   }
 
+  /// How long a playlist is waited for before the same is asked for a second time beside it.
+  static let hedgeAfter: TimeInterval = 1.0
+
+  /// A playlist, asked for again beside the first request if that hasn't answered within a second
+  /// (whichever answers first is used, the other cancelled). Twitch's playlist servers usually
+  /// answer in a fifth of a second; now and then one takes three or four, and no new segments were
+  /// listed meanwhile: the video ran out ("slowest playlist 3.3 s" in the stats, stalls with it).
   private nonisolated func fetch(_ url: URL?, timeout: TimeInterval = 5, throughProxy: Bool = false) async -> FetchResult {
     guard let url else { return .failure(404) }
+    let client = throughProxy ? http : mediaHTTP
+    return await withTaskGroup(of: FetchResult?.self) { group in
+      group.addTask { await Self.load(url, timeout: timeout, client: client) }
+      group.addTask {
+        try? await Task.sleep(nanoseconds: UInt64(Self.hedgeAfter * 1e9))
+        guard !Task.isCancelled else { return nil }
+        return await Self.load(url, timeout: timeout, client: client)
+      }
+      var answered: FetchResult?
+      while let result = await group.next() {
+        guard let result else { continue }
+        // (A network failure from one: the other may still come; anything else is the answer.)
+        if case .failure(504) = result {
+          answered = answered ?? result
+          continue
+        }
+        group.cancelAll()
+        return result
+      }
+      return answered ?? .failure(504)
+    }
+  }
+
+  private static func load(_ url: URL, timeout: TimeInterval, client: HTTPClient) async -> FetchResult {
     do {
-      let (data, response) = try await (throughProxy ? http : mediaHTTP).data(for: Usher.playlistRequest(url, timeout: timeout))
+      let (data, response) = try await client.data(for: Usher.playlistRequest(url, timeout: timeout))
       guard response.statusCode == 200 else { return .failure(response.statusCode) }
       guard HLS.looksLikePlaylist(data), let text = String(data: data, encoding: .utf8) else { return .failure(502) }
       let base = response.url ?? url
