@@ -1337,7 +1337,11 @@ final class ChatViewController: UIViewController, UITableViewDataSource, UITable
     let new = chat.messages
     // Usually the newest messages were added and the oldest dropped: update just those rows and
     // glide down instead of reloading the list (which made chat jump).
-    if !fullReload, tableView.window != nil, let first = new.first, let start = old.firstIndex(where: { $0.id == first.id }),
+    // (Only when the list on screen really has the rows it was last given: UIKit counts them, and a
+    // batch update worked out from a different count is refused by crashing the app, which a
+    // reload left pending while the list was off screen could cause.)
+    if !fullReload, tableView.window != nil, tableView.numberOfRows(inSection: 0) == old.count,
+      let first = new.first, let start = old.firstIndex(where: { $0.id == first.id }),
       old.count - start <= new.count,
       zip(old[start...], new).allSatisfy({ $0.id == $1.id })
     {
