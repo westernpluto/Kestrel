@@ -382,7 +382,12 @@ final class UpscaleRenderer: NSObject, MTKViewDelegate {
     presenter.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     presenter.endEncoding()
     commandBuffer.present(drawableTexture)
-    commandBuffer.addCompletedHandler { _ in _ = keep }
+    // The frame's textures are held until the GPU is done with them, and their cache with them:
+    // letting go of a texture hands it back to its cache, and with the player closing meanwhile the
+    // cache had already gone (the app crashed in Metal's completion, handing a texture back to a
+    // cache being freed). Textures first, then the cache, both after the GPU's done.
+    let hold = TexturesInFlight(keep, cache: textureCache)
+    commandBuffer.addCompletedHandler { _ in hold.release() }
     commandBuffer.commit()
     let size = "\(width)×\(height)"
     show(
@@ -605,5 +610,27 @@ struct UpscaledVideoView: UIViewRepresentable {
     view.delegate = nil
     coordinator.renderer = nil
     UpscaleMonitor.status = "off"
+  }
+}
+
+/// A frame's textures from a CVMetalTextureCache, held while the GPU uses them, with the cache
+/// itself: let go in that order, so the cache outlives them (see `draw`).
+private final class TexturesInFlight: @unchecked Sendable {
+  private let lock = NSLock()
+  private var textures: [CVMetalTexture]
+  private var cache: CVMetalTextureCache?
+
+  init(_ textures: [CVMetalTexture], cache: CVMetalTextureCache?) {
+    self.textures = textures
+    self.cache = cache
+  }
+
+  func release() {
+    lock.lock()
+    let cache = self.cache
+    textures.removeAll()
+    self.cache = nil
+    lock.unlock()
+    withExtendedLifetime(cache) {}
   }
 }
