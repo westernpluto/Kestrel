@@ -80,7 +80,11 @@ final class AudioOutput {
     guard prepare(for: frame.config), let converter, let inputFormat, let outputFormat else { return }
     let data = frame.data
     guard !data.isEmpty else { return }
-    let compressed = AVAudioCompressedBuffer(format: inputFormat, packetCapacity: 1, maximumPacketSize: data.count)
+    // (One input buffer, used again for every frame: the decoder takes its bytes during `convert`.)
+    if compressedInput == nil || compressedInput!.format != inputFormat || compressedInput!.maximumPacketSize < data.count {
+      compressedInput = AVAudioCompressedBuffer(format: inputFormat, packetCapacity: 1, maximumPacketSize: max(8192, data.count))
+    }
+    guard let compressed = compressedInput else { return }
     data.withUnsafeBytes { bytes in
       compressed.data.copyMemory(from: bytes.baseAddress!, byteCount: data.count)
     }
@@ -89,6 +93,7 @@ final class AudioOutput {
     compressed.packetDescriptions?.pointee = AudioStreamPacketDescription(
       mStartOffset: 0, mVariableFramesInPacket: 0, mDataByteSize: UInt32(data.count))
     pendingInput.append(pts)
+    // (Room for two frames of HE-AAC's 2,048 samples: the most the decoder gives back at once.)
     guard let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 4096) else { return }
     var supplied = false
     var error: NSError?
@@ -112,6 +117,8 @@ final class AudioOutput {
     if pendingInput.count > 4 { pendingInput.removeFirst(pendingInput.count - 4) }
     schedule(output, pts: outPTS)
   }
+
+  private var compressedInput: AVAudioCompressedBuffer?
 
   private func schedule(_ buffer: AVAudioPCMBuffer, pts: Int64) {
     // Run dry meanwhile: the next buffer plays as soon as it's scheduled, so it starts at the
