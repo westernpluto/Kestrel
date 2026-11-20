@@ -526,6 +526,9 @@ final class KestrelEngine: NSObject {
     paceHistory = []
     slowSince = nil
     timeline = StreamTimeline()
+    segmentIsAd = nil
+    inBandAdOpen = nil
+    inBandAds = []
     heldVideo = []
     heldAudio = []
     liveArrivals = []
@@ -763,6 +766,38 @@ final class KestrelEngine: NSObject {
   /// off (one read 33 s behind with 2.5 s in hand): only for lining up ad times.
   var rawLatency: Double? {
     streamClockLatency
+  }
+
+  /// Ads told by the segments themselves: Twitch puts metadata in each segment saying whether it
+  /// came from the streamer. Every segment is read (it was only looked at where the stream's times
+  /// jumped, and not for a few seconds after a switch of ad-free copies: when a copy turned to ads
+  /// and the next ones did too, one after another, its ad showed). Ranges on the stream's clock,
+  /// and the start of one still going.
+  private var segmentIsAd: Bool?
+  private var inBandAds: [ClosedRange<Date>] = []
+  private var inBandAdOpen: Date?
+
+  /// The segment that just began says ad or broadcast: from its first frame (`time`).
+  private func noteSegmentAd(at time: Int64) {
+    guard let isAd = segmentIsAd, let anchor else { return }
+    segmentIsAd = nil
+    let date = anchor.date.addingTimeInterval(Double(time - anchor.time) / Double(Self.clock))
+    if isAd {
+      if inBandAdOpen == nil {
+        inBandAdOpen = date
+        ActivityLog.shared.add("Kestrel player: the video says it never came from the streamer (an ad); covered while it plays")
+      }
+    } else if let open = inBandAdOpen {
+      inBandAdOpen = nil
+      inBandAds.append(open...max(open, date))
+      inBandAds.removeAll { Date().timeIntervalSince($0.upperBound) > 180 }
+    }
+  }
+
+  /// Whether the frame stamped `date` is from a segment that said it isn't the broadcast.
+  func inBandAdCovers(_ date: Date) -> Bool {
+    if let open = inBandAdOpen, date >= open.addingTimeInterval(-0.3) { return true }
+    return inBandAds.contains { date >= $0.lowerBound.addingTimeInterval(-0.3) && date <= $0.upperBound }
   }
 
   /// A jump in the live stream's times the playlist didn't mark (see `enqueue`): where it is on the
@@ -1159,6 +1194,8 @@ final class KestrelEngine: NSObject {
       let seamsBefore = timeline.unmarkedSeams
       timeline.beginSegment(firstPTS: frame.pts, isVideo: isVideo, discontinuity: load.planned.discontinuity)
       if load.planned.discontinuity { waitingForKeyframe = true }
+      // What the segment itself says, every segment (see `inBandAdCovers`).
+      if let info = load.demuxer?.twitchInfo { segmentIsAd = !info.ingested }
       // The live segment being made jumped in time without a word from the playlist, not just
       // after a switch to or from an ad-free copy: most likely an ad stitched in. Said at once,
       // so it's covered from its first frame (the playlist marks it two seconds later, and those
@@ -1201,6 +1238,7 @@ final class KestrelEngine: NSObject {
         load.dated = true
         anchor = (time, date)
       }
+      noteSegmentAd(at: time)
       if clockRunning {
         enqueueVideo(video, pts: time, dts: decodeTime, hidden: false)
       } else if video.isKeyframe || !heldVideo.isEmpty {
@@ -1225,6 +1263,7 @@ final class KestrelEngine: NSObject {
           load.dated = true
           anchor = (time, date)
         }
+        noteSegmentAd(at: time)
         if firstVideoTime == nil { firstVideoTime = time }
         if lastVideoTime.map({ time > $0 }) ?? true { lastVideoTime = time }
         if !clockRunning, load.planned.live {

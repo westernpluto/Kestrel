@@ -278,7 +278,8 @@ final class KestrelController {
     // while the cover faded in. It comes down once the ad's actually over.
     let seam = accountAdFree ? nil : engine.unannouncedSeam
     let soon = playing.map { $0.addingTimeInterval(Self.coverAhead) }
-    let inAd = AdCovering.covered(playing: playing, now: Date(), ads: adTimeline, seam: seam)
+    let inBand = !accountAdFree && [playing, soon].contains { $0.map(engine.inBandAdCovers) ?? false }
+    let inAd = inBand || AdCovering.covered(playing: playing, now: Date(), ads: adTimeline, seam: seam)
       || (soon != nil && AdCovering.covered(playing: soon, now: Date(), ads: adTimeline, seam: seam))
     if !inAd { engine.noteCleanPicture() }
     if inAd != model.coveringAd {
