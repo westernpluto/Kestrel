@@ -737,3 +737,16 @@ struct FollowButton: View {
     }
   }
 }
+
+/// Runs `body` in `animation`, then `completion` once the animation has finished: SwiftUI's own
+/// completion (iOS 17 on), instead of guessing its length with a timer; iOS 16 has no completion
+/// for animations, so there it's after `fallback` seconds.
+@MainActor
+func animate(_ animation: Animation, _ body: () -> Void, then completion: @escaping () -> Void, fallback: TimeInterval) {
+  if #available(iOS 17, tvOS 17, *) {
+    withAnimation(animation, completionCriteria: .logicallyComplete, body, completion: completion)
+  } else {
+    withAnimation(animation, body)
+    DispatchQueue.main.asyncAfter(deadline: .now() + fallback, execute: completion)
+  }
+}

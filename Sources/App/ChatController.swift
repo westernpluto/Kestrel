@@ -159,6 +159,8 @@ final class ChatController: ObservableObject {
   private var attempt = 0
   /// Checks the connection is alive (see `keepAlive`).
   private var keepAliveTask: Task<Void, Never>?
+  /// How long chat's server takes to answer a ping, learned (see `keepAlive`).
+  private let pingTimes = ResponseTimer()
   private let maxMessages = 250
   private var userState: [String: String] = [:]
   private var room: [String: String] = [:]
@@ -616,18 +618,27 @@ final class ChatController: ObservableObject {
 
   /// A connection can die without closing (Wi-Fi to cellular, a router forgetting it): chat just
   /// stopped, nothing more came in, until Twitch's own ping five minutes later found it. Every
-  /// 30 s the connection is pinged; no answer in 8 s, a new one at once.
+  /// 30 s the connection is pinged; no answer in time (by how long its answers have taken: 8 s
+  /// until known, between 3 and 10), a new one at once.
   private func keepAlive(_ task: URLSessionWebSocketTask) {
     keepAliveTask?.cancel()
     keepAliveTask = Task { @MainActor [weak self] in
       while !Task.isCancelled {
         try? await Task.sleep(nanoseconds: 30_000_000_000)
         guard !Task.isCancelled, let self, self.socket === task else { return }
-        // (Whichever comes first: the answer, or 8 s. A dead connection may never answer.)
+        // (Whichever comes first: the answer, or the time limit. A dead connection may never answer.)
+        let limit = self.pingTimes.late(floor: 3, ceiling: 10, initial: 8)
+        let times = self.pingTimes
+        let sent = Date()
         let answered: Bool = await withCheckedContinuation { continuation in
           let once = ResumeOnce()
-          task.sendPing { error in once.run { continuation.resume(returning: error == nil) } }
-          DispatchQueue.main.asyncAfter(deadline: .now() + 8) { once.run { continuation.resume(returning: false) } }
+          task.sendPing { error in
+            once.run {
+              if error == nil { times.add(Date().timeIntervalSince(sent)) }
+              continuation.resume(returning: error == nil)
+            }
+          }
+          DispatchQueue.main.asyncAfter(deadline: .now() + limit) { once.run { continuation.resume(returning: false) } }
         }
         guard !Task.isCancelled, self.socket === task else { return }
         if !answered {
@@ -1676,6 +1687,8 @@ struct ChatPanel: View {
   /// box where it is.
   @State private var pickerHeight: CGFloat = 280
   @State private var pickerSwap = 0
+  /// The picker swap waiting for the keyboard to finish coming up (see `closePickerUnderKeyboard`).
+  @State private var swapAwaitingKeyboard: Int?
   @State private var focused = false
   @State private var warning: String? = nil
   /// The picker's tab: emotes (0) or GIFs (1).
@@ -1745,6 +1758,9 @@ struct ChatPanel: View {
       .onDisappear { if pickerOpen { EmotePickerArea.frame = nil } }
       .onReceive(NotificationCenter.default.publisher(for: ScreenTour.openEmotes)) { _ in
         if !pickerOpen { openPicker() }
+      }
+      .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidShowNotification)) { _ in
+        if let swap = swapAwaitingKeyboard { finishPickerSwap(swap) }
       }
       .onReceive(NotificationCenter.default.publisher(for: EmotePickerArea.closeNotification)) { _ in
         guard pickerOpen else { return }
@@ -1912,17 +1928,23 @@ struct ChatPanel: View {
   private func closePickerUnderKeyboard() {
     pickerSwap += 1
     let swap = pickerSwap
-    let pad = pickerPad
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-      guard swap == pickerSwap, pickerOpen, focused else { return }
-      let keyboardSpace = (KeyboardObserver.lastHeight ?? 0) + 14
-      if FirstResponder.current is EmoteTextView, abs(keyboardSpace - (pickerHeight + pad)) < 3 {
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) { pickerOpen = false }
-      } else {
-        withAnimation(Self.spring) { pickerOpen = false }
-      }
+    // Done when iOS says the keyboard has finished coming up (it guessed at its length with a
+    // timer before). A keyboard that never comes (a hardware keyboard) is let go after a second.
+    swapAwaitingKeyboard = swap
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { finishPickerSwap(swap) }
+  }
+
+  private func finishPickerSwap(_ swap: Int) {
+    guard swapAwaitingKeyboard == swap else { return }
+    swapAwaitingKeyboard = nil
+    guard swap == pickerSwap, pickerOpen, focused else { return }
+    let keyboardSpace = (KeyboardObserver.lastHeight ?? 0) + 14
+    if FirstResponder.current is EmoteTextView, abs(keyboardSpace - (pickerHeight + pickerPad)) < 3 {
+      var transaction = Transaction()
+      transaction.disablesAnimations = true
+      withTransaction(transaction) { pickerOpen = false }
+    } else {
+      withAnimation(Self.spring) { pickerOpen = false }
     }
   }
 

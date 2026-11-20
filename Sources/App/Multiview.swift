@@ -1122,10 +1122,9 @@ struct MultiviewDock: View {
             Haptics.tap()
             open()
           } else {
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) { pull.progress = 0 }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            animate(.spring(response: 0.32, dampingFraction: 0.9), { pull.progress = 0 }, then: {
               if pull.progress == 0 { pull.progress = nil }
-            }
+            }, fallback: 0.35)
           }
         }
     )

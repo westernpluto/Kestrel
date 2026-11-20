@@ -529,7 +529,8 @@ struct RecordingsView: View {
     }
     .navigationTitle("Recordings")
     .onAppear { store.reload() }
-    .fullScreenCover(item: $playing) { group in
+    // (A stream asked for from inside the recording starts once it has gone: see "Watch live".)
+    .fullScreenCover(item: $playing, onDismiss: RecordingHandoff.closed) { group in
       RecordingPlayerScreen(info: group.combined, url: store.playbackURL(group), positionKey: group.id, joins: group.joins)
     }
   }
@@ -779,8 +780,9 @@ struct RecordingPlayerScreen: View {
         Button {
           let channel = Channel(
             id: info.channelID ?? "", login: info.login, displayName: info.channelName, profileImageURL: info.profileImageURL)
+          // Started once the recording's screen has gone (SwiftUI says when; a timer guessed before).
+          RecordingHandoff.liveAfterClose = channel
           dismiss()
-          DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { AppModel.shared.playing = .live(channel) }
         } label: {
           Text("Watch live").font(.footnote.weight(.semibold))
             .padding(.horizontal, 11).padding(.vertical, 6)
@@ -1327,5 +1329,17 @@ enum VODDownloadChoice {
     }
     let gigabytes = perHour * max(Double(seconds) / 3600, 0.05)
     return gigabytes >= 1 ? String(format: "≈%.1f GB", gigabytes) : String(format: "≈%.0f MB", gigabytes * 1000)
+  }
+}
+
+/// A live stream to start once the recording's screen has closed ("Watch live" from inside it).
+@MainActor
+enum RecordingHandoff {
+  static var liveAfterClose: Channel?
+
+  static func closed() {
+    guard let channel = liveAfterClose else { return }
+    liveAfterClose = nil
+    AppModel.shared.playing = .live(channel)
   }
 }

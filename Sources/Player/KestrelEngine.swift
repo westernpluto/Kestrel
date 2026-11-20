@@ -933,7 +933,9 @@ final class KestrelEngine: NSObject {
     guard loads.count > 1, let front = loads.first, !front.finished, !front.handedOver, let asked = front.requestedAt else { return }
     let now = Date()
     let frontLast = max(front.lastArrival ?? asked, asked)
-    guard now.timeIntervalSince(frontLast) > 2,
+    // (Stuck: quiet for longer than nearly any pause between pieces on this connection; two
+    // seconds until that's known.)
+    guard now.timeIntervalSince(frontLast) > chunkGaps.late(floor: 1, ceiling: 3, initial: 2),
       loads.dropFirst().contains(where: { ($0.lastArrival ?? .distantPast) > frontLast }),
       stalledSince != nil || (clockRunning && (bufferAhead ?? 0) < 0.6)
     else { return }
@@ -958,6 +960,9 @@ final class KestrelEngine: NSObject {
   }
 
   private var lastReconnect = Date.distantPast
+  /// The pauses between pieces of a download as they come (see `refetchStuckFront`,
+  /// `reconnectIfStuck`): what counts as stuck is learned from this connection, not fixed.
+  private let chunkGaps = ResponseTimer()
 
   /// The phone moved to another connection (Wi-Fi to cellular, onto another network): the
   /// connections to Twitch's video server went with the old one, so new ones at once, and what's
@@ -1000,7 +1005,7 @@ final class KestrelEngine: NSObject {
     // (Not while the margin holds: the segment being made is meant to trickle.)
     let due = !clockRunning || (bufferAhead ?? 0) < 0.4
     let waiting = loads.filter { !$0.finished && $0.received == 0 }
-    guard quietFor > 3, due, !waiting.isEmpty else { return }
+    guard quietFor > chunkGaps.late(floor: 2, ceiling: 5, initial: 3), due, !waiting.isEmpty else { return }
     lastReconnect = now
     reconnects += 1
     // (Shared: the shared ones are made again; the old close once what's on them is done.)
@@ -2463,6 +2468,7 @@ extension KestrelEngine: URLSessionDataDelegate {
           if arrivalGaps.count > 200 { arrivalGaps.removeFirst(100) }
         }
       }
+      if let last = load.lastArrival { chunkGaps.add(now.timeIntervalSince(last)) }
       load.lastArrival = now
       lastArrival = now
       var data = data

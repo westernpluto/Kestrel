@@ -1738,10 +1738,10 @@ struct PlayerScreen: View {
         }
       }
     }
-    withAnimation(.easeIn(duration: 0.2)) { closing = true }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+    // (Gone once the fade has finished: SwiftUI says when.)
+    animate(.easeIn(duration: 0.2), { closing = true }, then: {
       if app.playerKey == key { app.playing = nil }
-    }
+    }, fallback: 0.22)
   }
 
   private func dismissKeyboard() {

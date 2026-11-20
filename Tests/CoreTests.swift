@@ -1712,6 +1712,19 @@ func testTokenExpiry() {
   check(PlaybackToken(value: "{}", signature: "x").expires == nil, "no expiry")
 }
 
+func testResponseTimer() {
+  let timer = ResponseTimer()
+  check(timer.late(floor: 0.35, ceiling: 2, initial: 1) == 1, "initial until known")
+  for _ in 0..<30 { timer.add(0.1) }
+  let fast = timer.late(floor: 0.35, ceiling: 2, initial: 1)
+  check(abs(fast - 0.35) < 0.01, "fast connection: the floor (\(fast))")
+  for _ in 0..<30 { timer.add(0.6) }
+  let slow = timer.late(floor: 0.35, ceiling: 2, initial: 1)
+  check(slow > 0.6 && slow <= 2, "slower answers: later (\(slow))")
+  timer.add(30)
+  check(timer.late(floor: 0.35, ceiling: 2, initial: 1) == 2, "never over the ceiling")
+}
+
 func testStreamTags() {
   let json = """
     {"id":"s1","viewersCount":1234,"previewImageURL":"https://x/{width}x{height}.jpg","createdAt":"2026-10-22T01:02:03Z",
@@ -3063,6 +3076,7 @@ testAdFreeProxy()
 testVODPlaylists()
 testVODUnmute()
 testTokenExpiry()
+testResponseTimer()
 testVODComments()
 testStreamTags()
 testAccountRoute()

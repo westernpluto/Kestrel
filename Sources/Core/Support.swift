@@ -344,3 +344,38 @@ final class Locked<Value>: @unchecked Sendable {
     }
   }
 }
+
+// MARK: - Learned response times
+
+/// How long answers take, learned as they come, the way TCP learns when to give up on a packet: a
+/// smoothed time and how much it varies. `late` is past what nearly every answer takes on this
+/// connection now (fixed waits were too long on a fast connection and too short on a slow one).
+final class ResponseTimer: @unchecked Sendable {
+  private let lock = NSLock()
+  private var smoothed: Double?
+  private var spread: Double = 0
+
+  init() {}
+
+  func add(_ seconds: Double) {
+    guard seconds.isFinite, seconds >= 0 else { return }
+    lock.lock()
+    defer { lock.unlock() }
+    if let current = smoothed {
+      spread = 0.75 * spread + 0.25 * abs(current - seconds)
+      smoothed = 0.875 * current + 0.125 * seconds
+    } else {
+      smoothed = seconds
+      spread = seconds / 2
+    }
+  }
+
+  /// The time after which an answer is late: `initial` until one has come; never under `floor` or
+  /// over `ceiling`.
+  func late(floor: Double, ceiling: Double, initial: Double) -> Double {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let smoothed else { return initial }
+    return min(ceiling, max(floor, smoothed + 4 * spread))
+  }
+}

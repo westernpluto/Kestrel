@@ -638,22 +638,25 @@ actor LowLatencySession: PlaylistSource {
     case failure(Int)
   }
 
-  /// How long a playlist is waited for before the same is asked for a second time beside it.
-  static let hedgeAfter: TimeInterval = 1.0
+  /// How long this stream's playlists take to come (see `fetch`).
+  private nonisolated let playlistTimes = ResponseTimer()
 
-  /// A playlist, asked for again beside the first request if that hasn't answered within a second
-  /// (whichever answers first is used, the other cancelled). Twitch's playlist servers usually
+  /// A playlist, asked for again beside the first request if that's late, by how long this
+  /// stream's playlists have been taking (about a second until known; never under a third of a
+  /// second or over two). Whichever answers first is used, the other cancelled. Twitch's playlist servers usually
   /// answer in a fifth of a second; now and then one takes three or four, and no new segments were
   /// listed meanwhile: the video ran out ("slowest playlist 3.3 s" in the stats, stalls with it).
   private nonisolated func fetch(_ url: URL?, timeout: TimeInterval = 5, throughProxy: Bool = false) async -> FetchResult {
     guard let url else { return .failure(404) }
     let client = throughProxy ? http : mediaHTTP
+    let times = playlistTimes
+    let hedgeAfter = times.late(floor: 0.35, ceiling: 2, initial: 1)
     return await withTaskGroup(of: FetchResult?.self) { group in
-      group.addTask { await Self.load(url, timeout: timeout, client: client) }
+      group.addTask { await Self.load(url, timeout: timeout, client: client, times: times) }
       group.addTask {
-        try? await Task.sleep(nanoseconds: UInt64(Self.hedgeAfter * 1e9))
+        try? await Task.sleep(nanoseconds: UInt64(hedgeAfter * 1e9))
         guard !Task.isCancelled else { return nil }
-        return await Self.load(url, timeout: timeout, client: client)
+        return await Self.load(url, timeout: timeout, client: client, times: times)
       }
       var answered: FetchResult?
       while let result = await group.next() {
@@ -670,9 +673,11 @@ actor LowLatencySession: PlaylistSource {
     }
   }
 
-  private static func load(_ url: URL, timeout: TimeInterval, client: HTTPClient) async -> FetchResult {
+  private static func load(_ url: URL, timeout: TimeInterval, client: HTTPClient, times: ResponseTimer) async -> FetchResult {
     do {
+      let started = Date()
       let (data, response) = try await client.data(for: Usher.playlistRequest(url, timeout: timeout))
+      times.add(Date().timeIntervalSince(started))
       guard response.statusCode == 200 else { return .failure(response.statusCode) }
       guard HLS.looksLikePlaylist(data), let text = String(data: data, encoding: .utf8) else { return .failure(502) }
       let base = response.url ?? url
