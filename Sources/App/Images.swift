@@ -81,7 +81,15 @@ final class ImagePipeline: @unchecked Sendable {
   }()
 
   init() {
-    cache.totalCostLimit = 256 << 20
+    cache.totalCostLimit = Self.memoryShare(1.0 / 24, floor: 96, ceiling: 384)
+  }
+
+  /// A share of this device's memory, in bytes (megabytes floor and ceiling): decoded emotes are
+  /// kept by how much the phone has (a fixed 256 MB was a lot on a 4 GB phone and little on 12).
+  /// iOS still empties the caches itself when memory runs short.
+  static func memoryShare(_ share: Double, floor: Int, ceiling: Int) -> Int {
+    let bytes = Int(Double(ProcessInfo.processInfo.physicalMemory) * share)
+    return min(ceiling << 20, max(floor << 20, bytes))
   }
 
   private static func key(_ url: URL, _ maxPixels: CGFloat?) -> String {
@@ -101,7 +109,7 @@ final class ImagePipeline: @unchecked Sendable {
 
   private let stills: NSCache<NSString, UIImage> = {
     let cache = NSCache<NSString, UIImage>()
-    cache.totalCostLimit = 48 << 20
+    cache.totalCostLimit = ImagePipeline.memoryShare(1.0 / 128, floor: 24, ceiling: 96)
     return cache
   }()
   /// First frames decoded ahead, one at a time, at background priority.
