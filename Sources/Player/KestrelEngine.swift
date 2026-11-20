@@ -2122,7 +2122,10 @@ final class KestrelEngine: NSObject {
     guard now.timeIntervalSince(lastPictureLook) >= 0.5 else { return }
     lastPictureLook = now
     let current = displayLayer.sampleBufferRenderer.displayedPixelBuffer()
-    let printed = current.flatMap { self.fingerprint($0) }
+    // (Decoding here, each picture is a new buffer of ours: one that stays the same object is held,
+    // no need to shrink and hash it twice a second. The layer's own decoding can hand back a new
+    // buffer for the same picture, so there it's told by its pixels.)
+    let printed = decodeInLayer ? current.flatMap { self.fingerprint($0) } : nil
     let identical = current != nil && shownPicture != nil && current! === shownPicture!
     let same = identical || (current != nil && printed != nil && printed == shownFingerprint)
     if !same {
