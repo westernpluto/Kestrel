@@ -354,8 +354,13 @@ actor LowLatencySession: PlaylistSource {
           publish(.replaced("\(backup.type) · \(match.label)"))
           let lined = lineUp(copy, with: main.playlist, copyType: backup.type)
           return serve(index, LowLatencyPlaylist.filter(lined, base: copy.url, dropPrefetch: false))
-        case .success:
+        case .success(let copy):
           log.add("Ad-free copy (\(backup.type)) started showing ads, looking for another")
+          // Its ads are covered too: the player may already have the first of them (the segment
+          // being made, listed in the copy's last clean playlist, turned into an ad), and nothing
+          // marked those times, so they showed. (On the times the player has them at: lined up.)
+          let lined = lineUp(copy, with: main.playlist, copyType: backup.type)
+          ads.cover(HLSMediaPlaylist.parse(lined, base: copy.url).segments.filter(\.isAd))
           contaminated.insert(backup.type)
           // Tried last for a while, by every stream (pinned, it was tried first in every break:
           // ads within seconds, another switch, a stall each time).
