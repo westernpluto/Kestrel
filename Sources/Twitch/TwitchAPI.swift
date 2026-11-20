@@ -549,17 +549,25 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     // the first picture. (For the same account; well before Twitch's own expiry.)
     let key = [login.lowercased(), playerType, platform, TwitchAuth.shared.session?.login ?? "", playbackHTTP == nil ? "" : "proxy"]
       .joined(separator: "|")
-    tokenLock.lock()
-    let cached = recentTokens[key]
-    tokenLock.unlock()
-    if let cached, cached.until > Date() { return cached.token }
+    if let cached = recentToken(key) { return cached }
     let token = try await playbackToken(login: login, vodID: nil, playerType: playerType, platform: platform)
+    keepToken(token, key)
+    return token
+  }
+
+  private func recentToken(_ key: String) -> PlaybackToken? {
+    tokenLock.lock()
+    defer { tokenLock.unlock() }
+    guard let cached = recentTokens[key], cached.until > Date() else { return nil }
+    return cached.token
+  }
+
+  private func keepToken(_ token: PlaybackToken, _ key: String) {
     let until = min(token.expires?.addingTimeInterval(-120) ?? .distantFuture, Date().addingTimeInterval(Self.tokenReuse))
     tokenLock.lock()
+    defer { tokenLock.unlock() }
     recentTokens = recentTokens.filter { $0.value.until > Date() }
     recentTokens[key] = (token, until)
-    tokenLock.unlock()
-    return token
   }
 
   /// How long a stream's token is used again for the same stream.
