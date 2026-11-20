@@ -96,7 +96,13 @@ final class EngineFrames: UpscaleFrameSource {
   init(engine: KestrelEngine) { self.engine = engine }
   func isFor(_ other: KestrelEngine) -> Bool { engine === other }
   // (Asked from the view's drawing, which runs on the main thread, as the player does.)
-  func currentFrame() -> CVPixelBuffer? { MainActor.assumeIsolated { engine?.displayedFrame() } }
+  func currentFrame() -> CVPixelBuffer? {
+    // (Handed out of the main actor in a box: a pixel buffer isn't Sendable, but this runs on the
+    // main thread throughout.)
+    let box = FrameBox()
+    MainActor.assumeIsolated { box.frame = engine?.displayedFrame() }
+    return box.frame
+  }
 }
 
 /// The frame a sample-buffer layer is showing (how the low-latency player draws), found inside
@@ -633,4 +639,8 @@ private final class TexturesInFlight: @unchecked Sendable {
     lock.unlock()
     withExtendedLifetime(cache) {}
   }
+}
+
+private final class FrameBox: @unchecked Sendable {
+  var frame: CVPixelBuffer?
 }
