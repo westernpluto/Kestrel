@@ -1157,7 +1157,13 @@ final class KestrelEngine: NSObject {
       if firstVideoTime == nil { firstVideoTime = time }
       if lastVideoTime.map({ time > $0 }) ?? true { lastVideoTime = time }
     }
-    if waitingForKeyframe, !frame.isKeyframe { return }
+    if waitingForKeyframe, !frame.isKeyframe {
+      // A frame left out: what's kept since the last keyframe no longer leads up to the frames
+      // that follow, so nothing is caught up from it (that decoded the rest of the segment as
+      // errors, the picture held up to two seconds): the next keyframe starts it again.
+      group = []
+      return
+    }
     let units = frame.codec == .av1 ? [] : AnnexB.units(frame.data)
     let payload: Data
     switch frame.codec {
@@ -1208,11 +1214,15 @@ final class KestrelEngine: NSObject {
         waitingForKeyframe = false
         screenBehind = true
       } else if !feedScreen(entry, hidden: hidden) {
+        // (Left out: see the top.)
+        group = []
+        waitingForKeyframe = true
         return
       }
     } else {
       guard let session = decoderSession(for: format), let sample = entry.sample(hidden: false) else {
         waitingForKeyframe = true
+        group = []
         if decodingHereByRequest {
           // (VideoToolbox can't take this stream here, e.g. AV1: back to the layer.)
           decodingHereByRequest = false
@@ -1484,6 +1494,8 @@ final class KestrelEngine: NSObject {
     decoder = nil
     decoderFormat = nil
     showFrom = .min
+    failedRun = 0
+    failedRunSince = nil
   }
 
   private func decode(_ sample: CMSampleBuffer, in session: VTDecompressionSession) {
@@ -1507,6 +1519,13 @@ final class KestrelEngine: NSObject {
       return
     }
     framesDecoded += 1
+    if failedRun > 0 {
+      ActivityLog.shared.add(
+        String(format: "Kestrel player: picture moving again after %d frames that didn't decode (%.1f s, last %d)", failedRun,
+          Date().timeIntervalSince(failedRunSince ?? Date()), Int(lastDecodeStatus)))
+      failedRun = 0
+      failedRunSince = nil
+    }
     let time = Int64(pts.convertScale(Self.clock, method: .default).value)
     guard time >= showFrom else { return }
     var format: CMVideoFormatDescription?
@@ -1526,9 +1545,15 @@ final class KestrelEngine: NSObject {
     framesShown += 1
   }
 
+  /// Frames in a row that didn't decode, and since when (said in the log once the picture moves).
+  private var failedRun = 0
+  private var failedRunSince: Date?
+
   private func decodeFailed(_ status: OSStatus) {
     decodeErrors += 1
-    if status != lastDecodeStatus || decodeErrors % 30 == 1 {
+    failedRun += 1
+    if failedRunSince == nil { failedRunSince = Date() }
+    if failedRun == 1 || status != lastDecodeStatus {
       ActivityLog.shared.add("Kestrel player: a video frame didn't decode (\(status))")
     }
     lastDecodeStatus = status
