@@ -287,6 +287,12 @@ final class InterfaceOrientationObserver: ObservableObject {
   /// In landscape: whether the camera (Dynamic Island) is on the left, read right now.
   static var cameraOnLeftNow: Bool? { cameraOnLeft(currentOrientation) }
 
+  /// Whether the interface is sideways right now, by the scene's own word (nil: it can't say).
+  static var sceneLandscape: Bool? {
+    guard let value = scene?.effectiveGeometry.interfaceOrientation, value != .unknown else { return nil }
+    return value.isLandscape
+  }
+
   /// The last orientation seen.
   var cameraOnLeft: Bool? { Self.cameraOnLeft(orientation) }
 
@@ -546,7 +552,10 @@ final class LayoutHold {
   private var backFromBackground = false
   private var ignoredNote: String?
 
-  func take(_ measured: (size: CGSize, insets: EdgeInsets), phase: ScenePhase, pass: Int = 0, now: Date = Date()) -> (size: CGSize, insets: EdgeInsets) {
+  /// - Parameter sceneLandscape: whether the scene itself says it's sideways now (nil: unknown).
+  func take(
+    _ measured: (size: CGSize, insets: EdgeInsets), phase: ScenePhase, pass: Int = 0, sceneLandscape: Bool? = nil, now: Date = Date()
+  ) -> (size: CGSize, insets: EdgeInsets) {
     let active = phase == .active
     if phase == .background { sawBackground = true }
     if active, !wasActive {
@@ -563,7 +572,13 @@ final class LayoutHold {
     // (Any size then, not just the one seen while away: on iPhone Duo's inner display, held
     // sideways, iOS also reported a passing phone-sized window, and the player showed the phone's
     // full-width picture without chat for a moment, then slid chat back in.)
-    if active, backFromBackground, let size, measured.size != size, now.timeIntervalSince(backAt) < 1 {
+    // A real turn of the phone meanwhile is taken at once: the new size matches the way the scene
+    // says it's held now, and the kept one doesn't (turned straight after unlocking, the layout
+    // waited out the second, then jumped).
+    let turned = sceneLandscape.map { scene in
+      (measured.size.width > measured.size.height) == scene && (size.map { $0.width > $0.height } ?? scene) != scene
+    } ?? false
+    if active, backFromBackground, !turned, let size, measured.size != size, now.timeIntervalSince(backAt) < 1 {
       let note = "\(Int(measured.size.width))x\(Int(measured.size.height))"
       if note != ignoredNote {
         ignoredNote = note
@@ -1324,13 +1339,22 @@ struct PlayerScreen: View {
     _folded = State(initialValue: offline)
   }
 
+  /// In landscape, which side the camera is on, from the safe area of this very layout pass: the
+  /// camera's side has the deeper inset. (Asked of the rotation notifications, it came a moment
+  /// after the new size, re-checked up to 0.8 s later: the layout moved again after turning.)
+  /// Nil when both sides are alike (no camera cut-out on that side of this screen).
+  static func cameraSide(_ insets: EdgeInsets) -> Bool? {
+    guard abs(insets.leading - insets.trailing) > 1 else { return nil }
+    return insets.leading > insets.trailing
+  }
+
   var body: some View {
     GeometryReader { geometry in
       // Laid out by the window as it was while the app was in front until it's in front again:
       // coming back from Picture in Picture, iOS hands the app passing sizes, and the video
       // jumped to full screen and bounced back beside chat.
       let measured = (size: geometry.size, insets: Self.insets(geometry))
-      let held = hold.take(measured, phase: scenePhase, pass: relayout)
+      let held = hold.take(measured, phase: scenePhase, pass: relayout, sceneLandscape: InterfaceOrientationObserver.sceneLandscape)
       let insets = held.insets
       let landscape = held.size.width > held.size.height
       let screenWidth = held.size.width + insets.leading + insets.trailing
@@ -1362,7 +1386,8 @@ struct PlayerScreen: View {
       let layout = PlayerLayout(
         safe: layoutSafe, insets: layoutInsets, keyboard: keyboard.overlap, chatOpen: chatOpen,
         chatWidth: resizedWidth ?? screenWidth * (large ? largeChatShare : chatShare),
-        cameraOnLeft: landscape && !large ? (InterfaceOrientationObserver.cameraOnLeftNow ?? orientation.cameraOnLeft) : nil,
+        cameraOnLeft: landscape && !large
+          ? (Self.cameraSide(insets) ?? InterfaceOrientationObserver.cameraOnLeftNow ?? orientation.cameraOnLeft) : nil,
         large: large, theater: theater && !folded, chatOverVideo: chatOverVideo && !folded,
         picker: pickerSpace.height
       )
