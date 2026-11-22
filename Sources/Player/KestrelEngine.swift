@@ -1111,12 +1111,13 @@ final class KestrelEngine: NSObject {
           handoffWaits.append((Date(), Date().timeIntervalSince(quiet)))
           if handoffWaits.count > 200 { handoffWaits.removeFirst(100) }
         }
-        // Not joining up with the next one, the end didn't all come: the last picture frame is
-        // only part in (decoding it failed, -12909, and smeared the picture), so it's left out.
         let joined = first.demuxer?.transportReach.flatMap { reach in
           loads[1].demuxer?.transportStart.flatMap { SegmentDemuxer.joins(end: reach, next: $0, frame: frameLength) }
         } ?? false
-        first.frames += first.demuxer?.flush(dropPartialVideo: !joined) ?? []
+        // Even joining up, the last frame can still be on its way (its start in, the rest not:
+        // -12909 after a handover with everything else in order); kept only if its last packet
+        // says it's the frame's end.
+        first.frames += first.demuxer?.flush(dropPartialVideo: true) ?? []
         if !joined { loads[1].followsCut = true }
         let frames = first.frames
         first.frames = []

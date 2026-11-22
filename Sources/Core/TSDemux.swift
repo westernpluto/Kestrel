@@ -117,6 +117,10 @@ struct TSDemuxer {
   /// can be the end of the previous frame. Cut at the PES instead, frames lost their last bytes
   /// (the decoder rejected nearly all of them: a black picture on High-profile sources).
   private var heldFrames: [Int: VideoFrame] = [:]
+  /// Whether each picture stream's latest packet was padded out (adaptation-field stuffing): a
+  /// muxer pads the last packet of a frame so the next frame starts a packet of its own, so the
+  /// frame being put together is most likely all in. A full packet means more of it is coming.
+  private var videoEndsPadded: [Int: Bool] = [:]
   /// What's been unpacked so far (frames out or held): the first and newest picture times, and
   /// where the sound begins and ends.
   private var firstVideo: Int64?
@@ -206,13 +210,14 @@ struct TSDemuxer {
   }
 
   /// The end of the stream (a segment that's complete): the last frames on each stream.
-  /// The rest, at the segment's end. `dropPartialVideo`: the segment was cut short before its end
-  /// came in, so the picture frame still being put together is only part there and is left out.
+  /// The rest, at the segment's end. `dropPartialVideo`: handed over before the download closed,
+  /// so the picture frame still being put together is left out unless its last packet was padded
+  /// (the frame's end).
   mutating func flush(dropPartialVideo: Bool = false) -> [DemuxedFrame] {
     var out: [DemuxedFrame] = []
     for (pid, data) in pending.sorted(by: { $0.key < $1.key }) where !data.isEmpty {
       guard let kind = streams[pid] else { continue }
-      if dropPartialVideo, kind == .h264 || kind == .hevc { continue }
+      if dropPartialVideo, kind == .h264 || kind == .hevc, videoEndsPadded[pid] != true { continue }
       if kind == .id3 {
         readMetadata(data)
       } else {
@@ -221,6 +226,7 @@ struct TSDemuxer {
     }
     for (_, frame) in heldFrames.sorted(by: { $0.key < $1.key }) { out.append(.video(frame)) }
     heldFrames = [:]
+    videoEndsPadded = [:]
     pending = [:]
     leftover = Data()
     // (In decode order: sorting by presentation time put B-frames out of order.)
@@ -265,6 +271,10 @@ struct TSDemuxer {
         }
       }
       return
+    }
+    if kind == .h264 || kind == .hevc {
+      // (A frame's first packet carries a short adaptation field for the clock, not padding.)
+      videoEndsPadded[pid] = adaptation & 0x2 != 0 && (!unitStart || Int(p[b + 4]) > 7)
     }
     if unitStart {
       if let previous = pending[pid], !previous.isEmpty { pes(previous, kind: kind, pid: pid, into: &out) }

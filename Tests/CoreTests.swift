@@ -321,20 +321,31 @@ func testAdsSeenInCopies() {
 /// left out (it didn't decode, -12909, and smeared the picture); every whole frame is kept.
 func testCutSegmentDropsPartialFrame() {
   let dir = URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent()
-  guard let data = try? Data(contentsOf: dir.appendingPathComponent("twitch_1080p_bframes.ts")) else { return }
+  // A whole segment (its last packet padded out, as Twitch's muxer ends every frame).
+  guard let data = try? Data(contentsOf: dir.appendingPathComponent("twitch_160p_segment.ts")) else { return }
   func videoFrames(_ frames: [DemuxedFrame]) -> [VideoFrame] { frames.compactMap { if case .video(let v) = $0 { return v } else { return nil } } }
   var whole = TSDemuxer()
   let all = videoFrames(whole.feed(data) + whole.flush())
-  // Cut in the middle of the stream, on a packet boundary.
-  let cut = data.prefix((data.count / 2) / 188 * 188)
+  // Handed over early but all in: the last frame ends on a padded packet, so it's kept.
+  var early = TSDemuxer()
+  let earlyFrames = videoFrames(early.feed(data) + early.flush(dropPartialVideo: true))
+  check(earlyFrames.count == all.count, "all in, handed over early: the last frame kept (\(earlyFrames.count) of \(all.count))")
+  // Cut part-way through a frame: after a full (unpadded) packet of the picture stream, past the middle.
+  let bytes = [UInt8](data)
+  let counts = Dictionary(grouping: stride(from: 0, to: bytes.count - 187, by: 188)) { Int(bytes[$0 + 1] & 0x1F) << 8 | Int(bytes[$0 + 2]) }
+  guard let video = counts.max(by: { $0.value.count < $1.value.count })?.key,
+    let at = stride(from: bytes.count / 2 / 188 * 188, to: bytes.count - 187, by: 188).first(where: {
+      Int(bytes[$0 + 1] & 0x1F) << 8 | Int(bytes[$0 + 2]) == video && bytes[$0 + 1] & 0x40 == 0 && (bytes[$0 + 3] >> 4) & 0x2 == 0
+    })
+  else { return check(false, "cut segment: no mid-frame packet found") }
+  let cut = data.prefix(at + 188)
   var kept = TSDemuxer()
   let fed = videoFrames(kept.feed(cut))
-  let partial = kept
-  var plain = partial
+  var plain = kept
   let withHalf = fed + videoFrames(plain.flush())
-  var dropping = partial
+  var dropping = kept
   let withoutHalf = fed + videoFrames(dropping.flush(dropPartialVideo: true))
-  check(withoutHalf.count < withHalf.count, "cut segment: the half frame is left out")
+  check(withoutHalf.count == withHalf.count - 1, "cut segment: the half frame is left out (\(withoutHalf.count) of \(withHalf.count))")
   check(!withoutHalf.isEmpty && withoutHalf.allSatisfy { frame in all.contains { $0.pts == frame.pts && $0.data == frame.data } },
     "cut segment: every frame kept is whole")
 }
