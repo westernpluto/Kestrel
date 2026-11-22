@@ -94,9 +94,8 @@ enum MasterPlaylistFetch {
         }
         // Asked again with twitch.tv's own integrity proof: without it, Twitch's session said
         // "subscriber no" for a subscribed account.
-        if let verified = await tokens.verifiedStreamToken(login: login, playerType: playerType, platform: "web"),
-          let reason = verified.adFreeReason
-        {
+        let verified = await tokens.verifiedStreamToken(login: login, playerType: playerType, platform: "web")
+        if let verified, let reason = verified.adFreeReason {
           log.add("Twitch shows you no ads on this channel (\(reason), once asked with twitch.tv's own check): playing straight from Twitch")
           let (text, url) = try await usher(login: login, token: verified, codecs: codecs, lowLatency: lowLatency, http: http)
           NearbyPlaylists.learn(fromMaster: text, base: url)
@@ -107,7 +106,9 @@ enum MasterPlaylistFetch {
         func flag(_ value: Bool?) -> String { value.map { $0 ? "yes" : "no" } ?? "not said" }
         log.add(
           "You're subscribed to \(login), but Twitch's session for this stream still allows ads: playing straight from Twitch (no ad-free server), any ad Twitch slips in handled here. "
-            + "Twitch's session says: subscriber \(flag(info?.subscriber)), show ads \(flag(info?.showAds)), hide ads \(flag(info?.hideAds)), server ads \(flag(info?.serverAds))")
+            + "Twitch's session says: subscriber \(flag(info?.subscriber)), show ads \(flag(info?.showAds)), hide ads \(flag(info?.hideAds)), server ads \(flag(info?.serverAds)). "
+            + (verified.map { "Asked with twitch.tv's own check too: subscriber \(flag($0.info?.subscriber)), show ads \(flag($0.info?.showAds))" }
+              ?? "twitch.tv's own check wasn't to hand (not in time, or it didn't help here lately)"))
       }
     }
     // (Subscribed: never through an ad-free server, a far one at that, for a channel that's
