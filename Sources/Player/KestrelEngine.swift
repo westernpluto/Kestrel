@@ -1154,6 +1154,8 @@ final class KestrelEngine: NSObject {
     guard Double(newest - firstKey) / Double(Self.clock) >= margin + 0.1 else { return }
     for load in loads[..<liveIndex] { load.task?.cancel() }
     loads.removeFirst(liveIndex)
+    // (The jump to it is this skip, not the broadcast's.)
+    loads.first?.followsSkip = true
     heldVideo = []
     heldAudio = []
     firstVideoTime = nil
@@ -1219,7 +1221,9 @@ final class KestrelEngine: NSObject {
         let time = timeline.lastUnmarkedSeam, let anchor
       {
         let info = load.demuxer?.twitchInfo
-        if load.followsCut, !(info?.isAd ?? false) {
+        if load.followsSkip, !(info?.isAd ?? false) {
+          // The start's own skip to the segment being made: nothing to say.
+        } else if load.followsCut, !(info?.isAd ?? false) {
           // The jump is the end of the segment before, cut short here (it didn't all come in
           // time), not the broadcast: said now and then, and not counted against the streamer.
           cutsSinceSaid += 1
@@ -2557,6 +2561,8 @@ final class SegmentLoad {
   var handedOver = false
   /// The segment before this one was cut short (its end didn't come in time).
   var followsCut = false
+  /// The segments before this one were skipped at the start (to begin from the one being made).
+  var followsSkip = false
   /// Unpacked, not yet handed to the renderers.
   var frames: [DemuxedFrame] = [] {
     didSet {
