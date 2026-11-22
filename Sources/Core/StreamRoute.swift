@@ -92,8 +92,12 @@ enum MasterPlaylistFetch {
           NearbyPlaylists.learn(fromMaster: text, base: url)
           return Result(text: text, url: url, route: .twitchAdFree(reason))
         }
+        // (What Twitch's session itself says, to tell why: whether it knows you're subscribed.)
+        let info = token?.info
+        func flag(_ value: Bool?) -> String { value.map { $0 ? "yes" : "no" } ?? "not said" }
         log.add(
-          "You're subscribed to \(login), but Twitch's session for this stream still allows ads: playing straight from Twitch (no ad-free server), any ad Twitch slips in handled here")
+          "You're subscribed to \(login), but Twitch's session for this stream still allows ads: playing straight from Twitch (no ad-free server), any ad Twitch slips in handled here. "
+            + "Twitch's session says: subscriber \(flag(info?.subscriber)), show ads \(flag(info?.showAds)), hide ads \(flag(info?.hideAds)), server ads \(flag(info?.serverAds))")
       }
     }
     // (Subscribed: never through an ad-free server, a far one at that, for a channel that's
