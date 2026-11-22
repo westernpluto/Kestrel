@@ -317,6 +317,28 @@ func testAdsSeenInCopies() {
   AdsSeenInCopies.reset()
 }
 
+/// A segment cut short part-way through a picture frame: flushed for a cut, that half frame is
+/// left out (it didn't decode, -12909, and smeared the picture); every whole frame is kept.
+func testCutSegmentDropsPartialFrame() {
+  let dir = URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent()
+  guard let data = try? Data(contentsOf: dir.appendingPathComponent("twitch_1080p_bframes.ts")) else { return }
+  func videoFrames(_ frames: [DemuxedFrame]) -> [VideoFrame] { frames.compactMap { if case .video(let v) = $0 { return v } else { return nil } } }
+  var whole = TSDemuxer()
+  let all = videoFrames(whole.feed(data) + whole.flush())
+  // Cut in the middle of the stream, on a packet boundary.
+  let cut = data.prefix((data.count / 2) / 188 * 188)
+  var kept = TSDemuxer()
+  let fed = videoFrames(kept.feed(cut))
+  let partial = kept
+  var plain = partial
+  let withHalf = fed + videoFrames(plain.flush())
+  var dropping = partial
+  let withoutHalf = fed + videoFrames(dropping.flush(dropPartialVideo: true))
+  check(withoutHalf.count < withHalf.count, "cut segment: the half frame is left out")
+  check(!withoutHalf.isEmpty && withoutHalf.allSatisfy { frame in all.contains { $0.pts == frame.pts && $0.data == frame.data } },
+    "cut segment: every frame kept is whole")
+}
+
 /// A real stitched ad (Twitch's pre-roll, captured) against the stream around it: the player's
 /// timeline sees a jump where an ad begins and ends, and none between two of the stream's own
 /// segments, fed the way the player feeds it (each segment's first frame begins it).
@@ -3139,6 +3161,7 @@ testAdTimeline()
 testAnnexBSplitter()
 testAdsSeenInCopies()
 testAdSeamsOnRealSegments()
+testCutSegmentDropsPartialFrame()
 testAdCoveringScenarios()
 testEmoteListsAsTheyCome()
 testEmoteShapes()

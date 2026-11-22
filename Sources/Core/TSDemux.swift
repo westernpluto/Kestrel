@@ -206,10 +206,13 @@ struct TSDemuxer {
   }
 
   /// The end of the stream (a segment that's complete): the last frames on each stream.
-  mutating func flush() -> [DemuxedFrame] {
+  /// The rest, at the segment's end. `dropPartialVideo`: the segment was cut short before its end
+  /// came in, so the picture frame still being put together is only part there and is left out.
+  mutating func flush(dropPartialVideo: Bool = false) -> [DemuxedFrame] {
     var out: [DemuxedFrame] = []
     for (pid, data) in pending.sorted(by: { $0.key < $1.key }) where !data.isEmpty {
       guard let kind = streams[pid] else { continue }
+      if dropPartialVideo, kind == .h264 || kind == .hevc { continue }
       if kind == .id3 {
         readMetadata(data)
       } else {

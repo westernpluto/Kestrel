@@ -527,10 +527,10 @@ enum SegmentDemuxer {
     }
   }
 
-  mutating func flush() -> [DemuxedFrame] {
+  mutating func flush(dropPartialVideo: Bool = false) -> [DemuxedFrame] {
     switch self {
     case .ts(var demuxer):
-      let out = demuxer.flush()
+      let out = demuxer.flush(dropPartialVideo: dropPartialVideo)
       self = .ts(demuxer)
       return out
     case .mp4(var demuxer):

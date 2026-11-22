@@ -1111,7 +1111,13 @@ final class KestrelEngine: NSObject {
           handoffWaits.append((Date(), Date().timeIntervalSince(quiet)))
           if handoffWaits.count > 200 { handoffWaits.removeFirst(100) }
         }
-        first.frames += first.demuxer?.flush() ?? []
+        // Not joining up with the next one, the end didn't all come: the last picture frame is
+        // only part in (decoding it failed, -12909, and smeared the picture), so it's left out.
+        let joined = first.demuxer?.transportReach.flatMap { reach in
+          loads[1].demuxer?.transportStart.flatMap { SegmentDemuxer.joins(end: reach, next: $0, frame: frameLength) }
+        } ?? false
+        first.frames += first.demuxer?.flush(dropPartialVideo: !joined) ?? []
+        if !joined { loads[1].followsCut = true }
         let frames = first.frames
         first.frames = []
         for frame in frames { enqueue(frame, from: first) }
@@ -1177,13 +1183,16 @@ final class KestrelEngine: NSObject {
     // segment's frames don't count toward what's in hand until it's handed over: waiting the full
     // 0.8 s with about a second in hand ran it dry.) A small skip beats a stall.
     let inHand = clockRunning ? (bufferAhead ?? 0) : 0
-    return idle > Self.handOverWait || (idle > 0.25 && inHand < Self.handOverReserve)
+    return idle > handOverWait || (idle > 0.25 && inHand < Self.handOverReserve)
   }
 
   /// The longest a segment that doesn't yet join up with the next one is waited for (its end may
-  /// never come: a dropped connection, a gap in the stream itself), and the least kept in hand
-  /// while waiting.
-  static let handOverWait: TimeInterval = 0.8
+  /// never come: a dropped connection, a gap in the stream itself): the usual quiet between pieces
+  /// of video on this connection, with room for its spread. A fixed 0.8 s cut the end off the
+  /// segment being made on a route whose pieces come a second apart: a skip in the picture and
+  /// sound, and a half-received last frame that didn't decode, every few seconds.
+  private var handOverWait: TimeInterval { chunkGaps.late(floor: 0.6, ceiling: 1.6, initial: 0.8) }
+  /// The least kept in hand while waiting.
   static let handOverReserve: Double = 0.5
 
   private func enqueue(_ frame: DemuxedFrame, from load: SegmentLoad) {
@@ -1210,7 +1219,17 @@ final class KestrelEngine: NSObject {
         let time = timeline.lastUnmarkedSeam, let anchor
       {
         let info = load.demuxer?.twitchInfo
-        if let info, info.isAd {
+        if load.followsCut, !(info?.isAd ?? false) {
+          // The jump is the end of the segment before, cut short here (it didn't all come in
+          // time), not the broadcast: said now and then, and not counted against the streamer.
+          cutsSinceSaid += 1
+          if Date().timeIntervalSince(cutSaidAt) > 60 {
+            ActivityLog.shared.add(
+              "Kestrel player: the end of the segment being made didn't come in time, went on without it (\(cutsSinceSaid) since last noted here; waits up to \(String(format: "%.1f", handOverWait)) s)")
+            cutSaidAt = Date()
+            cutsSinceSaid = 0
+          }
+        } else if let info, info.isAd {
           let date = anchor.date.addingTimeInterval(Double(time - anchor.time) / Double(Self.clock))
           unannouncedSeam = (date, Date())
           ActivityLog.shared.add(
@@ -1902,6 +1921,9 @@ final class KestrelEngine: NSObject {
   /// At most one jump every few seconds.
   private var jumpAfterAdUntil: Date?
   private var lastAdJump = Date.distantPast
+  /// Segments started after the one before was cut short, and when that was last said.
+  private var cutsSinceSaid = 0
+  private var cutSaidAt = Date.distantPast
 
   private func jumpAfterAd(ahead: Double) {
     let now = Date()
@@ -1917,12 +1939,16 @@ final class KestrelEngine: NSObject {
     guard now.timeIntervalSince(sourceChangedAt) > 4 else { return }
     // During a break, two seconds more kept in hand than the usual margin: another switch can
     // come at any moment, with a gap of about that much before its video arrives.
-    let cushion = inAdBreak ? 2.0 : 0
+    // And as much again as the video's longest pause lately: jumping on what came in a rush ran
+    // it dry in the pause after (three jumps after a break, each followed by a stall).
+    let cushion = (inAdBreak ? 2.0 : 0) + longestArrivalGap
     let surplus = ahead - catchUp.targetBuffer - cushion - (deliversWhole ? Self.segmentLength : 0)
     // Under a second is caught up by playing a little faster instead (a few seconds, not
     // noticed): a jump that small was a visible hitch in the picture and the sound for very little.
     guard surplus > 1.0, surplus < 20 else { return }
     lastAdJump = now
+    // Back from the break: one jump, the rest caught up by playing a little faster.
+    if !inAdBreak { jumpAfterAdUntil = nil }
     jump(by: surplus)
     ActivityLog.shared.add(
       String(format: "Kestrel player: %@, skipped %.2f s ahead to live (no catching up)", inAdBreak ? "ad break" : "back from the ad", surplus))
@@ -2529,6 +2555,8 @@ final class SegmentLoad {
   var skip = 0
   /// Handed over to the next segment before its download closed (its end is ignored).
   var handedOver = false
+  /// The segment before this one was cut short (its end didn't come in time).
+  var followsCut = false
   /// Unpacked, not yet handed to the renderers.
   var frames: [DemuxedFrame] = [] {
     didSet {
