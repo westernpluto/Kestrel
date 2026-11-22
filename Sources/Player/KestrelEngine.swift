@@ -1757,7 +1757,25 @@ final class KestrelEngine: NSObject {
   /// screen: VideoToolbox decodes every frame it can and goes on normally after.
   private var decodeHereAtKeyframe = false
 
+  /// When the broadcast itself skipped lately (see `broadcastUnsteady`).
+  private var skips: [Date] = []
+  private var unsteadyNoted = Date.distantPast
+
+  /// The broadcast is breaking up on its way to Twitch (the streamer's upload, or Twitch's own
+  /// servers): several skips in the stream itself within a minute, whatever this connection does.
+  /// Stalls then aren't this connection's, and a lower quality doesn't help.
+  var broadcastUnsteady: Bool { recentSkips >= 3 }
+  var recentSkips: Int { skips.filter { Date().timeIntervalSince($0) < 60 }.count }
+
   private func streamSkipped() {
+    let now = Date()
+    skips.append(now)
+    skips.removeAll { now.timeIntervalSince($0) > 60 }
+    if broadcastUnsteady, now.timeIntervalSince(unsteadyNoted) > 120 {
+      unsteadyNoted = now
+      ActivityLog.shared.add(
+        "Kestrel player: the broadcast itself is unsteady (\(recentSkips) skips in the last minute): the streamer's side or Twitch's, not your connection; the quality stays")
+    }
     guard decodeInLayer, !decodingHereByRequest else { return }
     decodeHereAtKeyframe = true
   }
@@ -1978,7 +1996,8 @@ final class KestrelEngine: NSObject {
     // Just after the video switched to or from an ad-free copy (or during an ad break, when Twitch
     // sends whole segments): the gap at the switch isn't the connection's. Judged across it, a
     // switch to a copy stepped the quality down ("70% of real time") on a connection that was fine.
-    if inAdBreak || at.timeIntervalSince(sourceChangedAt) < Self.sourceChangeGrace {
+    // (Nor while the broadcast itself is breaking up: its gaps aren't the connection's.)
+    if inAdBreak || broadcastUnsteady || at.timeIntervalSince(sourceChangedAt) < Self.sourceChangeGrace {
       paceHistory = []
       slowSince = nil
       return
@@ -2070,9 +2089,11 @@ final class KestrelEngine: NSObject {
       let quietBefore = (sinceArrival ?? 0) - heldUp
       let excused = twitchsDoing || screenMoved || atSwitch || ((heldUp > 0 || atLifecycle) && quietBefore < 1.0)
       if excused { why.append("not learned") }
+      // (The broadcast itself breaking up: a bigger margin rides that out, a lower quality doesn't.)
+      if broadcastUnsteady { why.append("the broadcast itself unsteady") }
       ActivityLog.shared.add("Kestrel player: ran out of video (\(why.joined(separator: ", ")))")
       catchUp.stalled(learn: !excused)
-      if !excused, autoQuality, fit.stalled(), fit.step < renditions.count {
+      if !excused, !broadcastUnsteady, autoQuality, fit.stalled(), fit.step < renditions.count {
         applyFit()
         ActivityLog.shared.add("Kestrel player: stalling at this quality; one lower for now (trying again in a few minutes)")
       }

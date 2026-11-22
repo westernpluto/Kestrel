@@ -567,6 +567,9 @@ final class KestrelController {
         value: String(format: "%.1f s", engine.catchUp.targetBuffer)
           + (engine.wholeSegments ? " (channel not on low latency: video in 2 s pieces)" : "")))
     lines.append(StatLine(label: "Stalls", value: "\(engine.stalls)"))
+    if engine.broadcastUnsteady {
+      lines.append(StatLine(label: "Broadcast", value: "unsteady: \(engine.recentSkips) skips in the last minute (the streamer's side or Twitch's, not yours)"))
+    }
     lines.append(
       StatLine(
         label: "Sync",

@@ -626,6 +626,10 @@ final class ChatController: ObservableObject {
       while !Task.isCancelled {
         try? await Task.sleep(nanoseconds: 30_000_000_000)
         guard !Task.isCancelled, let self, self.socket === task else { return }
+        // (Not while the app's in the background: iOS holds the app still there, the answer can't
+        // come in time, and chat "stopped answering" every few minutes, connecting again each time.
+        // Checked again once back.)
+        if UIApplication.shared.applicationState == .background { continue }
         // (Whichever comes first: the answer, or the time limit. A dead connection may never answer.)
         let limit = self.pingTimes.late(floor: 3, ceiling: 10, initial: 8)
         let times = self.pingTimes
@@ -641,7 +645,9 @@ final class ChatController: ObservableObject {
           DispatchQueue.main.asyncAfter(deadline: .now() + limit) { once.run { continuation.resume(returning: false) } }
         }
         guard !Task.isCancelled, self.socket === task else { return }
-        if !answered {
+        // (The app held still meanwhile, gone to the background or suspended: no verdict.)
+        let heldStill = Date().timeIntervalSince(sent) > limit + 2 || UIApplication.shared.applicationState == .background
+        if !answered, !heldStill {
           ActivityLog.shared.add("Chat: connection to #\(self.channel.login) stopped answering; connecting again")
           task.cancel(with: .goingAway, reason: nil)
           self.socket = nil
