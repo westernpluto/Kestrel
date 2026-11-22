@@ -92,6 +92,16 @@ enum MasterPlaylistFetch {
           NearbyPlaylists.learn(fromMaster: text, base: url)
           return Result(text: text, url: url, route: .twitchAdFree(reason))
         }
+        // Asked again with twitch.tv's own integrity proof: without it, Twitch's session said
+        // "subscriber no" for a subscribed account.
+        if let verified = await tokens.verifiedStreamToken(login: login, playerType: playerType, platform: "web"),
+          let reason = verified.adFreeReason
+        {
+          log.add("Twitch shows you no ads on this channel (\(reason), once asked with twitch.tv's own check): playing straight from Twitch")
+          let (text, url) = try await usher(login: login, token: verified, codecs: codecs, lowLatency: lowLatency, http: http)
+          NearbyPlaylists.learn(fromMaster: text, base: url)
+          return Result(text: text, url: url, route: .twitchAdFree(reason))
+        }
         // (What Twitch's session itself says, to tell why: whether it knows you're subscribed.)
         let info = token?.info
         func flag(_ value: Bool?) -> String { value.map { $0 ? "yes" : "no" } ?? "not said" }

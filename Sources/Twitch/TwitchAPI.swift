@@ -662,6 +662,46 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     throw lastError
   }
 
+  /// The website's integrity headers, from the app (it gets them from an invisible twitch.tv
+  /// page), waiting at most the given seconds; nil if none in time.
+  var integrityHeaders: (@Sendable (_ wait: Double) async -> [String: String]?)? {
+    get { lock.lock(); defer { lock.unlock() }; return _integrityHeaders }
+    set { lock.lock(); _integrityHeaders = newValue; lock.unlock() }
+  }
+  private var _integrityHeaders: (@Sendable (_ wait: Double) async -> [String: String]?)?
+  /// Channels where the verified session still allowed ads, and when (not asked again for a while).
+  private var unverifiable: [String: Date] = [:]
+  private func verifiedLately(failed login: String) -> Bool {
+    lock.lock(); defer { lock.unlock() }
+    return unverifiable[login].map { Date().timeIntervalSince($0) < 1800 } ?? false
+  }
+  private func noteUnverifiable(_ login: String) {
+    lock.lock(); unverifiable[login] = Date(); lock.unlock()
+  }
+
+  func verifiedStreamToken(login: String, playerType: String, platform: String) async -> PlaybackToken? {
+    let login = login.lowercased()
+    guard TwitchAuth.shared.session != nil, !verifiedLately(failed: login), let provide = integrityHeaders,
+      let headers = await provide(4)
+    else { return nil }
+    let body: [String: Any] = [
+      "operationName": "PlaybackAccessToken",
+      "extensions": ["persistedQuery": ["version": 1, "sha256Hash": Self.playbackAccessTokenHash] as [String: Any]],
+      "variables": [
+        "isLive": true, "login": login, "isVod": false, "vodID": "", "playerType": playerType, "platform": platform,
+      ] as [String: Any],
+    ]
+    guard var request = try? request(body: body) else { return nil }
+    for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
+    request.setValue("https://www.twitch.tv", forHTTPHeaderField: "Origin")
+    request.setValue("https://www.twitch.tv/", forHTTPHeaderField: "Referer")
+    let t = (try? await perform(request, via: playbackHTTP))?["streamPlaybackAccessToken"]
+    guard let value = t?["value"].string, let signature = t?["signature"].string else { return nil }
+    let token = PlaybackToken(value: value, signature: signature)
+    if token.adFreeReason == nil { noteUnverifiable(login) }
+    return token
+  }
+
   // MARK: Account
 
   /// Whether the signed-in account is subscribed to the channel (nil: not signed in, or Twitch

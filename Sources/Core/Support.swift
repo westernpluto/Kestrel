@@ -267,10 +267,15 @@ protocol PlaybackTokenProvider: Sendable {
   /// Whether the signed-in account is subscribed to the channel (nil: not signed in, or it
   /// couldn't be told).
   func subscribed(to login: String) async -> Bool?
+  /// A session asked for the way twitch.tv itself asks, with its integrity proof: Twitch didn't
+  /// count a subscription without it ("subscriber no"). Nil when that can't be had (not signed
+  /// in, no proof in time) or didn't help on this channel lately.
+  func verifiedStreamToken(login: String, playerType: String, platform: String) async -> PlaybackToken?
 }
 
 extension PlaybackTokenProvider {
   func subscribed(to login: String) async -> Bool? { nil }
+  func verifiedStreamToken(login: String, playerType: String, platform: String) async -> PlaybackToken? { nil }
 }
 
 enum Usher {
