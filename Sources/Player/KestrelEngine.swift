@@ -1193,7 +1193,12 @@ final class KestrelEngine: NSObject {
   /// of video on this connection, with room for its spread. A fixed 0.8 s cut the end off the
   /// segment being made on a route whose pieces come a second apart: a skip in the picture and
   /// sound, and a half-received last frame that didn't decode, every few seconds.
-  private var handOverWait: TimeInterval { chunkGaps.late(floor: 0.6, ceiling: 1.6, initial: 0.8) }
+  /// (The pieces of a single download come milliseconds apart, so the connection's gaps alone
+  /// learned 0.6 s; the segment being made pauses for longer between its frames: its longest
+  /// pause lately counts too.)
+  private var handOverWait: TimeInterval {
+    min(max(chunkGaps.late(floor: 0.6, ceiling: 1.6, initial: 0.8), longestArrivalGap * 1.2), 1.6)
+  }
   /// The least kept in hand while waiting.
   static let handOverReserve: Double = 0.5
 
@@ -1249,6 +1254,12 @@ final class KestrelEngine: NSObject {
     case .video(let video):
       // (Audio only: a picture frame from before the switch isn't shown.)
       if audioOnly { return }
+      // After a cut: the frames shown before this segment's first keyframe but decoded after it
+      // lean on the end that never came (-12909, a frame of smeared picture): left out.
+      if load.followsCut {
+        if load.firstKeyPTS == nil, video.isKeyframe { load.firstKeyPTS = video.pts }
+        if let key = load.firstKeyPTS, !video.isKeyframe, video.pts < key { return }
+      }
       let mapped = timeline.map(video.pts, isVideo: true)
       // The decode time moves with it (streams with B-frames decode in another order than they
       // show: each frame has both times, and the decoder needs the decode one).
@@ -2561,6 +2572,8 @@ final class SegmentLoad {
   var handedOver = false
   /// The segment before this one was cut short (its end didn't come in time).
   var followsCut = false
+  /// That segment's first keyframe's time (see `followsCut`).
+  var firstKeyPTS: Int64?
   /// The segments before this one were skipped at the start (to begin from the one being made).
   var followsSkip = false
   /// Unpacked, not yet handed to the renderers.
