@@ -2618,7 +2618,7 @@ enum TwitchEmoteStore {
 
 
 /// Runs only the first of the closures handed to it (from any thread).
-final class ResumeOnce: @unchecked Sendable {
+private final class ResumeOnce: @unchecked Sendable {
   private let lock = NSLock()
   private var done = false
   func run(_ body: () -> Void) {

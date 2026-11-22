@@ -69,8 +69,6 @@ enum MasterPlaylistFetch {
     http: HTTPClient, tokens: PlaybackTokenProvider, log: ActivityLog
   ) async throws -> Result {
     var token: PlaybackToken?
-    /// Subscribed to the channel (asked of Twitch apart from the playback session).
-    var subscribed = false
     if checkAccountFirst {
       async let subscription = tokens.subscribed(to: login)
       token = try? await tokens.streamToken(login: login, playerType: playerType, platform: "web")
@@ -80,51 +78,16 @@ enum MasterPlaylistFetch {
         NearbyPlaylists.learn(fromMaster: text, base: url)
         return Result(text: text, url: url, route: .twitchAdFree(reason))
       }
-      if token?.info?.signedIn == true, await subscription == true {
-        subscribed = true
-        // Subscribed, yet the session allows ads: asked again as the website's own player (a
-        // subscriber's ad-free viewing is surely honoured there).
-        if playerType != "site", let site = try? await tokens.streamToken(login: login, playerType: "site", platform: "web"),
-          let reason = site.adFreeReason
-        {
-          log.add("Twitch shows you no ads on this channel (\(reason), as the website's player): playing straight from Twitch")
-          let (text, url) = try await usher(login: login, token: site, codecs: codecs, lowLatency: lowLatency, http: http)
-          NearbyPlaylists.learn(fromMaster: text, base: url)
-          return Result(text: text, url: url, route: .twitchAdFree(reason))
-        }
-        // Asked again with twitch.tv's own integrity proof: without it, Twitch's session said
-        // "subscriber no" for a subscribed account.
-        let verified = await tokens.verifiedStreamToken(login: login, playerType: playerType, platform: "web")
-        if let verified, let reason = verified.adFreeReason {
-          log.add("Twitch shows you no ads on this channel (\(reason), once asked with twitch.tv's own check): playing straight from Twitch")
-          let (text, url) = try await usher(login: login, token: verified, codecs: codecs, lowLatency: lowLatency, http: http)
-          NearbyPlaylists.learn(fromMaster: text, base: url)
-          return Result(text: text, url: url, route: .twitchAdFree(reason))
-        }
-        // Still not: the session twitch.tv's own player gets on the channel's page (the website
-        // said the sub is ad-free while every session asked for here said "subscriber no").
-        let site = await tokens.siteStreamToken(login: login)
-        if let site, let reason = site.adFreeReason {
-          log.add("Twitch shows you no ads on this channel (\(reason), the session twitch.tv's own player got): playing straight from Twitch")
-          let (text, url) = try await usher(login: login, token: site, codecs: codecs, lowLatency: lowLatency, http: http)
-          NearbyPlaylists.learn(fromMaster: text, base: url)
-          return Result(text: text, url: url, route: .twitchAdFree(reason))
-        }
-        // (What Twitch's session itself says, to tell why: whether it knows you're subscribed.)
-        let info = token?.info
-        func flag(_ value: Bool?) -> String { value.map { $0 ? "yes" : "no" } ?? "not said" }
-        log.add(
-          "You're subscribed to \(login), but Twitch's session for this stream still allows ads: playing straight from Twitch (no ad-free server), any ad Twitch slips in handled here. "
-            + "Twitch's session says: subscriber \(flag(info?.subscriber)), show ads \(flag(info?.showAds)), hide ads \(flag(info?.hideAds)), server ads \(flag(info?.serverAds)). "
-            + (verified.map { "Asked with twitch.tv's own check too: subscriber \(flag($0.info?.subscriber)), show ads \(flag($0.info?.showAds))" }
-              ?? "twitch.tv's own check wasn't to hand (not in time, or it didn't help here lately)")
-            + (site.map { ". twitch.tv's own player got: subscriber \(flag($0.info?.subscriber)), show ads \(flag($0.info?.showAds))" }
-              ?? ". twitch.tv's own player's session wasn't to hand"))
+      // Subscribed: a sub is ad-free, so it plays straight from Twitch and nothing of Kestrel's
+      // ad handling runs, whatever Twitch's playback session says about ads.
+      if let token, token.info?.signedIn == true, await subscription == true {
+        log.add("Subscribed to \(login): playing straight from Twitch, no ad handling")
+        let (text, url) = try await usher(login: login, token: token, codecs: codecs, lowLatency: lowLatency, http: http)
+        NearbyPlaylists.learn(fromMaster: text, base: url)
+        return Result(text: text, url: url, route: .twitchAdFree("subscribed"))
       }
     }
-    // (Subscribed: never through an ad-free server, a far one at that, for a channel that's
-    // yours ad-free; anything Twitch slips in is handled as usual.)
-    if !proxies.isEmpty, !subscribed {
+    if !proxies.isEmpty {
       // Meanwhile, unless it's known already: which playlist server Twitch would use for this
       // viewer directly (asked in parallel, so it costs no time).
       let known = token

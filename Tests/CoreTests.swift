@@ -1564,24 +1564,8 @@ func testAccountRoute() {
     check(!http.requested.contains("proxy.test"), "no proxy request: \(http.requested)")
     check(log.messages.contains { $0.contains("playing straight from Twitch") }, "\(log.messages)")
   }
-  // Subscribed, but the session allows ads: asked again as the website's player, which is ad-free.
-  runAsync {
-    let twitch = FakeTwitch()
-    twitch.signedInWithAds = true
-    twitch.siteAdFree = true
-    twitch.subscribedAnswer = true
-    let http = ProxyFake(twitch)
-    var config = LowLatencyConfig()
-    config.adFreeProxies = ["proxy.test"]
-    config.checkAccountFirst = true
-    let session = LowLatencySession(login: "streamer", config: config, http: http, tokens: twitch, log: ActivityLog())
-    _ = try! await session.start()
-    let route = await session.route
-    check(route == .twitchAdFree("subscribed"), "the website player's session: \(route)")
-    check(twitch.tokenRequests == ["popout", "site"], "asked again as the website: \(twitch.tokenRequests)")
-    check(!http.requested.contains("proxy.test"), "no ad-free server: \(http.requested)")
-  }
-  // Subscribed, and ads possible either way: straight from Twitch, never through an ad-free server.
+  // Subscribed, whatever Twitch's session says about ads: straight from Twitch, one session
+  // asked for, no ad-free server and no ad handling.
   runAsync {
     let twitch = FakeTwitch()
     twitch.signedInWithAds = true
@@ -1594,9 +1578,10 @@ func testAccountRoute() {
     let session = LowLatencySession(login: "streamer", config: config, http: http, tokens: twitch, log: log)
     _ = try! await session.start()
     let route = await session.route
-    check(route == .twitch, "straight from Twitch: \(route)")
+    check(route == .twitchAdFree("subscribed"), "straight from Twitch, no ad handling: \(route)")
+    check(twitch.tokenRequests == ["popout"], "one session: \(twitch.tokenRequests)")
     check(!http.requested.contains("proxy.test"), "no ad-free server for a sub: \(http.requested)")
-    check(log.messages.contains { $0.contains("You're subscribed") }, "said: \(log.messages)")
+    check(log.messages.contains { $0.contains("Subscribed to streamer") }, "said: \(log.messages)")
   }
   // Signed in without a sub: the token says ads are possible, so the server is used, and the
   // token already fetched is reused if the servers fail.

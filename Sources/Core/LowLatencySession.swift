@@ -315,6 +315,12 @@ actor LowLatencySession: PlaylistSource {
       return (status, "")
     }
 
+    // Ad-free for this account (Twitch says so, or subscribed): Twitch's stream as it comes,
+    // nothing of the ad handling.
+    if case .twitchAdFree = route {
+      return serve(index, LowLatencyPlaylist.filter(main.text, base: main.url, dropPrefetch: false))
+    }
+
     if main.playlist.isClean {
       if inBreak { endBreak() }
       let marker = main.playlist.adMarkerActive

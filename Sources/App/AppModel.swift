@@ -188,7 +188,6 @@ final class AppSettings: ObservableObject {
     proxyPassword = SecretStore.get("proxy").flatMap { String(data: $0, encoding: .utf8) } ?? ""
     proxyPlaylists = ProxyPlaylists(rawValue: defaults.string(forKey: "proxyPlaylistsMode") ?? "") ?? .duringAds
     initialized = true
-    Self.provideIntegrity()
     applyProxy()
   }
 
@@ -252,26 +251,6 @@ final class AppSettings: ObservableObject {
   func applyProxy() {
     guard initialized else { return }
     TwitchAPI.shared.playbackHTTP = playbackProxy.map { URLSessionHTTPClient(timeout: 12, proxy: $0) }
-  }
-
-  /// Hands the API twitch.tv's integrity headers for playback sessions (see
-  /// `TwitchAPI.verifiedStreamToken`): at most `wait` seconds; still fetched after that, ready
-  /// for the next time.
-  static func provideIntegrity() {
-    TwitchAPI.shared.siteToken = { login, wait in
-      await TwitchSiteToken.shared.token(login: login, wait: wait)
-    }
-    TwitchAPI.shared.integrityHeaders = { wait in
-      let fetch = Task { @MainActor in try? await TwitchIntegrity.shared.headers() }
-      return await withCheckedContinuation { (continuation: CheckedContinuation<[String: String]?, Never>) in
-        let once = ResumeOnce()
-        Task {
-          let headers = await fetch.value
-          once.run { continuation.resume(returning: headers) }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { once.run { continuation.resume(returning: nil) } }
-      }
-    }
   }
 
   /// Twitch's `supported_codecs`: everything this device decodes in hardware.

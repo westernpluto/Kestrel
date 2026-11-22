@@ -225,7 +225,7 @@ final class TwitchIntegrity: NSObject {
     switch result {
     case .success(let grant):
       self.grant = grant
-      ActivityLog.shared.add("Twitch integrity token received (twitch.tv's own check, for following and playback)")
+      ActivityLog.shared.add("Twitch integrity token received (for following)")
       continuations.forEach { $0.resume(returning: grant.headers) }
     case .failure(let error):
       ActivityLog.shared.add("Couldn't get a Twitch integrity token: \(error.localizedDescription)")
