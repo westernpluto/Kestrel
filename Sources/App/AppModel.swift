@@ -258,6 +258,9 @@ final class AppSettings: ObservableObject {
   /// `TwitchAPI.verifiedStreamToken`): at most `wait` seconds; still fetched after that, ready
   /// for the next time.
   static func provideIntegrity() {
+    TwitchAPI.shared.siteToken = { login, wait in
+      await TwitchSiteToken.shared.token(login: login, wait: wait)
+    }
     TwitchAPI.shared.integrityHeaders = { wait in
       let fetch = Task { @MainActor in try? await TwitchIntegrity.shared.headers() }
       return await withCheckedContinuation { (continuation: CheckedContinuation<[String: String]?, Never>) in

@@ -101,6 +101,15 @@ enum MasterPlaylistFetch {
           NearbyPlaylists.learn(fromMaster: text, base: url)
           return Result(text: text, url: url, route: .twitchAdFree(reason))
         }
+        // Still not: the session twitch.tv's own player gets on the channel's page (the website
+        // said the sub is ad-free while every session asked for here said "subscriber no").
+        let site = await tokens.siteStreamToken(login: login)
+        if let site, let reason = site.adFreeReason {
+          log.add("Twitch shows you no ads on this channel (\(reason), the session twitch.tv's own player got): playing straight from Twitch")
+          let (text, url) = try await usher(login: login, token: site, codecs: codecs, lowLatency: lowLatency, http: http)
+          NearbyPlaylists.learn(fromMaster: text, base: url)
+          return Result(text: text, url: url, route: .twitchAdFree(reason))
+        }
         // (What Twitch's session itself says, to tell why: whether it knows you're subscribed.)
         let info = token?.info
         func flag(_ value: Bool?) -> String { value.map { $0 ? "yes" : "no" } ?? "not said" }
@@ -108,7 +117,9 @@ enum MasterPlaylistFetch {
           "You're subscribed to \(login), but Twitch's session for this stream still allows ads: playing straight from Twitch (no ad-free server), any ad Twitch slips in handled here. "
             + "Twitch's session says: subscriber \(flag(info?.subscriber)), show ads \(flag(info?.showAds)), hide ads \(flag(info?.hideAds)), server ads \(flag(info?.serverAds)). "
             + (verified.map { "Asked with twitch.tv's own check too: subscriber \(flag($0.info?.subscriber)), show ads \(flag($0.info?.showAds))" }
-              ?? "twitch.tv's own check wasn't to hand (not in time, or it didn't help here lately)"))
+              ?? "twitch.tv's own check wasn't to hand (not in time, or it didn't help here lately)")
+            + (site.map { ". twitch.tv's own player got: subscriber \(flag($0.info?.subscriber)), show ads \(flag($0.info?.showAds))" }
+              ?? ". twitch.tv's own player's session wasn't to hand"))
       }
     }
     // (Subscribed: never through an ad-free server, a far one at that, for a channel that's

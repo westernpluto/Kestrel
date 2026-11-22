@@ -679,6 +679,30 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     lock.lock(); unverifiable[login] = Date(); lock.unlock()
   }
 
+  /// The channel page's own session, from the app (an invisible twitch.tv page), waiting at most
+  /// the given seconds.
+  var siteToken: (@Sendable (_ login: String, _ wait: Double) async -> PlaybackToken?)? {
+    get { lock.lock(); defer { lock.unlock() }; return _siteToken }
+    set { lock.lock(); _siteToken = newValue; lock.unlock() }
+  }
+  private var _siteToken: (@Sendable (_ login: String, _ wait: Double) async -> PlaybackToken?)?
+  private var siteUnhelpful: [String: Date] = [:]
+  private func siteLately(failed login: String) -> Bool {
+    lock.lock(); defer { lock.unlock() }
+    return siteUnhelpful[login].map { Date().timeIntervalSince($0) < 1800 } ?? false
+  }
+  private func noteSiteUnhelpful(_ login: String) {
+    lock.lock(); siteUnhelpful[login] = Date(); lock.unlock()
+  }
+
+  func siteStreamToken(login: String) async -> PlaybackToken? {
+    let login = login.lowercased()
+    guard TwitchAuth.shared.session != nil, !siteLately(failed: login), let provide = siteToken else { return nil }
+    let token = await provide(login, 8)
+    if token?.adFreeReason == nil { noteSiteUnhelpful(login) }
+    return token
+  }
+
   func verifiedStreamToken(login: String, playerType: String, platform: String) async -> PlaybackToken? {
     let login = login.lowercased()
     guard TwitchAuth.shared.session != nil, !verifiedLately(failed: login), let provide = integrityHeaders,
