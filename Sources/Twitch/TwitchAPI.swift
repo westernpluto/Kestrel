@@ -794,6 +794,7 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     let term = searchTerm.trimmingCharacters(in: .whitespaces)
     if !term.isEmpty { input["searchTerm"] = String(term.prefix(100)) }
     let body: [String: Any] = [
+      "operationName": "sendGifMessage",
       "query":
         "mutation sendGifMessage($input: SendGifMessageInput!) { sendGifMessage(input: $input) { error secondsUntilCanSend message { id } } }",
       "variables": ["input": input],
@@ -814,7 +815,12 @@ final class TwitchAPI: PlaybackTokenProvider, @unchecked Sendable {
     let json = JSONValue(object)
     let result = json["data"]["sendGifMessage"]
     if result.isNull {
+      let code = json["errors"][0]["extensions"]["code"].string
       let message = json["errors"][0]["message"].string ?? json["message"].string ?? "Twitch sent no answer (HTTP \(response.statusCode))"
+      // A refused integrity check is an answer to retry on, not a failure.
+      if code == "IntegrityCheckFailed" || message.localizedCaseInsensitiveContains("integrity") {
+        return GifSendResult(sent: false, error: "IntegrityCheckFailed", secondsUntilCanSend: 0, raw: String(message.prefix(400)))
+      }
       throw TwitchAPIError.gql(message)
     }
     let error = result["error"].string.flatMap { $0.isEmpty ? nil : $0 }

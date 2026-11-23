@@ -45,5 +45,8 @@ struct GifMemory: Codable, Equatable, Sendable {
 
   func sentHere(_ channel: String) -> [Sent] { sent[channel] ?? [] }
 
+  /// Every refusal forgotten (they were sends without the integrity proof, all turned down).
+  mutating func forgetRefused() { refused = [:] }
+
   func isRefused(_ id: String, channel: String) -> Bool { refused[channel]?.contains(id) ?? false }
 }

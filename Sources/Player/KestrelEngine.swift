@@ -1257,9 +1257,12 @@ final class KestrelEngine: NSObject {
       if audioOnly { return }
       // After a cut: the frames shown before this segment's first keyframe but decoded after it
       // lean on the end that never came (-12909, a frame of smeared picture): left out.
+      // (And anything of it before that keyframe: a segment that doesn't begin on one leans on
+      // the missing end just the same.)
       if load.followsCut {
         if load.firstKeyPTS == nil, video.isKeyframe { load.firstKeyPTS = video.pts }
-        if let key = load.firstKeyPTS, !video.isKeyframe, video.pts < key { return }
+        guard let key = load.firstKeyPTS else { return }
+        if !video.isKeyframe, video.pts < key { return }
       }
       let mapped = timeline.map(video.pts, isVideo: true)
       // The decode time moves with it (streams with B-frames decode in another order than they

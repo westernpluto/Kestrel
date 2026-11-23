@@ -72,8 +72,15 @@ final class GifKeyboardModel: ObservableObject {
   @Published private(set) var sentHere: [Gif] = []
   private static let memoryKey = "kestrel.gifMemory"
   private var memory: GifMemory = {
-    guard let data = UserDefaults.standard.data(forKey: memoryKey), let saved = try? JSONDecoder().decode(GifMemory.self, from: data)
+    guard let data = UserDefaults.standard.data(forKey: memoryKey), var saved = try? JSONDecoder().decode(GifMemory.self, from: data)
     else { return GifMemory() }
+    // Once: the GIFs hidden as refused were turned down for the missing integrity proof, not
+    // for themselves.
+    if !UserDefaults.standard.bool(forKey: "kestrel.gifRefusedReset1") {
+      UserDefaults.standard.set(true, forKey: "kestrel.gifRefusedReset1")
+      saved.forgetRefused()
+      if let data = try? JSONEncoder().encode(saved) { UserDefaults.standard.set(data, forKey: memoryKey) }
+    }
     return saved
   }()
   @Published private(set) var loading = false
@@ -216,20 +223,16 @@ final class GifKeyboardModel: ObservableObject {
     Task {
       defer { sending = false }
       do {
-        var result: TwitchAPI.GifSendResult
-        do {
-          result = try await TwitchAPI.shared.sendGif(
-            channelID: channelID, gifID: gif.id, gifURL: gif.url, searchTerm: term, headers: [:])
-        } catch TwitchAPIError.gql(let message) where message.localizedCaseInsensitiveContains("integrity") {
-          // A website sign-in: Twitch wants proof it's its own site, as for following.
-          var headers = try await TwitchIntegrity.shared.headers()
-          do {
+        // Always with twitch.tv's integrity proof, as its own client sends GIFs: sent without it,
+        // Twitch now turns every GIF down with a bare "ERROR" (no integrity error to retry on).
+        let proof = try? await TwitchIntegrity.shared.headers()
+        var result = try await TwitchAPI.shared.sendGif(
+          channelID: channelID, gifID: gif.id, gifURL: gif.url, searchTerm: term, headers: proof ?? [:])
+        if result.error == "ERROR" || result.error == "IntegrityCheckFailed" {
+          // A stale proof is refused the same way: once more with a fresh one.
+          if let fresh = try? await TwitchIntegrity.shared.headers(refresh: true) {
             result = try await TwitchAPI.shared.sendGif(
-              channelID: channelID, gifID: gif.id, gifURL: gif.url, searchTerm: term, headers: headers)
-          } catch TwitchAPIError.gql(let message) where message.localizedCaseInsensitiveContains("integrity") {
-            headers = try await TwitchIntegrity.shared.headers(refresh: true)
-            result = try await TwitchAPI.shared.sendGif(
-              channelID: channelID, gifID: gif.id, gifURL: gif.url, searchTerm: term, headers: headers)
+              channelID: channelID, gifID: gif.id, gifURL: gif.url, searchTerm: term, headers: fresh)
           }
         }
         if result.secondsUntilCanSend > 0 { startWait(result.secondsUntilCanSend) }
